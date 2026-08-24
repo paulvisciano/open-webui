@@ -1,0 +1,118 @@
+/*
+ * CSS design tokens for the Knowledge Graph canvas integration.
+ *
+ * Ported from the Knowledge Graph project's `src/app.css`. Contains the
+ * `@theme` block with cyber-* colors and the `:root` OKLCH semantic tokens.
+ * Animations and utility classes used by the canvas UI are included.
+ */
+
+@import "tailwindcss";
+
+@theme {
+  --color-cyber-bg: #0a0e17;
+  --color-cyber-surface: #111827;
+  --color-cyber-surface-2: #1a2235;
+  --color-cyber-border: #1e2d45;
+  --color-cyber-text: #c8d6e5;
+  --color-cyber-text-dim: #5a6b80;
+  --color-cyber-cyan: #00d4ff;
+  --color-cyber-cyan-dim: #007a99;
+  --color-cyber-purple: #a855f7;
+  --color-cyber-purple-dim: #6b21a8;
+  --color-cyber-green: #00ff88;
+  --color-cyber-green-dim: #00804a;
+  --color-cyber-orange: #ff8c00;
+  --color-cyber-red: #ff3366;
+  --color-cyber-yellow: #ffd600;
+  --font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+  --font-sans: "Inter", "SF Pro Display", system-ui, sans-serif;
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+
+    /* Semantic oklch tokens — matches NodeOverlay / CanvasView system */
+    --bg:          oklch(6% 0.02 260);
+    --fg:          oklch(90% 0.005 250);
+    --muted:       oklch(65% 0.02 255);
+    --faint:       oklch(55% 0.02 255);
+    --accent:      oklch(82% 0.14 210);
+    --accent-dim:  oklch(82% 0.14 210 / 18%);
+    --accent-purple: oklch(72% 0.16 295);
+    --accent-purple-dim: oklch(72% 0.16 295 / 18%);
+    --success:     oklch(72% 0.15 150);
+    --danger:      oklch(62% 0.20 18);
+    --glass:       oklch(16% 0.015 255 / 45%);
+    --glass-light: oklch(20% 0.015 255 / 30%);
+    --hairline:    oklch(50% 0.03 255 / 8%);
+
+    --font-display: 'Iowan Old Style', 'Charter', Georgia, 'SF Pro Display', serif;
+    --font-body:    -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  }
+}
+
+@utility glow-cyan {
+  box-shadow: 0 0 15px rgba(0, 212, 255, 0.3), 0 0 30px rgba(0, 212, 255, 0.1);
+}
+
+@utility glow-purple {
+  box-shadow: 0 0 15px rgba(168, 85, 247, 0.3), 0 0 30px rgba(168, 85, 247, 0.1);
+}
+
+@utility glow-green {
+  box-shadow: 0 0 15px rgba(0, 255, 136, 0.3), 0 0 30px rgba(0, 255, 136, 0.1);
+}
+
+@utility text-glow-cyan {
+  text-shadow: 0 0 10px rgba(0, 212, 255, 0.5), 0 0 20px rgba(0, 212, 255, 0.2);
+}
+
+@utility text-glow-purple {
+  text-shadow: 0 0 10px rgba(168, 85, 247, 0.5), 0 0 20px rgba(168, 85, 247, 0.2);
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+@keyframes scan-line {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(100vh); }
+}
+
+@keyframes data-flow {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+
+@keyframes fade-in-up {
+  0% { opacity: 0; transform: translateY(10px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slide-in-right {
+  0% { opacity: 0; transform: translateX(20px); }
+  100% { opacity: 1; transform: translateX(0); }
+}
+
+@utility animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+@utility animate-scan {
+  animation: scan-line 4s linear infinite;
+}
+
+@utility animate-data-flow {
+  animation: data-flow 3s linear infinite;
+}
+
+@utility animate-fade-in-up {
+  animation: fade-in-up 0.3s ease-out forwards;
+}
+
+@utility animate-slide-in-right {
+  animation: slide-in-right 0.3s ease-out forwards;
+}

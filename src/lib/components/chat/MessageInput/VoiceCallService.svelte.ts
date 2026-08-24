@@ -1,0 +1,632 @@
+/**
+ * VoiceCallService — extracted from CallOverlay.svelte.
+ *
+ * Encapsulates the entire voice-call lifecycle: microphone recording,
+ * silence detection, transcription, TTS playback (browser / Kokoro /
+ * OpenAI), audio level analysis (RMS), and chat-event orchestration.
+ *
+ * Reactive state uses Svelte 5 runes ($state) so any consuming component
+ * can bind to the same values the old CallOverlay did.
+ *
+ * Usage:
+ *   const svc = new VoiceCallService({ eventTarget, submitPrompt, stopResponse, chatId, modelId });
+ *   await svc.start();
+ *   // ... svc.rmsLevel, svc.assistantSpeaking, svc.muted, etc. are reactive
+ *   await svc.stop();
+ */
+
+import { config, models, settings, TTSWorker } from '$lib/stores';
+import { get } from 'svelte/store';
+import { tick } from 'svelte';
+import type { Writable } from 'svelte/store';
+import type { i18n as i18nType } from 'i18next';
+
+import { blobToFile } from '$lib/utils';
+import { generateEmoji } from '$lib/apis';
+import { synthesizeOpenAISpeech, transcribeAudio } from '$lib/apis/audio';
+import { toast } from 'svelte-sonner';
+import { KokoroWorker } from '$lib/workers/KokoroWorker';
+import { WEBUI_API_BASE_URL } from '$lib/constants';
+
+const MIN_DECIBELS = -55;
+
+export interface VoiceCallOptions {
+	eventTarget: EventTarget;
+	submitPrompt: (content: string, opts?: any) => Promise<any>;
+	stopResponse: (processQueue?: boolean) => Promise<void>;
+	chatId: string;
+	modelId: string;
+}
+
+export interface VoiceMessage {
+	role: 'user' | 'assistant';
+	content: string;
+}
+
+export class VoiceCallService {
+	// ── Reactive state ($state) ────────────────────────────────────────
+	loading = $state(false);
+	confirmed = $state(false);
+	interrupted = $state(false);
+	assistantSpeaking = $state(false);
+	muted = $state(false);
+	emoji = $state<string | null>(null);
+	camera = $state(false);
+	chatStreaming = $state(false);
+	rmsLevel = $state(0);
+
+	transcript = $state('');
+	assistantText = $state('');
+	messageLog = $state<VoiceMessage[]>([]);
+
+	// ── Non-reactive internal state ────────────────────────────────────
+	private hasStartedSpeaking = false;
+	private mediaRecorder: MediaRecorder | false = false;
+	private audioStream: MediaStream | null = null;
+	private audioChunks: Blob[] = [];
+
+	private cameraStream: MediaStream | null = null;
+	videoInputDevices: MediaDeviceInfo[] = [];
+	selectedVideoInputDeviceId: string | null = null;
+
+	private finishedMessages: Record<string, boolean> = {};
+	private currentMessageId: string | null = null;
+	private currentUtterance: SpeechSynthesisUtterance | null = null;
+
+	private audioAbortController = new AbortController();
+	private audioCache = new Map<string, any>();
+	private emojiCache = new Map<string, string>();
+	private messages: Record<string, string[]> = {};
+
+	private model: any = null;
+	private wakeLock: any = null;
+
+	// Files can be set externally (e.g. for camera screenshots)
+	files: any[] = [];
+
+	private opts: VoiceCallOptions;
+
+	constructor(opts: VoiceCallOptions) {
+		this.opts = opts;
+	}
+
+	// ── Public API ─────────────────────────────────────────────────────
+
+	async start() {
+		this.model = get(models).find((m) => m.id === this.opts.modelId);
+		await this.initTTSWorker();
+		await this.startRecording();
+		this.attachChatListeners();
+		document.addEventListener('keydown', this.handleKeydown);
+		await this.acquireWakeLock();
+		document.addEventListener('visibilitychange', this.handleVisibilityChange);
+	}
+
+	private async initTTSWorker() {
+		const s = get(settings);
+		if (s?.audio?.tts?.engine === 'browser-kokoro' && !get(TTSWorker)) {
+			const worker = new KokoroWorker({
+				dtype: s?.audio?.tts?.engineConfig?.dtype ?? 'fp32'
+			});
+			TTSWorker.set(worker);
+			await worker.init();
+		}
+	}
+
+	async stop() {
+		await this.stopAllAudio();
+		await this.stopRecordingCallback(false);
+		await this.stopCamera();
+		await this.stopAudioStream();
+		this.detachChatListeners();
+		document.removeEventListener('keydown', this.handleKeydown);
+		document.removeEventListener('visibilitychange', this.handleVisibilityChange);
+		this.audioAbortController.abort();
+		this.releaseWakeLock();
+	}
+
+	toggleMute() {
+		this.muted = !this.muted;
+		if (this.muted && this.hasStartedSpeaking) {
+			this.hasStartedSpeaking = false;
+			this.confirmed = false;
+			this.audioChunks = [];
+			if (this.mediaRecorder && (this.mediaRecorder as MediaRecorder).state === 'recording') {
+				(this.mediaRecorder as MediaRecorder).stop();
+			}
+		}
+	}
+
+	// ── Video / Camera ─────────────────────────────────────────────────
+
+	async getVideoInputDevices() {
+		const devices = await navigator.mediaDevices.enumerateDevices();
+		this.videoInputDevices = devices.filter((d) => d.kind === 'videoinput');
+		if (!!navigator.mediaDevices.getDisplayMedia) {
+			this.videoInputDevices = [
+				...this.videoInputDevices,
+				{ deviceId: 'screen', label: 'Screen Share' } as any
+			];
+		}
+		if (this.selectedVideoInputDeviceId === null && this.videoInputDevices.length > 0) {
+			const saved = localStorage.getItem('selectedVideoInputDeviceId');
+			if (saved && this.videoInputDevices.some((d) => d.deviceId === saved)) {
+				this.selectedVideoInputDeviceId = saved;
+			} else {
+				this.selectedVideoInputDeviceId = this.videoInputDevices[0].deviceId;
+			}
+		}
+	}
+
+	async startCamera() {
+		await this.getVideoInputDevices();
+		if (this.cameraStream === null) {
+			this.camera = true;
+			try {
+				await this.startVideoStream();
+			} catch (err) {
+				console.error('Error accessing webcam: ', err);
+			}
+		}
+	}
+
+	async startVideoStream() {
+		const video = document.getElementById('camera-feed') as HTMLVideoElement | null;
+		if (!video) return;
+		if (this.selectedVideoInputDeviceId === 'screen') {
+			this.cameraStream = await navigator.mediaDevices.getDisplayMedia({
+				video: { cursor: 'always' },
+				audio: false
+			});
+		} else {
+			this.cameraStream = await navigator.mediaDevices.getUserMedia({
+				video: {
+					deviceId: this.selectedVideoInputDeviceId
+						? { exact: this.selectedVideoInputDeviceId }
+						: undefined
+				}
+			});
+		}
+		if (this.cameraStream) {
+			await this.getVideoInputDevices();
+			video.srcObject = this.cameraStream;
+			await video.play();
+		}
+	}
+
+	async stopVideoStream() {
+		if (this.cameraStream) {
+			this.cameraStream.getTracks().forEach((t) => t.stop());
+		}
+		this.cameraStream = null;
+	}
+
+	takeScreenshot(): string | void {
+		const video = document.getElementById('camera-feed') as HTMLVideoElement | null;
+		const canvas = document.getElementById('camera-canvas') as HTMLCanvasElement | null;
+		if (!canvas) return;
+		const ctx = canvas.getContext('2d')!;
+		canvas.width = video!.videoWidth;
+		canvas.height = video!.videoHeight;
+		ctx.drawImage(video!, 0, 0, video!.videoWidth, video!.videoHeight);
+		return canvas.toDataURL('image/png');
+	}
+
+	async stopCamera() {
+		await this.stopVideoStream();
+		this.camera = false;
+	}
+
+	// ── Recording + Transcription ──────────────────────────────────────
+
+	private transcribeHandler = async (audioBlob: Blob) => {
+		if (!audioBlob || audioBlob.size < 100) return;
+		await tick();
+		const file = blobToFile(audioBlob, 'recording.wav');
+		const res = await transcribeAudio(
+			localStorage.token,
+			file,
+			get(settings)?.audio?.stt?.language
+		).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		});
+		if (res?.text) {
+			this.transcript = res.text;
+			this.messageLog = [...this.messageLog, { role: 'user', content: res.text }];
+			if (res.text !== '') {
+				await this.opts.submitPrompt(res.text, { _raw: true });
+			}
+		}
+	};
+
+	private stopRecordingCallback = async (_continue = true) => {
+		const _audioChunks = this.audioChunks.slice(0);
+		this.audioChunks = [];
+		this.mediaRecorder = false;
+
+		if (_continue) {
+			this.startRecording();
+		}
+
+		if (this.confirmed) {
+			this.loading = true;
+			this.emoji = null;
+
+			if (this.cameraStream) {
+				const imageUrl = this.takeScreenshot();
+				if (imageUrl) {
+					this.files = [{ type: 'image', url: imageUrl }];
+				}
+			}
+
+			const audioBlob = new Blob(_audioChunks, { type: 'audio/wav' });
+			await this.transcribeHandler(audioBlob);
+			this.confirmed = false;
+			this.loading = false;
+		}
+	};
+
+	private startRecording = async () => {
+		if (!this.audioStream) {
+			this.audioStream = await navigator.mediaDevices.getUserMedia({
+				audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+			});
+		}
+
+		this.mediaRecorder = new MediaRecorder(this.audioStream);
+
+		this.mediaRecorder.onstart = () => {
+			this.audioChunks = [];
+		};
+
+		this.mediaRecorder.ondataavailable = (event) => {
+			if (this.hasStartedSpeaking) {
+				this.audioChunks.push(event.data);
+			}
+		};
+
+		this.mediaRecorder.onstop = () => {
+			this.stopRecordingCallback();
+		};
+
+		this.analyseAudio(this.audioStream);
+	};
+
+	stopAudioStream = async () => {
+		try {
+			if (this.mediaRecorder) {
+				(this.mediaRecorder as MediaRecorder).stop();
+			}
+		} catch (e) {
+			console.log('Error stopping audio stream:', e);
+		}
+		if (!this.audioStream) return;
+		this.audioStream.getAudioTracks().forEach((t) => t.stop());
+		this.audioStream = null;
+	};
+
+	// ── Audio Analysis (RMS) ───────────────────────────────────────────
+
+	private calculateRMS = (data: Uint8Array) => {
+		let sum = 0;
+		for (let i = 0; i < data.length; i++) {
+			const v = (data[i] - 128) / 128;
+			sum += v * v;
+		}
+		return Math.sqrt(sum / data.length);
+	};
+
+	private analyseAudio = (stream: MediaStream) => {
+		const audioContext = new AudioContext();
+		const source = audioContext.createMediaStreamSource(stream);
+		const analyser = audioContext.createAnalyser();
+		analyser.minDecibels = MIN_DECIBELS;
+		source.connect(analyser);
+
+		const domainData = new Uint8Array(analyser.frequencyBinCount);
+		const timeDomainData = new Uint8Array(analyser.fftSize);
+		let lastSoundTime = Date.now();
+		this.hasStartedSpeaking = false;
+
+		const processFrame = () => {
+			if (!this.mediaRecorder) return;
+
+			if (this.muted || (this.assistantSpeaking && !(get(settings)?.voiceInterruption ?? false))) {
+				analyser.maxDecibels = 0;
+				analyser.minDecibels = -1;
+			} else {
+				analyser.minDecibels = MIN_DECIBELS;
+				analyser.maxDecibels = -30;
+			}
+
+			analyser.getByteTimeDomainData(timeDomainData);
+			analyser.getByteFrequencyData(domainData);
+
+			this.rmsLevel = this.calculateRMS(timeDomainData);
+
+			if (this.muted || (this.assistantSpeaking && !(get(settings)?.voiceInterruption ?? false))) {
+				this.rmsLevel = 0;
+			}
+
+			const hasSound = domainData.some((v) => v > 0);
+			if (hasSound) {
+				if (this.mediaRecorder && (this.mediaRecorder as MediaRecorder).state !== 'recording') {
+					(this.mediaRecorder as MediaRecorder).start();
+				}
+				if (!this.hasStartedSpeaking) {
+					this.hasStartedSpeaking = true;
+					this.stopAllAudio();
+				}
+				lastSoundTime = Date.now();
+			}
+
+			if (this.hasStartedSpeaking) {
+				if (Date.now() - lastSoundTime > 2000) {
+					this.confirmed = true;
+					if (this.mediaRecorder) {
+						(this.mediaRecorder as MediaRecorder).stop();
+						return;
+					}
+				}
+			}
+
+			window.requestAnimationFrame(processFrame);
+		};
+
+		window.requestAnimationFrame(processFrame);
+	};
+
+	// ── TTS ────────────────────────────────────────────────────────────
+
+	private getVoiceId = () => {
+		if (this.model?.info?.meta?.tts?.voice) return this.model.info.meta.tts.voice;
+		const s = get(settings);
+		if (s?.audio?.tts?.defaultVoice === get(config)?.audio?.tts?.voice) {
+			return s?.audio?.tts?.voice ?? get(config)?.audio?.tts?.voice;
+		}
+		return get(config)?.audio?.tts?.voice;
+	};
+
+	private speakSpeechSynthesisHandler = (content: string) =>
+		new Promise<void>((resolve) => {
+			const loop = setInterval(async () => {
+				const voices = await speechSynthesis.getVoices();
+				if (voices.length === 0) return;
+				clearInterval(loop);
+				const voiceId = this.getVoiceId();
+				const voice = voices.find((v) => v.voiceURI === voiceId);
+				this.currentUtterance = new SpeechSynthesisUtterance(content);
+				this.currentUtterance.rate = get(settings)?.audio?.tts?.playbackRate ?? 1;
+				if (voice) this.currentUtterance.voice = voice;
+				speechSynthesis.speak(this.currentUtterance);
+				this.currentUtterance.onend = async () => {
+					await new Promise((r) => setTimeout(r, 200));
+					resolve();
+				};
+			}, 100);
+		});
+
+	private playAudio = (audio: any) =>
+		new Promise<void>((resolve) => {
+			const el = document.getElementById('audioElement') as HTMLAudioElement | null;
+			if (!el) return resolve();
+			el.src = audio.src;
+			el.muted = true;
+			el.playbackRate = get(settings)?.audio?.tts?.playbackRate ?? 1;
+			el.play()
+				.then(() => {
+					el.muted = false;
+				})
+				.catch(console.error);
+			el.onended = async () => {
+				await new Promise((r) => setTimeout(r, 100));
+				resolve();
+			};
+		});
+
+	stopAllAudio = async () => {
+		this.assistantSpeaking = false;
+		this.interrupted = true;
+		if (this.chatStreaming) {
+			await this.opts.stopResponse();
+		}
+		if (this.currentUtterance) {
+			speechSynthesis.cancel();
+			this.currentUtterance = null;
+		}
+		const el = document.getElementById('audioElement');
+		if (el) {
+			(el as HTMLAudioElement).muted = true;
+			(el as HTMLAudioElement).pause();
+			(el as HTMLAudioElement).currentTime = 0;
+		}
+	};
+
+	private fetchAudio = async (content: string) => {
+		if (!this.audioCache.has(content)) {
+			try {
+				const s = get(settings);
+				if (s?.showEmojiInCall ?? false) {
+					const em = await generateEmoji(
+						localStorage.token,
+						this.opts.modelId,
+						content,
+						this.opts.chatId
+					);
+					if (em) this.emojiCache.set(content, em);
+				}
+
+				if (s?.audio?.tts?.engine === 'browser-kokoro') {
+					const url = await get(TTSWorker)
+						?.generate({ text: content, voice: this.getVoiceId() })
+						.catch((e: any) => {
+							console.error(e);
+							toast.error(`${e}`);
+						});
+					if (url) {
+						this.audioCache.set(content, new Audio(url));
+					}
+				} else if (get(config)?.audio?.tts?.engine !== '') {
+					const res = await synthesizeOpenAISpeech(
+						localStorage.token,
+						this.getVoiceId(),
+						content
+					).catch((e) => {
+						console.error(e);
+						return null;
+					});
+					if (res) {
+						const blob = await res.blob();
+						this.audioCache.set(content, new Audio(URL.createObjectURL(blob)));
+					}
+				} else {
+					this.audioCache.set(content, true);
+				}
+			} catch (e) {
+				console.error('Error synthesizing speech:', e);
+			}
+		}
+		return this.audioCache.get(content);
+	};
+
+	private monitorAndPlayAudio = async (id: string, signal: AbortSignal) => {
+		while (!signal.aborted) {
+			if (this.messages[id] && this.messages[id].length > 0) {
+				const content = this.messages[id].shift()!;
+				if (this.audioCache.has(content)) {
+					const s = get(settings);
+					if ((s?.showEmojiInCall ?? false) && this.emojiCache.has(content)) {
+						this.emoji = this.emojiCache.get(content)!;
+					} else {
+						this.emoji = null;
+					}
+
+					if (s?.audio?.tts?.engine === 'browser-kokoro' || get(config)?.audio?.tts?.engine !== '') {
+						try {
+							const audio = this.audioCache.get(content);
+							await this.playAudio(audio);
+							await new Promise((r) => setTimeout(r, 200));
+						} catch (e) {
+							console.error('Error playing audio:', e);
+						}
+					} else {
+						await this.speakSpeechSynthesisHandler(content);
+					}
+				} else {
+					console.log('[voice-service] audio not cached yet, re-queueing', content.slice(0, 50));
+					this.messages[id].unshift(content);
+					await new Promise((r) => setTimeout(r, 200));
+				}
+			} else if (this.finishedMessages[id] && this.messages[id] && this.messages[id].length === 0) {
+				this.assistantSpeaking = false;
+				break;
+			} else {
+				await new Promise((r) => setTimeout(r, 200));
+			}
+		}
+	};
+
+	// ── Chat Event Handlers ────────────────────────────────────────────
+
+	private chatStartHandler = async (e: Event) => {
+		const { id } = (e as CustomEvent).detail;
+		this.chatStreaming = true;
+		if (this.currentMessageId !== id) {
+			this.currentMessageId = id;
+			this.assistantText = '';
+			this.messageLog = [...this.messageLog, { role: 'assistant', content: '' }];
+			this.audioAbortController.abort();
+			this.audioAbortController = new AbortController();
+			this.assistantSpeaking = true;
+			this.monitorAndPlayAudio(id, this.audioAbortController.signal);
+		}
+	};
+
+	private chatEventHandler = async (e: Event) => {
+		const { id, content } = (e as CustomEvent).detail;
+		if (this.currentMessageId === id) {
+			if (this.messages[id] === undefined) {
+				this.messages[id] = [content];
+			} else {
+				this.messages[id].push(content);
+			}
+			this.assistantText = (this.assistantText + ' ' + content).trim();
+			this.messageLog = this.messageLog.map((m, i) =>
+				i === this.messageLog.length - 1 && m.role === 'assistant'
+					? { ...m, content: this.assistantText }
+					: m
+			);
+			this.fetchAudio(content);
+		}
+	};
+
+	private chatFinishHandler = async (e: Event) => {
+		const { id } = (e as CustomEvent).detail;
+		this.finishedMessages[id] = true;
+		this.chatStreaming = false;
+		this.currentMessageId = null;
+	};
+
+	private attachChatListeners() {
+		this.opts.eventTarget.addEventListener('chat:start', this.chatStartHandler as EventListener);
+		this.opts.eventTarget.addEventListener('chat', this.chatEventHandler as EventListener);
+		this.opts.eventTarget.addEventListener('chat:finish', this.chatFinishHandler as EventListener);
+	}
+
+	private detachChatListeners() {
+		this.opts.eventTarget.removeEventListener('chat:start', this.chatStartHandler as EventListener);
+		this.opts.eventTarget.removeEventListener('chat', this.chatEventHandler as EventListener);
+		this.opts.eventTarget.removeEventListener('chat:finish', this.chatFinishHandler as EventListener);
+	}
+
+	// ── Wake Lock ──────────────────────────────────────────────────────
+
+	private acquireWakeLock = async () => {
+		if (!('wakeLock' in navigator)) return;
+		try {
+			this.wakeLock = await navigator.wakeLock.request('screen');
+			this.wakeLock?.addEventListener?.('release', () => console.log('Wake Lock released'));
+		} catch (err) {
+			console.log(err);
+		}
+	};
+
+	private handleVisibilityChange = async () => {
+		if (this.wakeLock !== null && document.visibilityState === 'visible') {
+			await this.acquireWakeLock();
+		}
+	};
+
+	private releaseWakeLock = async () => {
+		try {
+			await this.wakeLock?.release?.();
+		} catch {}
+		this.wakeLock = null;
+	};
+
+	// ── Keyboard ───────────────────────────────────────────────────────
+
+	private handleKeydown = (e: KeyboardEvent) => {
+		if (e.key === 'm' || e.key === 'M') {
+			const t = e.target as HTMLElement;
+			if (t.tagName !== 'INPUT' && t.tagName !== 'TEXTAREA' && !t.isContentEditable) {
+				e.preventDefault();
+				this.toggleMute();
+			}
+		}
+	};
+
+	// ── Helpers for UI ─────────────────────────────────────────────────
+
+	get modelImageUrl(): string {
+		return `${WEBUI_API_BASE_URL}/models/model/profile/image?id=${this.opts.modelId}&lang=en&voice=true`;
+	}
+
+	get statusText(): string {
+		if (this.loading) return 'thinking';
+		if (this.muted) return 'muted';
+		if (this.assistantSpeaking) return 'interrupt';
+		return 'listening';
+	}
+}

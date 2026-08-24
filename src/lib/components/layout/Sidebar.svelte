@@ -82,6 +82,7 @@
 	import ClockIcon from './Sidebar/icons/Clock.svelte';
 	import CodeIcon from './Sidebar/icons/Code.svelte';
 	import EditPencilIcon from './Sidebar/icons/EditPencil.svelte';
+	import GraphIcon from './Sidebar/icons/Graph.svelte';
 	import NotesIcon from './Sidebar/icons/Notes.svelte';
 	import SearchIcon from './Sidebar/icons/Search.svelte';
 	import Sidebar from '../icons/Sidebar.svelte';
@@ -94,7 +95,7 @@
 	import MobileSwipePanel from '../common/MobileSwipePanel.svelte';
 
 	const BREAKPOINT = 768;
-	const DEFAULT_PINNED_ITEMS = ['notes', 'workspace'];
+	const DEFAULT_PINNED_ITEMS = ['graph', 'notes', 'workspace'];
 
 	let scrollTop = 0;
 
@@ -156,6 +157,8 @@
 
 	const isMenuItemVisible = (id) => {
 		switch (id) {
+			case 'graph':
+				return $user?.role === 'admin' || ($user?.permissions?.features?.graph ?? true);
 			case 'notes':
 				return (
 					($config?.features?.enable_notes ?? false) &&
@@ -189,6 +192,7 @@
 
 	const getMenuItemMeta = (id) => {
 		const items = {
+			graph: { label: 'Graph', href: '/graph', iconType: 'graph' },
 			notes: { label: 'Notes', href: '/notes', iconType: 'note' },
 			workspace: { label: 'Workspace', href: '/workspace', iconType: 'workspace' },
 			automations: { label: 'Automations', href: '/automations', iconType: 'automations' },
@@ -199,6 +203,7 @@
 	};
 
 	const menuItemPathPrefixes = {
+		graph: '/graph',
 		notes: '/notes',
 		workspace: '/workspace',
 		calendar: '/calendar',
@@ -1050,7 +1055,9 @@
 													: 'bg-black/[0.035] dark:bg-white/[0.045]'
 												: 'group-hover:bg-gray-100 dark:group-hover:bg-gray-900'}"
 										>
-											{#if itemId === 'notes'}
+											{#if itemId === 'graph'}
+												<GraphIcon className="size-4" strokeWidth="1.5" />
+											{:else if itemId === 'notes'}
 												<NotesIcon className="size-4" strokeWidth="1.5" />
 											{:else if itemId === 'workspace'}
 												<WorkspaceIcon className="size-4" strokeWidth="1.5" />

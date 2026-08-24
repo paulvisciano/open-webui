@@ -1,0 +1,94 @@
+/**
+ * Type definitions for the infinite-canvas renderer.
+ *
+ * `CanvasNode` is the renderer-facing projection of a `KGNode`: it carries
+ * the graph identity plus the spatial layout (chunk + local offset) and the
+ * image-LOD URLs needed by `NodePlane`. `Layout.ts` (owned by Agent B) is
+ * responsible for turning `KGNode[]` into `CanvasNode[]`.
+ */
+import type { KGNode } from '../constants';
+
+/** The 6 built-in kinds. Extensible via the provider registry — new
+ *  document types (chat, pdf, …) register their own kind strings. */
+type BuiltinKind = 'photo' | 'note' | 'person' | 'location' | 'event' | 'concept';
+/** Open union: built-in kinds get autocomplete; the `& {}` brand keeps
+ *  TS from collapsing to `string` so provider-registered kinds are
+ *  assignable without a union edit. */
+export type NodeKind = BuiltinKind | (string & {});
+
+/**
+ * Per-kind renderer config consumed by `NodePlane`. Replaces the
+ * hard-coded `KIND_COLOR` map and `kind === 'photo'`/`'note'` branches.
+ */
+export interface PlaneConfig {
+  /** Base material color for non-textured planes (hex, e.g. 0xf5e9c8). */
+  readonly color: number;
+  /** How the plane gets its texture: 'url' = textureCache (photo),
+   *  'text' = local CanvasTexture (note/chat/pdf), 'none' = flat color. */
+  readonly textureSource: 'url' | 'text' | 'none';
+  /** Whether LOD thumb→full promotion applies (photo only). */
+  readonly lodEnabled: boolean;
+}
+
+/** Async-resolved content maps passed to `buildCanvasFields`. Mirrors
+ *  the `$state` maps in `graph.svelte.ts` (photoImages). */
+export interface BuildCtx {
+  readonly photoImages: Record<string, string>;
+}
+
+/**
+ * A node projected into canvas space. Mirrors `KGNode` identity but adds the
+ * spatial assignment (chunk coords + local offset) and image-LOD URLs that
+ * the renderer needs.
+ */
+export interface CanvasNode {
+  /** Original `KGNode.id`. */
+  readonly id: string;
+  /** Original `KGNode.labels` (Neo4j labels). */
+  readonly labels: string[];
+  /** Original `KGNode.properties`. */
+  readonly properties: Record<string, unknown>;
+  /** Visual category — drives material color and texture loading. */
+  readonly kind: NodeKind;
+  /** Thumbnail URL (LOD) — loaded eagerly by `NodePlane` (photo only). */
+  readonly imageUrl?: string;
+  /** Full-res URL — swapped in on hover/select (Phase 2, photo only). */
+  readonly fullUrl?: string;
+  /**
+   * Text payload for `note` nodes — rendered into a `CanvasTexture` by
+   * `NodePlane`. Sourced from `properties.description ?? summary ?? title ?? id`.
+   * Unused (and undefined) for `photo`/other kinds.
+   */
+  readonly textContent?: string;
+  /** Chunk-space X coordinate (cellX = floor(worldX / CHUNK_SIZE)). */
+  readonly cellX: number;
+  /** Chunk-space Y coordinate. */
+  readonly cellY: number;
+  /** Chunk-space Z coordinate. */
+  readonly cellZ: number;
+  /** World-unit X offset within the chunk (0..CHUNK_SIZE). */
+  readonly localX: number;
+  /** World-unit Y offset within the chunk. */
+  readonly localY: number;
+  /** World-unit Z offset within the chunk. */
+  readonly localZ: number;
+  /** Plane width in world units. */
+  readonly width: number;
+  /** Plane height in world units. */
+  readonly height: number;
+}
+
+/** String key uniquely identifying a chunk: `${cellX},${cellY},${cellZ}`. */
+export type ChunkKey = string;
+
+/**
+ * Builds the canonical string key for a chunk cell.
+ *
+ * @param cx - chunk-space X.
+ * @param cy - chunk-space Y.
+ * @param cz - chunk-space Z.
+ * @returns the `${cx},${cy},${cz}` key.
+ */
+export function chunkKey(cx: number, cy: number, cz: number): ChunkKey {
+  return `${cx},${cy},${cz}`;
+}

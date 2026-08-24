@@ -158,3 +158,11 @@ opentelemetry-instrumentation-logging==0.63b1
 opentelemetry-instrumentation-httpx==0.63b1
 opentelemetry-instrumentation-aiohttp-client==0.63b1
 opentelemetry-instrumentation-system-metrics==0.63b1
+
+# Knowledge Graph integration (LightRAG vendored under open_webui/lightrag/)
+# lightrag-hku is vendored in-tree — do NOT install the PyPI wheel.
+pipmaster>=0.4.0
+nano-vectordb>=0.0.4
+xlsxwriter>=3.2.0
+exifread==3.0.0
+reverse_geocoder==1.5.1

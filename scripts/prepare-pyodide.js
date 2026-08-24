@@ -195,7 +195,48 @@ async function downloadPyPIWheels() {
 	console.log('Updated pyodide-lock.json with PyPI packages');
 }
 
+/**
+ * Check if static/pyodide/ is already prepared with the correct version and
+ * all required files, so we can skip the expensive Pyodide boot + package
+ * installation + copy on every dev/build invocation.
+ */
+async function isPyodidePrepared() {
+	try {
+		const packageJson = JSON.parse(await readFile('package.json'));
+		const pyodideVersion = packageJson.dependencies.pyodide.replace('^', '');
+
+		const pyodidePackageJson = JSON.parse(await readFile('static/pyodide/package.json'));
+		if (pyodideVersion !== pyodidePackageJson.version.replace('^', '')) {
+			console.log(`Pyodide version mismatch (${pyodideVersion} != ${pyodidePackageJson.version}), re-fetching`);
+			return false;
+		}
+
+		const lockData = JSON.parse(await readFile('static/pyodide/pyodide-lock.json', 'utf-8'));
+
+		// Verify all PyPI wheels referenced in the lock file are present on disk
+		for (const pkg of pypiPackages) {
+			const normalizedName = pkg.replace(/-/g, '_');
+			const entry = lockData.packages?.[normalizedName];
+			if (!entry?.file_name) {
+				console.log(`PyPI package ${pkg} missing from lock file, re-fetching`);
+				return false;
+			}
+			await access(`static/pyodide/${entry.file_name}`);
+		}
+
+		console.log(`Pyodide already prepared (v${pyodideVersion}), skipping fetch`);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 initNetworkProxyFromEnv();
+
+if (await isPyodidePrepared()) {
+	process.exit(0);
+}
+
 await downloadPackages();
 await copyPyodide();
 await downloadPyPIWheels();

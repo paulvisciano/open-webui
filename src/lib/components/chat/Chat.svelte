@@ -141,6 +141,16 @@
 	export let onDeleteEmbeddedChat: ((chatId: string) => void | Promise<void>) | null = null;
 	export let onEmbeddedChatTitle: ((chatId: string, title: string) => void | Promise<void>) | null =
 		null;
+	export let embeddedVoiceActive = false;
+	export let onVoiceReady:
+		| ((api: {
+				eventTarget: EventTarget;
+				submitPrompt: (content: string, opts?: Record<string, any>) => Promise<any>;
+				stopResponse: (processQueue?: boolean) => Promise<void>;
+				chatId: () => string;
+				modelId: () => string;
+		  }) => void)
+		| null = null;
 
 	let loading = true;
 	$: chatContainerId = embedded ? 'note-chat-container' : 'chat-container';
@@ -777,11 +787,15 @@
 	};
 
 	$: if (chatIdProp && chatIdProp !== loadedChatIdProp) {
-		noteChatDebug('chatIdProp changed; loading linked chat', {
-			previousChatIdProp: loadedChatIdProp
-		});
-		loadedChatIdProp = chatIdProp;
-		navigateHandler();
+		if (embeddedVoiceActive) {
+			loadedChatIdProp = chatIdProp;
+		} else {
+			noteChatDebug('chatIdProp changed; loading linked chat', {
+				previousChatIdProp: loadedChatIdProp
+			});
+			loadedChatIdProp = chatIdProp;
+			navigateHandler();
+		}
 	}
 
 	$: if (embedded && embeddedDraftKey && embeddedDraftKey !== currentDraftKey) {
@@ -1604,6 +1618,16 @@
 			}
 
 			messageInput?.focus({ preventScroll: true });
+
+			if (onVoiceReady) {
+				onVoiceReady({
+					eventTarget,
+					submitPrompt: submitHandler,
+					stopResponse,
+					chatId: () => $chatId,
+					modelId: () => selectedModelIds?.at(0) ?? null
+				});
+			}
 		};
 		init();
 
@@ -1886,7 +1910,7 @@
 	$: onHistoryChange(history);
 
 	const dispatchCallOverlayAudio = (message, final = false) => {
-		if (!$showCallOverlay) {
+		if (!$showCallOverlay && !embeddedVoiceActive) {
 			return;
 		}
 
@@ -2819,7 +2843,7 @@
 				copyToClipboard(visibleContent);
 			}
 
-			if ($settings.responseAutoPlayback && !$showCallOverlay) {
+			if ($settings.responseAutoPlayback && !$showCallOverlay && !embeddedVoiceActive) {
 				await tick();
 				document.getElementById(`speak-button-${message.id}`)?.click();
 			}
@@ -2905,7 +2929,7 @@
 		history.currentId = userMessageId;
 
 		// focus on chat input (skip during voice call to avoid triggering mobile keyboard)
-		if (!$showCallOverlay) {
+		if (!$showCallOverlay && !embeddedVoiceActive) {
 			messageInput?.focus({ preventScroll: true });
 		}
 
@@ -3366,7 +3390,7 @@
 
 		if ($config?.features)
 			features = {
-				voice: $showCallOverlay,
+				voice: $showCallOverlay || embeddedVoiceActive,
 				image_generation:
 					$config?.features?.enable_image_generation &&
 					($user?.role === 'admin' || $user?.permissions?.features?.image_generation)

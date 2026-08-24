@@ -8,6 +8,11 @@ from typing import Annotated
 import typer
 import uvicorn
 
+# Register the vendored LightRAG package as top-level `lightrag` before any
+# open_webui submodule is imported, so `from lightrag...` resolves to the
+# vendored copy everywhere in the process.
+from open_webui import _lightrag_vendor  # noqa: F401
+
 app = typer.Typer()
 
 KEY_FILE = Path.cwd() / '.webui_secret_key'

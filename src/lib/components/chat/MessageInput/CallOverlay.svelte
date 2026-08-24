@@ -1,21 +1,25 @@
 <script lang="ts">
-	import { config, models, settings, showCallOverlay, TTSWorker } from '$lib/stores';
-	import { onMount, tick, getContext, onDestroy, createEventDispatcher } from 'svelte';
-
-	const dispatch = createEventDispatcher();
-
-	import { blobToFile } from '$lib/utils';
-	import { generateEmoji } from '$lib/apis';
-	import { synthesizeOpenAISpeech, transcribeAudio } from '$lib/apis/audio';
+	import { showCallOverlay } from '$lib/stores';
+	import { onMount, onDestroy, createEventDispatcher, getContext } from 'svelte';
+	import type { Writable } from 'svelte/store';
+	import type { i18n as i18nType } from 'i18next';
 
 	import { toast } from 'svelte-sonner';
 
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import VideoInputMenu from './CallOverlay/VideoInputMenu.svelte';
-	import { KokoroWorker } from '$lib/workers/KokoroWorker';
-	import { WEBUI_API_BASE_URL } from '$lib/constants';
+	import { VoiceCallService } from './VoiceCallService.svelte';
 
-	const i18n = getContext('i18n');
+	const i18n: Writable<i18nType> = getContext('i18n');
+
+	const statusLabels = {
+		thinking: 'Thinking...',
+		muted: 'Muted',
+		interrupt: 'Tap to interrupt',
+		listening: 'Listening...'
+	};
+
+	const dispatch = createEventDispatcher();
 
 	export let eventTarget: EventTarget;
 	export let submitPrompt: Function;
@@ -24,792 +28,50 @@
 	export let chatId;
 	export let modelId;
 
-	let wakeLock = null;
-
-	let model = null;
-
-	let loading = false;
-	let confirmed = false;
-	let interrupted = false;
-	let assistantSpeaking = false;
-	let muted = false;
-
-	let emoji = null;
-	let camera = false;
-	let cameraStream = null;
-
-	let chatStreaming = false;
-	let rmsLevel = 0;
-	let hasStartedSpeaking = false;
-	let mediaRecorder;
-	let audioStream = null;
-	let audioChunks = [];
-
-	let videoInputDevices = [];
-	let selectedVideoInputDeviceId = null;
-
-	const getVideoInputDevices = async () => {
-		const devices = await navigator.mediaDevices.enumerateDevices();
-		videoInputDevices = devices.filter((device) => device.kind === 'videoinput');
-
-		if (!!navigator.mediaDevices.getDisplayMedia) {
-			videoInputDevices = [
-				...videoInputDevices,
-				{
-					deviceId: 'screen',
-					label: 'Screen Share'
-				}
-			];
-		}
-
-		console.log(videoInputDevices);
-		if (selectedVideoInputDeviceId === null && videoInputDevices.length > 0) {
-			const savedDeviceId = localStorage.getItem('selectedVideoInputDeviceId');
-			if (savedDeviceId && videoInputDevices.some((d) => d.deviceId === savedDeviceId)) {
-				selectedVideoInputDeviceId = savedDeviceId;
-			} else {
-				selectedVideoInputDeviceId = videoInputDevices[0].deviceId;
-			}
-		}
-	};
-
-	const startCamera = async () => {
-		await getVideoInputDevices();
-
-		if (cameraStream === null) {
-			camera = true;
-			await tick();
-			try {
-				await startVideoStream();
-			} catch (err) {
-				console.error('Error accessing webcam: ', err);
-			}
-		}
-	};
-
-	const startVideoStream = async () => {
-		const video = document.getElementById('camera-feed');
-		if (video) {
-			if (selectedVideoInputDeviceId === 'screen') {
-				cameraStream = await navigator.mediaDevices.getDisplayMedia({
-					video: {
-						cursor: 'always'
-					},
-					audio: false
-				});
-			} else {
-				cameraStream = await navigator.mediaDevices.getUserMedia({
-					video: {
-						deviceId: selectedVideoInputDeviceId ? { exact: selectedVideoInputDeviceId } : undefined
-					}
-				});
-			}
-
-			if (cameraStream) {
-				await getVideoInputDevices();
-				video.srcObject = cameraStream;
-				await video.play();
-			}
-		}
-	};
-
-	const stopVideoStream = async () => {
-		if (cameraStream) {
-			const tracks = cameraStream.getTracks();
-			tracks.forEach((track) => track.stop());
-		}
-
-		cameraStream = null;
-	};
-
-	const takeScreenshot = () => {
-		const video = document.getElementById('camera-feed');
-		const canvas = document.getElementById('camera-canvas');
-
-		if (!canvas) {
-			return;
-		}
-
-		const context = canvas.getContext('2d');
-
-		// Make the canvas match the video dimensions
-		canvas.width = video.videoWidth;
-		canvas.height = video.videoHeight;
-
-		// Draw the image from the video onto the canvas
-		context.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
-
-		// Convert the canvas to a data base64 URL and console log it
-		const dataURL = canvas.toDataURL('image/png');
-		console.log(dataURL);
-
-		return dataURL;
-	};
-
-	const stopCamera = async () => {
-		await stopVideoStream();
-		camera = false;
-	};
-
-	const MIN_DECIBELS = -55;
-	const VISUALIZER_BUFFER_LENGTH = 300;
-
-	const transcribeHandler = async (audioBlob) => {
-		// Create a blob from the audio chunks
-		if (!audioBlob || audioBlob.size < 100) {
-			console.log('Audio blob too small or empty, skipping transcription');
-			return;
-		}
-
-		await tick();
-		const file = blobToFile(audioBlob, 'recording.wav');
-
-		const res = await transcribeAudio(
-			localStorage.token,
-			file,
-			$settings?.audio?.stt?.language
-		).catch((error) => {
-			toast.error(`${error}`);
-			return null;
-		});
-
-		if (res) {
-			console.log(res.text);
-
-			if (res.text !== '') {
-				const _responses = await submitPrompt(res.text, { _raw: true });
-				console.log(_responses);
-			}
-		}
-	};
-
-	const stopRecordingCallback = async (_continue = true) => {
-		if ($showCallOverlay) {
-			console.log('%c%s', 'color: red; font-size: 20px;', '🚨 stopRecordingCallback 🚨');
-
-			// deep copy the audioChunks array
-			const _audioChunks = audioChunks.slice(0);
-
-			audioChunks = [];
-			mediaRecorder = false;
-
-			if (_continue) {
-				startRecording();
-			}
-
-			if (confirmed) {
-				loading = true;
-				emoji = null;
-
-				if (cameraStream) {
-					const imageUrl = takeScreenshot();
-
-					files = [
-						{
-							type: 'image',
-							url: imageUrl
-						}
-					];
-				}
-
-				const audioBlob = new Blob(_audioChunks, { type: 'audio/wav' });
-				await transcribeHandler(audioBlob);
-
-				confirmed = false;
-				loading = false;
-			}
-		} else {
-			audioChunks = [];
-			mediaRecorder = false;
-
-			if (audioStream) {
-				const tracks = audioStream.getTracks();
-				tracks.forEach((track) => track.stop());
-			}
-			audioStream = null;
-		}
-	};
-
-	const startRecording = async () => {
-		if ($showCallOverlay) {
-			if (!audioStream) {
-				audioStream = await navigator.mediaDevices.getUserMedia({
-					audio: {
-						echoCancellation: true,
-						noiseSuppression: true,
-						autoGainControl: true
-					}
-				});
-			}
-
-			if (audioStream) {
-				// hardware track muting disabled to prevent backend translation errors with malformed WebM files
-			}
-
-			mediaRecorder = new MediaRecorder(audioStream);
-
-			mediaRecorder.onstart = () => {
-				console.log('Recording started');
-				audioChunks = [];
-			};
-
-			mediaRecorder.ondataavailable = (event) => {
-				if (hasStartedSpeaking) {
-					audioChunks.push(event.data);
-				}
-			};
-
-			mediaRecorder.onstop = (e) => {
-				console.log('Recording stopped', audioStream, e);
-				stopRecordingCallback();
-			};
-
-			analyseAudio(audioStream);
-		}
-	};
-
-	const stopAudioStream = async () => {
-		try {
-			if (mediaRecorder) {
-				mediaRecorder.stop();
-			}
-		} catch (error) {
-			console.log('Error stopping audio stream:', error);
-		}
-
-		if (!audioStream) return;
-
-		audioStream.getAudioTracks().forEach(function (track) {
-			track.stop();
-		});
-
-		audioStream = null;
-	};
-
-	// Function to calculate the RMS level from time domain data
-	const calculateRMS = (data: Uint8Array) => {
-		let sumSquares = 0;
-		for (let i = 0; i < data.length; i++) {
-			const normalizedValue = (data[i] - 128) / 128; // Normalize the data
-			sumSquares += normalizedValue * normalizedValue;
-		}
-		return Math.sqrt(sumSquares / data.length);
-	};
-
-	const analyseAudio = (stream) => {
-		const audioContext = new AudioContext();
-		const audioStreamSource = audioContext.createMediaStreamSource(stream);
-
-		const analyser = audioContext.createAnalyser();
-		analyser.minDecibels = MIN_DECIBELS;
-		audioStreamSource.connect(analyser);
-
-		const bufferLength = analyser.frequencyBinCount;
-
-		const domainData = new Uint8Array(bufferLength);
-		const timeDomainData = new Uint8Array(analyser.fftSize);
-
-		let lastSoundTime = Date.now();
-		hasStartedSpeaking = false;
-
-		console.log('🔊 Sound detection started', lastSoundTime, hasStartedSpeaking);
-
-		const detectSound = () => {
-			const processFrame = () => {
-				if (!mediaRecorder || !$showCallOverlay) {
-					return;
-				}
-
-				if (muted || (assistantSpeaking && !($settings?.voiceInterruption ?? false))) {
-					// Suppress mic input when muted or when assistant is speaking without interruption enabled
-					analyser.maxDecibels = 0;
-					analyser.minDecibels = -1;
-				} else {
-					analyser.minDecibels = MIN_DECIBELS;
-					analyser.maxDecibels = -30;
-				}
-
-				analyser.getByteTimeDomainData(timeDomainData);
-				analyser.getByteFrequencyData(domainData);
-
-				// Calculate RMS level from time domain data
-				rmsLevel = calculateRMS(timeDomainData);
-
-				if (muted || (assistantSpeaking && !($settings?.voiceInterruption ?? false))) {
-					rmsLevel = 0;
-				}
-
-				// Check if initial speech/noise has started
-				const hasSound = domainData.some((value) => value > 0);
-				if (hasSound) {
-					// BIG RED TEXT
-					console.log('%c%s', 'color: red; font-size: 20px;', '🔊 Sound detected');
-					if (mediaRecorder && mediaRecorder.state !== 'recording') {
-						mediaRecorder.start();
-					}
-
-					if (!hasStartedSpeaking) {
-						hasStartedSpeaking = true;
-						stopAllAudio();
-					}
-
-					lastSoundTime = Date.now();
-				}
-
-				// Start silence detection only after initial speech/noise has been detected
-				if (hasStartedSpeaking) {
-					if (Date.now() - lastSoundTime > 2000) {
-						confirmed = true;
-
-						if (mediaRecorder) {
-							console.log('%c%s', 'color: red; font-size: 20px;', '🔇 Silence detected');
-							mediaRecorder.stop();
-							return;
-						}
-					}
-				}
-
-				window.requestAnimationFrame(processFrame);
-			};
-
-			window.requestAnimationFrame(processFrame);
-		};
-
-		detectSound();
-	};
-
-	let finishedMessages = {};
-	let currentMessageId = null;
-	let currentUtterance: SpeechSynthesisUtterance | null = null;
-
-	// Get voice: model-specific > user settings > config default
-	const getVoiceId = () => {
-		// Check for model-specific TTS voice first
-		if (model?.info?.meta?.tts?.voice) {
-			return model.info.meta.tts.voice;
-		}
-		// Fall back to user settings or config default
-		if ($settings?.audio?.tts?.defaultVoice === $config.audio.tts.voice) {
-			return $settings?.audio?.tts?.voice ?? $config?.audio?.tts?.voice;
-		}
-		return $config?.audio?.tts?.voice;
-	};
-
-	const speakSpeechSynthesisHandler = (content) => {
-		if ($showCallOverlay) {
-			return new Promise((resolve) => {
-				let voices = [];
-				const getVoicesLoop = setInterval(async () => {
-					voices = await speechSynthesis.getVoices();
-					if (voices.length > 0) {
-						clearInterval(getVoicesLoop);
-
-						const voiceId = getVoiceId();
-						const voice = voices?.filter((v) => v.voiceURI === voiceId)?.at(0) ?? undefined;
-
-						currentUtterance = new SpeechSynthesisUtterance(content);
-						currentUtterance.rate = $settings.audio?.tts?.playbackRate ?? 1;
-
-						if (voice) {
-							currentUtterance.voice = voice;
-						}
-
-						speechSynthesis.speak(currentUtterance);
-						currentUtterance.onend = async (e) => {
-							await new Promise((r) => setTimeout(r, 200));
-							resolve(e);
-						};
-					}
-				}, 100);
-			});
-		} else {
-			return Promise.resolve();
-		}
-	};
-
-	const playAudio = (audio: HTMLAudioElement) => {
-		if ($showCallOverlay) {
-			return new Promise((resolve) => {
-				const audioElement = document.getElementById('audioElement') as HTMLAudioElement;
-
-				if (!audioElement) {
-					resolve(null);
-					return;
-				}
-
-				let settled = false;
-				const finish = async (e: Event | Error | null = null) => {
-					if (settled) {
-						return;
-					}
-
-					settled = true;
-					audioElement.onended = null;
-					audioElement.onerror = null;
-					audioElement.onpause = null;
-
-					await new Promise((r) => setTimeout(r, 100));
-					resolve(e);
-				};
-
-				audioElement.src = audio.src;
-				audioElement.muted = true;
-				audioElement.playbackRate = $settings.audio?.tts?.playbackRate ?? 1;
-				audioElement.onended = finish;
-				audioElement.onerror = () => finish();
-				audioElement.onpause = finish;
-
-				audioElement
-					.play()
-					.then(() => {
-						audioElement.muted = false;
-					})
-					.catch((error) => {
-						console.error(error);
-						finish(error);
-					});
-			});
-		} else {
-			return Promise.resolve();
-		}
-	};
-
-	const stopAllAudio = async () => {
-		assistantSpeaking = false;
-		interrupted = true;
-
-		if (chatStreaming) {
-			stopResponse();
-		}
-
-		if (currentUtterance) {
-			speechSynthesis.cancel();
-			currentUtterance = null;
-		}
-
-		const audioElement = document.getElementById('audioElement') as HTMLAudioElement;
-		if (audioElement) {
-			audioElement.muted = true;
-			audioElement.pause();
-			audioElement.currentTime = 0;
-		}
-	};
-
-	let audioAbortController = new AbortController();
-
-	// Audio cache map where key is the content and value is the Audio object.
-	const audioCache = new Map();
-	const emojiCache = new Map();
-
-	const fetchAudio = async (content) => {
-		if (!audioCache.has(content)) {
-			try {
-				// Set the emoji for the content if needed
-				if ($settings?.showEmojiInCall ?? false) {
-					const emoji = await generateEmoji(localStorage.token, modelId, content, chatId).catch(
-						(error) => {
-							console.error(error);
-							return null;
-						}
-					);
-					if (emoji) {
-						emojiCache.set(content, emoji);
-					}
-				}
-
-				if ($settings.audio?.tts?.engine === 'browser-kokoro') {
-					const url = await $TTSWorker
-						.generate({
-							text: content,
-							voice: getVoiceId()
-						})
-						.catch((error) => {
-							console.error(error);
-							toast.error(`${error}`);
-						});
-
-					if (url) {
-						audioCache.set(content, new Audio(url));
-					}
-				} else if ($config.audio.tts.engine !== '') {
-					const res = await synthesizeOpenAISpeech(localStorage.token, getVoiceId(), content).catch(
-						(error) => {
-							console.error(error);
-							return null;
-						}
-					);
-
-					if (res) {
-						const blob = await res.blob();
-						const blobUrl = URL.createObjectURL(blob);
-						audioCache.set(content, new Audio(blobUrl));
-					}
-				} else {
-					audioCache.set(content, true);
-				}
-			} catch (error) {
-				console.error('Error synthesizing speech:', error);
-			}
-		}
-
-		return audioCache.get(content);
-	};
-
-	let messages = {};
-
-	const monitorAndPlayAudio = async (id, signal) => {
-		while (!signal.aborted) {
-			if (messages[id] && messages[id].length > 0) {
-				// Retrieve the next content string from the queue
-				const content = messages[id].shift(); // Dequeues the content for playing
-
-				if (audioCache.has(content)) {
-					// If content is available in the cache, play it
-
-					// Set the emoji for the content if available
-					if (($settings?.showEmojiInCall ?? false) && emojiCache.has(content)) {
-						emoji = emojiCache.get(content);
-					} else {
-						emoji = null;
-					}
-
-					if ($settings.audio?.tts?.engine === 'browser-kokoro' || $config.audio.tts.engine !== '') {
-						try {
-							console.log(
-								'%c%s',
-								'color: red; font-size: 20px;',
-								`Playing audio for content: ${content}`
-							);
-
-							const audio = audioCache.get(content);
-							await playAudio(audio);
-							console.log(`Played audio for content: ${content}`);
-							await new Promise((resolve) => setTimeout(resolve, 200));
-						} catch (error) {
-							console.error('Error playing audio:', error);
-						}
-					} else {
-						await speakSpeechSynthesisHandler(content);
-					}
-				} else {
-					// If not available in the cache, push it back to the queue and delay
-					messages[id].unshift(content); // Re-queue the content at the start
-					console.log(`Audio for "${content}" not yet available in the cache, re-queued...`);
-					await new Promise((resolve) => setTimeout(resolve, 200)); // Wait before retrying to reduce tight loop
-				}
-			} else if (finishedMessages[id] && messages[id] && messages[id].length === 0) {
-				// If the message is finished and there are no more messages to process, break the loop
-				assistantSpeaking = false;
-				break;
-			} else {
-				// No messages to process, sleep for a bit
-				await new Promise((resolve) => setTimeout(resolve, 200));
-			}
-		}
-		console.log(`Audio monitoring and playing stopped for message ID ${id}`);
-	};
-
-	const chatStartHandler = async (e) => {
-		const { id } = e.detail;
-
-		chatStreaming = true;
-
-		if (currentMessageId !== id) {
-			console.log(`Received chat start event for message ID ${id}`);
-
-			currentMessageId = id;
-			if (audioAbortController) {
-				audioAbortController.abort();
-			}
-			audioAbortController = new AbortController();
-
-			assistantSpeaking = true;
-			// Start monitoring and playing audio for the message ID
-			monitorAndPlayAudio(id, audioAbortController.signal);
-		}
-	};
-
-	const chatEventHandler = async (e) => {
-		const { id, content } = e.detail;
-		// "id" here is message id
-		// if "id" is not the same as "currentMessageId" then do not process
-		// "content" here is a sentence from the assistant,
-		// there will be many sentences for the same "id"
-
-		if (currentMessageId === id) {
-			console.log(`Received chat event for message ID ${id}: ${content}`);
-
-			try {
-				if (messages[id] === undefined) {
-					messages[id] = [content];
-				} else {
-					messages[id].push(content);
-				}
-
-				console.log(content);
-
-				fetchAudio(content);
-			} catch (error) {
-				console.error('Failed to fetch or play audio:', error);
-			}
-		}
-	};
-
-	const chatFinishHandler = async (e) => {
-		const { id, content } = e.detail;
-		// "content" here is the entire message from the assistant
-		finishedMessages[id] = true;
-
-		chatStreaming = false;
-	};
-
-	const toggleMute = () => {
-		muted = !muted;
-		if (muted && hasStartedSpeaking) {
-			// Abort the ongoing recording so it doesn't accidentally send a partial sentence
-			hasStartedSpeaking = false;
-			confirmed = false;
-			audioChunks = [];
-			if (mediaRecorder && mediaRecorder.state === 'recording') {
-				mediaRecorder.stop();
-			}
-		}
-	};
-
-	let wasAssistantSpeaking = false;
-	$: {
-		if (assistantSpeaking && !wasAssistantSpeaking) {
-			wasAssistantSpeaking = true;
-		} else if (!assistantSpeaking && wasAssistantSpeaking) {
-			wasAssistantSpeaking = false;
-			// Auto unmute when AI finishes speaking
-			if (muted) {
-				muted = false;
-			}
-		}
-	}
-
-	const handleKeydown = (e: KeyboardEvent) => {
-		// Only handle M key when not typing in an input/textarea
-		if (e.key === 'm' || e.key === 'M') {
-			const target = e.target as HTMLElement;
-			if (
-				target.tagName !== 'INPUT' &&
-				target.tagName !== 'TEXTAREA' &&
-				!target.isContentEditable
-			) {
-				e.preventDefault();
-				toggleMute();
-			}
-		}
-	};
+	let svc: VoiceCallService | null = null;
 
 	onMount(async () => {
-		const setWakeLock = async () => {
-			try {
-				wakeLock = await navigator.wakeLock.request('screen');
-			} catch (err) {
-				// The Wake Lock request has failed - usually system related, such as battery.
-				console.log(err);
-			}
-
-			if (wakeLock) {
-				// Add a listener to release the wake lock when the page is unloaded
-				wakeLock.addEventListener('release', () => {
-					// the wake lock has been released
-					console.log('Wake Lock released');
-				});
-			}
-		};
-
-		if ('wakeLock' in navigator) {
-			await setWakeLock();
-
-			document.addEventListener('visibilitychange', async () => {
-				// Re-request the wake lock if the document becomes visible
-				if (wakeLock !== null && document.visibilityState === 'visible') {
-					await setWakeLock();
-				}
-			});
-		}
-
-		model = $models.find((m) => m.id === modelId);
-
-		startRecording();
-
-		eventTarget.addEventListener('chat:start', chatStartHandler);
-		eventTarget.addEventListener('chat', chatEventHandler);
-		eventTarget.addEventListener('chat:finish', chatFinishHandler);
-
-		document.addEventListener('keydown', handleKeydown);
-
-		return async () => {
-			await stopAllAudio();
-
-			stopAudioStream();
-
-			eventTarget.removeEventListener('chat:start', chatStartHandler);
-			eventTarget.removeEventListener('chat', chatEventHandler);
-			eventTarget.removeEventListener('chat:finish', chatFinishHandler);
-
-			document.removeEventListener('keydown', handleKeydown);
-
-			audioAbortController.abort();
-			await tick();
-
-			await stopAllAudio();
-
-			await stopRecordingCallback(false);
-			await stopCamera();
-		};
+		svc = new VoiceCallService({
+			eventTarget,
+			submitPrompt: submitPrompt as any,
+			stopResponse: stopResponse as any,
+			chatId,
+			modelId
+		});
+		await svc.start();
 	});
 
 	onDestroy(async () => {
-		await stopAllAudio();
-		await stopRecordingCallback(false);
-		await stopCamera();
-
-		await stopAudioStream();
-		eventTarget.removeEventListener('chat:start', chatStartHandler);
-		eventTarget.removeEventListener('chat', chatEventHandler);
-		eventTarget.removeEventListener('chat:finish', chatFinishHandler);
-
-		document.removeEventListener('keydown', handleKeydown);
-
-		audioAbortController.abort();
-
-		await tick();
-
-		await stopAllAudio();
+		await svc?.stop();
 	});
 </script>
 
-{#if $showCallOverlay}
+{#if $showCallOverlay && svc}
 	<div class="max-w-lg w-full h-full max-h-[100dvh] flex flex-col justify-between p-3 md:p-6">
-		{#if camera}
+		{#if svc.camera}
 			<button
 				type="button"
 				class="flex justify-center items-center w-full h-20 min-h-20"
 				on:click={() => {
-					if (assistantSpeaking) {
-						stopAllAudio();
+					if (svc!.assistantSpeaking) {
+						svc!.stopAllAudio();
 					}
 				}}
 			>
-				{#if emoji}
+				{#if svc.emoji}
 					<div
 						class="  transition-all rounded-full"
-						style="font-size:{rmsLevel * 100 > 4
+						style="font-size:{svc.rmsLevel * 100 > 4
 							? '4.5'
-							: rmsLevel * 100 > 2
+							: svc.rmsLevel * 100 > 2
 								? '4.25'
-								: rmsLevel * 100 > 1
+								: svc.rmsLevel * 100 > 1
 									? '3.75'
 									: '3.5'}rem;width: 100%; text-align:center;"
 					>
-						{emoji}
+						{svc.emoji}
 					</div>
-				{:else if loading || assistantSpeaking}
+				{:else if svc.loading || svc.assistantSpeaking}
 					<svg
 						class="size-12 text-gray-900 dark:text-gray-400"
 						viewBox="0 0 24 24"
@@ -848,44 +110,43 @@
 					>
 				{:else}
 					<div
-						class=" {rmsLevel * 100 > 4
+						class=" {svc.rmsLevel * 100 > 4
 							? ' size-[4.5rem]'
-							: rmsLevel * 100 > 2
+							: svc.rmsLevel * 100 > 2
 								? ' size-16'
-								: rmsLevel * 100 > 1
+								: svc.rmsLevel * 100 > 1
 									? 'size-14'
 									: 'size-12'}  transition-all rounded-full bg-cover bg-center bg-no-repeat"
-						style={`background-image: url('${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}&voice=true');`}
+						style={`background-image: url('${svc.modelImageUrl}');`}
 					/>
 				{/if}
-				<!-- navbar -->
 			</button>
 		{/if}
 
 		<div class="flex justify-center items-center flex-1 h-full w-full max-h-full">
-			{#if !camera}
+			{#if !svc.camera}
 				<button
 					type="button"
 					on:click={() => {
-						if (assistantSpeaking) {
-							stopAllAudio();
+						if (svc!.assistantSpeaking) {
+							svc!.stopAllAudio();
 						}
 					}}
 				>
-					{#if emoji}
+					{#if svc.emoji}
 						<div
 							class="  transition-all rounded-full"
-							style="font-size:{rmsLevel * 100 > 4
+							style="font-size:{svc.rmsLevel * 100 > 4
 								? '13'
-								: rmsLevel * 100 > 2
+								: svc.rmsLevel * 100 > 2
 									? '12'
-									: rmsLevel * 100 > 1
+									: svc.rmsLevel * 100 > 1
 										? '11.5'
 										: '11'}rem;width:100%;text-align:center;"
 						>
-							{emoji}
+							{svc.emoji}
 						</div>
-					{:else if loading || assistantSpeaking}
+					{:else if svc.loading || svc.assistantSpeaking}
 						<svg
 							class="size-44 text-gray-900 dark:text-gray-400"
 							viewBox="0 0 24 24"
@@ -924,14 +185,14 @@
 						>
 					{:else}
 						<div
-							class=" {rmsLevel * 100 > 4
+							class=" {svc.rmsLevel * 100 > 4
 								? ' size-52'
-								: rmsLevel * 100 > 2
+								: svc.rmsLevel * 100 > 2
 									? 'size-48'
-									: rmsLevel * 100 > 1
+									: svc.rmsLevel * 100 > 1
 										? 'size-44'
 										: 'size-40'} transition-all rounded-full bg-cover bg-center bg-no-repeat"
-							style={`background-image: url('${WEBUI_API_BASE_URL}/models/model/profile/image?id=${model?.id}&lang=${$i18n.language}&voice=true');`}
+							style={`background-image: url('${svc.modelImageUrl}');`}
 						/>
 					{/if}
 				</button>
@@ -950,11 +211,9 @@
 					<div class=" absolute top-4 md:top-8 left-4">
 						<button
 							type="button"
-							aria-label={$i18n.t('Stop camera')}
+							aria-label="Stop camera"
 							class="p-1.5 text-white cursor-pointer backdrop-blur-xl bg-black/10 rounded-full"
-							on:click={() => {
-								stopCamera();
-							}}
+							on:click={() => svc!.stopCamera()}
 						>
 							<svg
 								xmlns="http://www.w3.org/2000/svg"
@@ -977,38 +236,29 @@
 				type="button"
 				class="z-10"
 				on:click={() => {
-					if (assistantSpeaking) {
-						stopAllAudio();
+					if (svc!.assistantSpeaking) {
+						svc!.stopAllAudio();
 					}
 				}}
 			>
 				<div class="line-clamp-1 text-sm font-normal">
-					{#if loading}
-						{$i18n.t('Thinking...')}
-					{:else if muted}
-						{$i18n.t('Muted')}
-					{:else if assistantSpeaking}
-						{$i18n.t('Tap to interrupt')}
-					{:else}
-						{$i18n.t('Listening...')}
-					{/if}
+					{$i18n.t(statusLabels[svc.statusText] ?? svc.statusText)}
 				</div>
 			</button>
 
 			<div class="flex items-center justify-center gap-4 z-10">
-				{#if camera}
+				{#if svc.camera}
 					<VideoInputMenu
-						devices={videoInputDevices}
+						devices={svc.videoInputDevices}
 						on:change={async (e) => {
-							console.log(e.detail);
-							selectedVideoInputDeviceId = e.detail;
+							svc!.selectedVideoInputDeviceId = e.detail;
 							localStorage.setItem('selectedVideoInputDeviceId', e.detail);
-							await stopVideoStream();
-							await startVideoStream();
+							await svc!.stopVideoStream();
+							await svc!.startVideoStream();
 						}}
 					>
 						<button
-							aria-label={$i18n.t('Switch camera')}
+							aria-label="Switch camera"
 							class="p-3 rounded-full bg-gray-50 dark:bg-gray-900"
 							type="button"
 						>
@@ -1027,14 +277,14 @@
 						</button>
 					</VideoInputMenu>
 				{:else}
-					<Tooltip content={$i18n.t('Camera')}>
+					<Tooltip content="Camera">
 						<button
-							aria-label={$i18n.t('Camera')}
+							aria-label="Camera"
 							class="p-3 rounded-full bg-gray-50 dark:bg-gray-900"
 							type="button"
 							on:click={async () => {
 								await navigator.mediaDevices.getUserMedia({ video: true });
-								startCamera();
+								svc!.startCamera();
 							}}
 						>
 							<svg
@@ -1048,7 +298,7 @@
 								<path
 									stroke-linecap="round"
 									stroke-linejoin="round"
-									d="M6.827 6.175A2.31 2.31 0 0 1 5.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 0 0-1.134-.175 2.31 2.31 0 0 1-1.64-1.055l-.822-1.316a2.192 2.192 0 0 0-1.736-1.039 48.774 48.774 0 0 0-5.232 0 2.192 2.192 0 0 0-1.736 1.039l-.821 1.316Z"
+									d="M6.827 6.175A2.31 2.31 0 0 1 5.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 0 0-1.134-.175 2.31 2.31 0 0 1-1.64-1.055l-.822-1.316a2.192 2.192 0 0 0-1.736-1.039 48.774 48.774 0 0 0-5.232 0 2.192 2.192 0 0 0-1.736 1.039l-.821 1.316a2.31 2.31 0 0 0-.511.532Z"
 								/>
 								<path
 									stroke-linecap="round"
@@ -1060,17 +310,16 @@
 					</Tooltip>
 				{/if}
 
-				<Tooltip content={muted ? $i18n.t('Unmute') + ' (M)' : $i18n.t('Mute') + ' (M)'}>
+				<Tooltip content={svc.muted ? 'Unmute (M)' : 'Mute (M)'}>
 					<button
-						class="p-3 rounded-full transition-colors duration-200 {muted
+						class="p-3 rounded-full transition-colors duration-200 {svc.muted
 							? 'bg-red-500 text-white'
 							: 'bg-gray-50 dark:bg-gray-900'}"
 						type="button"
-						aria-label={muted ? $i18n.t('Unmute') : $i18n.t('Mute')}
-						on:click={toggleMute}
+						aria-label={svc.muted ? 'Unmute' : 'Mute'}
+						on:click={() => svc!.toggleMute()}
 					>
-						{#if muted}
-							<!-- Mic Off icon -->
+						{#if svc.muted}
 							<svg
 								xmlns="http://www.w3.org/2000/svg"
 								fill="none"
@@ -1095,7 +344,6 @@
 								/>
 							</svg>
 						{:else}
-							<!-- Mic On icon -->
 							<svg
 								xmlns="http://www.w3.org/2000/svg"
 								fill="none"
@@ -1115,15 +363,12 @@
 				</Tooltip>
 
 				<button
-					aria-label={$i18n.t('End call')}
+					aria-label="End call"
 					class="p-3 rounded-full bg-gray-50 dark:bg-gray-900"
 					on:click={async () => {
-						await stopAudioStream();
-						await stopVideoStream();
-
-						console.log(audioStream);
-						console.log(cameraStream);
-
+						await svc!.stopAllAudio();
+						await svc!.stopAudioStream();
+						await svc!.stopVideoStream();
 						showCallOverlay.set(false);
 						dispatch('close');
 					}}

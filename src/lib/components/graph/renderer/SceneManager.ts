@@ -1,0 +1,881 @@
+/**
+ * `SceneManager` — owns the Three.js scene graph, renderer, camera, RAF loop,
+ * and input handling for the infinite canvas.
+ *
+ * This is the only renderer module that touches the DOM and `requestAnimationFrame`.
+ * It wires a shared 1×1 `PlaneGeometry`, a `ChunkManager`, a
+ * `PerspectiveCamera`, a `WebGLRenderer`, and a minimal direct-control
+ * velocity model (drag pan / wheel zoom / WASD+arrows move) with inertia,
+ * matching the reference repo's scene loop. Pause-on-hidden-tab and WebGL
+ * context-loss handling are included for Phase 1 robustness.
+ */
+import * as THREE from 'three';
+import {
+  CHUNK_FADE_MARGIN,
+  CHUNK_SIZE,
+  DRIFT_AMOUNT,
+  DRIFT_LERP,
+  DRIFT_LERP_ZOOMING,
+  INITIAL_CAMERA_Z,
+  KEYBOARD_SPEED,
+  MAX_CAMERA_Z,
+  MAX_VELOCITY,
+  MIN_CAMERA_Z,
+  MOUSE_PAN_FACTOR,
+  RENDER_DISTANCE,
+  SCROLL_DECAY,
+  SCROLL_MOMENTUM_DECAY,
+  SCROLL_MOMENTUM_MAX,
+  SCROLL_MOMENTUM_RAMP,
+  SCROLL_MOMENTUM_WINDOW_MS,
+  TOUCH_PAN_FACTOR,
+  VELOCITY_DECAY,
+  VELOCITY_LERP,
+  ZOOMING_VEL_THRESHOLD,
+  ZOOM_FACTOR,
+  ZOOM_FACTOR_DIVISOR,
+  ZOOM_FACTOR_MAX,
+  ZOOM_FACTOR_MIN,
+} from './constants';
+
+
+
+import { ChunkManager } from './ChunkManager';
+import type { CanvasNode } from './types';
+
+/** Camera field of view in degrees. */
+const CAMERA_FOV = 60;
+/** Near clipping plane. */
+const CAMERA_NEAR = 0.1;
+/** Minimum far clipping plane — used when no layout is applied yet. */
+const CAMERA_FAR_MIN = 2000;
+/** Dark canvas background. */
+const BACKGROUND_COLOR =  0x1a1a1a;
+/**
+ * Top-level renderer façade. Construct with a container element, call
+ * `setNodes` with a `CanvasNode[]` layout, then `start()`.
+ */
+export class SceneManager {
+  private readonly _container: HTMLElement;
+  private readonly _renderer: THREE.WebGLRenderer;
+  private readonly _camera: THREE.PerspectiveCamera;
+  private readonly _scene: THREE.Scene;
+  private readonly _sharedGeometry: THREE.PlaneGeometry;
+  private readonly _chunkManager: ChunkManager;
+  private readonly _resizeObserver: ResizeObserver;
+  private readonly _velocity = new THREE.Vector3();
+  private readonly _targetVel = new THREE.Vector3();
+  private _scrollAccum = 0;
+  private _scrollMomentum = 1;
+  private _lastScrollTime = 0;
+  private readonly _basePos = new THREE.Vector3();
+  private readonly _drift = new THREE.Vector2();
+  private readonly _mouse = new THREE.Vector2();
+  private readonly _keys = new Set<string>();
+  private readonly _raycaster = new THREE.Raycaster();
+  private readonly _pointerNdc = new THREE.Vector2();
+
+  /** Last single-pointer drag state (mouse or first touch). */
+  private readonly _pointer = {
+    down: false,
+    lastX: 0,
+    lastY: 0,
+    downStartX: 0,
+    downStartY: 0,
+    dragged: false,
+    isTouch: false,
+  };
+  /** True while a pinch-to-zoom gesture is active (fed from svelte-gestures). */
+  private _pinchActive = false;
+
+  private static readonly IS_TOUCH_DEVICE =
+    ('ontouchstart' in window) || (navigator.maxTouchPoints > 0) ||
+    (window.matchMedia?.('(pointer: coarse)').matches ?? false);
+
+  private _lastTapTime = 0;
+  private _lastTapX = 0;
+  private _lastTapY = 0;
+  private _pendingClickTimer: ReturnType<typeof setTimeout> | null = null;
+  private _pendingClickX = 0;
+  private _pendingClickY = 0;
+
+  private _rafId = 0;
+  private _running = false;
+  private _visible = true;
+  private _disposed = false;
+  private _userMoved = false;
+  private _lastHoverTime = 0;
+  private _hoveredNodeId: string | null = null;
+  private _cursorMode: 'idle' | 'grabbing' | 'pointer' = 'idle';
+
+  // Dynamic camera Z bounds derived from the layout's depth (time) range.
+  // Newest photos sit at maxCellZ*CHUNK_SIZE; the camera starts just above
+  // that and can zoom down toward 0 (oldest). Updated by setNodes.
+  private _maxCameraZ = MAX_CAMERA_Z;
+  private _minCameraZ = MIN_CAMERA_Z;
+  /**
+   * Optional tighter Z clamp for the pinch gesture only. When set (by
+   * CanvasView to the current time bucket's depth span), pinch zoom stays
+   * inside the month the user is viewing instead of scrubbing across months.
+   * null = no pinch-specific clamp (pinch uses the global min/max).
+   */
+  private _pinchMinZ: number | null = null;
+  private _pinchMaxZ: number | null = null;
+  /**
+   * Pinch-to-zoom sensitivity exponent. newZ = startZ * (startDist/dist)^s.
+   * 1.0 = a 1:1 finger-distance ratio (current/default behaviour); <1.0
+   * dampens the zoom so a large pinch moves the camera less (slower time
+   * travel); >1.0 amplifies it (faster). Set from configStore so the user
+   * can tune how quickly pinching scrubs through time buckets.
+   */
+  private _pinchSensitivity = 1.0;
+  private _lastChunkX = Infinity;
+  private _lastChunkY = Infinity;
+  private _lastChunkZ = Infinity;
+
+  // --- fly-to (animated camera travel) state ------------------------------
+  // null when idle; otherwise lerps _basePos from _flyFrom to _flyTo over
+  // _flyElapsed/_flyDuration ms. Animates all three axes so the camera can
+  // pan (X/Y) and zoom (Z) simultaneously toward a specific node.
+  private _flyTo: THREE.Vector3 | null = null;
+  private readonly _flyFrom = new THREE.Vector3();
+  private _flyElapsed = 0;
+  private _flyDuration = 700;
+  private _lastFrameMs = 0;
+
+  /** Optional callback fired when the camera crosses a chunk boundary. */
+  onChunkChange?: (cx: number, cy: number, cz: number) => void;
+
+  /** Fired when the user clicks a photo plane (or null on empty-space click). */
+  onSelectNode?: (nodeId: string | null) => void;
+
+  /** Fired as the pointer moves over a photo plane (or null when off-plane). */
+  onHoverNode?: (nodeId: string | null) => void;
+
+  /** Fired on a confirmed double-tap (touch) with the tap screen coordinates. */
+  onDoubleTap?: (clientX: number, clientY: number) => void;
+
+  /** Fired when a trackpad (two-finger) scroll is detected; carries accumulated pixel delta. */
+  onTimelineScroll?: (delta: number) => void;
+
+  /**
+   * Creates the renderer, camera, scene, shared geometry, and chunk manager,
+   * appends the renderer's DOM element to `container`, and attaches input +
+   * resize listeners. Does not start the RAF loop — call `start()`.
+   *
+   * @param container - DOM element to mount the canvas in.
+   */
+  constructor(container: HTMLElement) {
+    this._container = container;
+    const width = container.clientWidth || 1;
+    const height = container.clientHeight || 1;
+
+    this._renderer = new THREE.WebGLRenderer({ antialias: true });
+    this._renderer.setPixelRatio(window.devicePixelRatio);
+    this._renderer.setSize(width, height);
+    container.appendChild(this._renderer.domElement);
+    this._renderer.domElement.style.display = 'block';
+    this._renderer.domElement.style.touchAction = 'none';
+
+    this._camera = new THREE.PerspectiveCamera(
+      CAMERA_FOV,
+      width / height,
+      CAMERA_NEAR,
+      CAMERA_FAR_MIN,
+    );
+    this._camera.position.set(0, 0, INITIAL_CAMERA_Z);
+
+    this._scene = new THREE.Scene();
+    this._scene.background = new THREE.Color(BACKGROUND_COLOR);
+
+    this._sharedGeometry = new THREE.PlaneGeometry(1, 1);
+    this._chunkManager = new ChunkManager(this._scene, this._sharedGeometry);
+
+    this._resizeObserver = new ResizeObserver(() => this.onResize());
+    this._resizeObserver.observe(container);
+
+    this.bindEvents();
+    this._renderer.domElement.style.cursor = 'grab';
+  }
+
+  /** The perspective camera. */
+  get camera(): THREE.PerspectiveCamera {
+    return this._camera;
+  }
+
+  get basePosX(): number { return this._basePos.x; }
+  get basePosY(): number { return this._basePos.y; }
+  get basePosZ(): number { return this._basePos.z; }
+  get minCameraZ(): number { return this._minCameraZ; }
+  get maxCameraZ(): number { return this._maxCameraZ; }
+  get domElement(): HTMLCanvasElement { return this._renderer.domElement; }
+
+  /** Number of chunks currently mounted (debug). */
+  get mountedChunkCount(): number {
+    return this._chunkManager.mountedChunkCount;
+  }
+
+  /**
+   * Returns the IDs of all nodes in currently-mounted chunks (visible on
+   * canvas). Intended for debugging / browser-harness polling.
+   */
+  getVisibleNodeIds(): string[] {
+    const cm = this._chunkManager as unknown as {
+      _mounted: Map<string, { planes: { node: { id: string } }[] }>;
+    };
+    const ids: string[] = [];
+    for (const chunk of cm._mounted.values()) {
+      for (const p of chunk.planes) ids.push(p.node.id);
+    }
+    return ids;
+  }
+
+  /** Current camera world position (for debugging). */
+  get cameraPosition(): { x: number; y: number; z: number } {
+    return {
+      x: this._basePos.x,
+      y: this._basePos.y,
+      z: this._basePos.z,
+    };
+  }
+
+  /**
+   * Looks up the `CanvasNode` for `nodeId` among mounted chunks. Returns
+   * `undefined` when the node's chunk is outside the render distance.
+   */
+  getCanvasNode(nodeId: string): CanvasNode | undefined {
+    return this._chunkManager.findPlaneByNodeId(nodeId)?.node;
+  }
+
+  /**
+   * Returns the world-space position of the plane mesh for `nodeId`, or
+   * `null` when the node's chunk is not currently mounted. Safe to call
+   * outside the RAF loop — `getWorldPosition` updates the world matrix on
+   * demand, so the returned position is correct even between frames.
+   */
+  getPlaneWorldPosition(nodeId: string): THREE.Vector3 | null {
+    const plane = this._chunkManager.findPlaneByNodeId(nodeId);
+    if (!plane) return null;
+    const worldPos = new THREE.Vector3();
+    plane.mesh.getWorldPosition(worldPos);
+    return worldPos;
+  }
+
+  /**
+   * Projects a world-space position to canvas-relative screen coordinates.
+   * Returns `null` when the point is behind the camera.
+   */
+  projectToScreen(worldPos: THREE.Vector3): { x: number; y: number } | null {
+    const rect = this._renderer.domElement.getBoundingClientRect();
+    const ndc = worldPos.clone().project(this._camera);
+    if (ndc.z > 1) return null;
+    return {
+      x: ((ndc.x + 1) / 2) * rect.width,
+      y: ((1 - ndc.y) / 2) * rect.height,
+    };
+  }
+
+  /**
+   * Projects the top-right corner of a photo plane to screen coordinates.
+   * Returns `null` when the node isn't mounted or is behind the camera.
+   */
+  projectPlaneCorner(nodeId: string): { x: number; y: number } | null {
+    const plane = this._chunkManager.findPlaneByNodeId(nodeId);
+    if (!plane) return null;
+    const node = plane.node;
+    const worldPos = new THREE.Vector3();
+    plane.mesh.getWorldPosition(worldPos);
+    // The plane geometry is 1×1 scaled by (width, height), so the top-right
+    // corner is offset by (+w/2, +h/2) in local space. The plane mesh has no
+    // rotation, so local +X is right and local +Y is up.
+    worldPos.x += node.width / 2 - node.width * 0.05;
+    worldPos.y -= node.height / 2 - node.height * 0.05;
+    return this.projectToScreen(worldPos);
+  }
+
+  /**
+   * (Re)builds the layout from canvas nodes and forwards to `ChunkManager`.
+   *
+   * @param nodes - all canvas nodes.
+   */
+  setNodes(nodes: CanvasNode[]): void {
+    this.updateDepthBounds(nodes);
+    if (!this._userMoved && nodes.length > 0) {
+      this.centerOnLayout(nodes);
+    }
+    this._chunkManager.setLayout(nodes);
+  }
+
+  setPinchSensitivity(s: number): void {
+    this._pinchSensitivity = Math.max(0.1, Math.min(3.0, s));
+  }
+
+  setPinchZoomBounds(minZ: number | null, maxZ: number | null): void {
+    this._pinchMinZ = minZ;
+    this._pinchMaxZ = maxZ;
+  }
+
+  /**
+   * Derive dynamic camera Z bounds + far clipping plane from the layout's
+   * depth (time) range. Newest photos at maxCellZ get a starting camera Z
+   * above them; the min is just above the oldest (z=0) plane so the user
+   * can't fly past the oldest photos.
+   */
+   private updateDepthBounds(nodes: CanvasNode[]): void {
+     if (nodes.length === 0) {
+       this._maxCameraZ = MAX_CAMERA_Z;
+       this._minCameraZ = MIN_CAMERA_Z;
+       this._camera.far = CAMERA_FAR_MIN;
+       this._camera.updateProjectionMatrix();
+       return;
+     }
+     let maxCellZ = 0;
+     let minCellZ = Infinity;
+     for (const n of nodes) {
+       if (n.cellZ > maxCellZ) maxCellZ = n.cellZ;
+       if (n.cellZ < minCellZ) minCellZ = n.cellZ;
+     }
+     const newestZ = maxCellZ * CHUNK_SIZE + CHUNK_SIZE;
+     this._maxCameraZ = newestZ + INITIAL_CAMERA_Z;
+     // Keep the camera at least INITIAL_CAMERA_Z above the oldest bucket so
+     // zooming in past the oldest photos can't fly the camera inside the
+     // photo plane (which renders a blank scene).
+     this._minCameraZ = Math.max(MIN_CAMERA_Z, minCellZ * CHUNK_SIZE + INITIAL_CAMERA_Z);
+     const far = Math.max(CAMERA_FAR_MIN, this._maxCameraZ + CHUNK_SIZE * (RENDER_DISTANCE + CHUNK_FADE_MARGIN + 1));
+     if (this._camera.far !== far) {
+       this._camera.far = far;
+       this._camera.updateProjectionMatrix();
+     }
+   }
+
+  /** Moves the camera to face the newest photos at a comfortable viewing distance. */
+  private centerOnLayout(nodes: CanvasNode[]): void {
+    if (nodes.length === 0) {
+      this._camera.position.set(0, 0, INITIAL_CAMERA_Z);
+      this._basePos.set(0, 0, INITIAL_CAMERA_Z);
+      return;
+    }
+    // Center on the newest time bucket (highest cellZ) — that's where the
+    // user starts. X=0 is the center of each layer's within-bucket spread, and
+    // Y is the first cluster band. Zooming in (decreasing camera z) travels
+    // back in time.
+    let newest = nodes[0];
+    for (const n of nodes) if (n.cellZ > newest.cellZ) newest = n;
+    const targetX = 0;
+    const targetY = 0;
+    const targetZ = newest.cellZ * CHUNK_SIZE + INITIAL_CAMERA_Z;
+    this._camera.position.set(targetX, targetY, targetZ);
+    this._basePos.set(targetX, targetY, targetZ);
+  }
+
+  /**
+   * Smoothly animate the camera's Z to `targetZ` (clamped to the current
+   * depth bounds), centering X/Y at 0. Cancels any in-flight fly and clears
+   * velocity so inertia from prior drag/wheel input doesn't fight the tween.
+   * Use for the date-pill timeline navigation.
+   */
+  flyTo(targetZ: number): void {
+    if (this._disposed) return;
+    const clampedZ = Math.max(this._minCameraZ, Math.min(this._maxCameraZ, targetZ));
+    this._userMoved = true;
+    this._flyFrom.copy(this._basePos);
+    this._flyTo = new THREE.Vector3(0, 0, clampedZ);
+    this._flyElapsed = 0;
+    this._flyDuration = 700;
+    this._velocity.set(0, 0, 0);
+    this._targetVel.set(0, 0, 0);
+    this._scrollAccum = 0;
+    this._scrollMomentum = 1;
+  }
+
+  flyToXYZ(x: number, y: number, z: number, durationMs = 700): void {
+    if (this._disposed) return;
+    const clampedZ = Math.max(this._minCameraZ, Math.min(this._maxCameraZ, z));
+    this._userMoved = true;
+    this._flyFrom.copy(this._basePos);
+    this._flyTo = new THREE.Vector3(x, y, clampedZ);
+    this._flyElapsed = 0;
+    this._flyDuration = durationMs;
+    this._velocity.set(0, 0, 0);
+    this._targetVel.set(0, 0, 0);
+    this._scrollAccum = 0;
+    this._scrollMomentum = 1;
+  }
+
+  /**
+   * Smoothly animate the camera to center on a specific node, panning X/Y
+   * and zooming Z simultaneously. Computes the node's world position from its
+   * chunk cell + local offset and targets a comfortable viewing distance.
+   * Slower than `flyTo` (1.6s) for a deliberate, cinematic focus.
+   */
+  flyToNode(nodeId: string): void {
+    if (this._disposed) return;
+    const plane = this._chunkManager.findPlaneByNodeId(nodeId, this._basePos.z);
+    if (!plane) return;
+    const node = plane.node;
+    const worldX = node.cellX * CHUNK_SIZE + node.localX;
+    const worldY = node.cellY * CHUNK_SIZE + node.localY;
+    const worldZ = node.cellZ * CHUNK_SIZE + node.localZ;
+    const targetZ = Math.max(this._minCameraZ, worldZ + INITIAL_CAMERA_Z * 0.5);
+    this._flyFrom.copy(this._basePos);
+    this._flyTo = new THREE.Vector3(worldX, worldY, targetZ);
+    this._flyElapsed = 0;
+    this._flyDuration = 1600;
+    this._userMoved = true;
+    this._velocity.set(0, 0, 0);
+    this._targetVel.set(0, 0, 0);
+    this._scrollAccum = 0;
+    this._scrollMomentum = 1;
+  }
+
+  /** Cancels any active fly-to, leaving the camera wherever it currently sits. */
+  cancelFly(): void {
+    this._flyTo = null;
+  }
+
+  /** Advances the fly-to tween by `deltaMs`. Returns true while flying. */
+  private tickFly(deltaMs: number): boolean {
+    if (this._flyTo === null) return false;
+    this._flyElapsed += deltaMs;
+    const t = Math.min(1, this._flyElapsed / this._flyDuration);
+    const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    this._basePos.x = this._flyFrom.x + (this._flyTo.x - this._flyFrom.x) * eased;
+    this._basePos.y = this._flyFrom.y + (this._flyTo.y - this._flyFrom.y) * eased;
+    this._basePos.z = this._flyFrom.z + (this._flyTo.z - this._flyFrom.z) * eased;
+    if (t >= 1) this._flyTo = null;
+    return true;
+  }
+
+  /** Begins the RAF loop. Safe to call once; idempotent if already running. */
+  start(): void {
+    if (this._running || this._disposed) return;
+    this._running = true;
+    this._rafId = requestAnimationFrame(this.onFrame);
+  }
+
+  /** Cancels the RAF loop. Idempotent. */
+  stop(): void {
+    this._running = false;
+    if (this._rafId) {
+      cancelAnimationFrame(this._rafId);
+      this._rafId = 0;
+    }
+  }
+
+  /** Stops the loop, disposes chunks, renderer, geometry, and removes DOM. */
+  dispose(): void {
+    if (this._disposed) return;
+    this._disposed = true;
+    this.stop();
+    if (this._pendingClickTimer) {
+      clearTimeout(this._pendingClickTimer);
+      this._pendingClickTimer = null;
+    }
+    this._resizeObserver.disconnect();
+    this.unbindEvents();
+    this._chunkManager.dispose();
+    this._sharedGeometry.dispose();
+    this._renderer.dispose();
+    if (this._renderer.domElement.parentNode === this._container) {
+      this._container.removeChild(this._renderer.domElement);
+    }
+  }
+
+  /** Resizes renderer + camera aspect to the current container size. */
+  private onResize(): void {
+    if (this._disposed) return;
+    const width = this._container.clientWidth || 1;
+    const height = this._container.clientHeight || 1;
+    this._renderer.setSize(width, height);
+    this._camera.aspect = width / height;
+    this._camera.updateProjectionMatrix();
+  }
+
+  /** RAF callback — applies input, updates chunks, renders. */
+  private readonly onFrame = (): void => {
+    if (!this._running || this._disposed) return;
+    this._rafId = requestAnimationFrame(this.onFrame);
+    if (!this._visible) return;
+
+    const now = performance.now();
+    const deltaMs = this._lastFrameMs ? Math.min(64, now - this._lastFrameMs) : 16;
+    this._lastFrameMs = now;
+
+    if (this.tickFly(deltaMs)) {
+      this._drift.set(0, 0);
+    } else {
+      this.applyKeyboard();
+      this.applyVelocity();
+      this.applyDrift();
+    }
+
+    // Compose final camera position from basePos + drift. Chunk/fade logic
+    // uses basePos only so mouse parallax never triggers remounts or pop-in.
+    this._camera.position.set(
+      this._basePos.x + this._drift.x,
+      this._basePos.y + this._drift.y,
+      this._basePos.z,
+    );
+
+    const velMag = this._velocity.length();
+    this._chunkManager.update(this._basePos, velMag);
+
+    const cx = Math.floor(this._basePos.x / CHUNK_SIZE);
+    const cy = Math.floor(this._basePos.y / CHUNK_SIZE);
+    const cz = Math.floor(this._basePos.z / CHUNK_SIZE);
+    if (cx !== this._lastChunkX || cy !== this._lastChunkY || cz !== this._lastChunkZ) {
+      this._lastChunkX = cx;
+      this._lastChunkY = cy;
+      this._lastChunkZ = cz;
+      this.onChunkChange?.(cx, cy, cz);
+    }
+
+    this._renderer.render(this._scene, this._camera);
+  };
+
+  /** Applies held keyboard keys to the velocity vector. */
+  private applyKeyboard(): void {
+    const k = this._keys;
+    let moved = false;
+    if (k.has('ArrowLeft')) { this._targetVel.x -= KEYBOARD_SPEED; moved = true; }
+    if (k.has('ArrowRight')) { this._targetVel.x += KEYBOARD_SPEED; moved = true; }
+    if (k.has('ArrowUp')) { this._targetVel.y += KEYBOARD_SPEED; moved = true; }
+    if (k.has('ArrowDown')) { this._targetVel.y -= KEYBOARD_SPEED; moved = true; }
+    if (moved) {
+      this._userMoved = true;
+      this.cancelFly();
+    }
+  }
+
+  /** Integrates targetVel + scrollAccum into velocity, then velocity into basePos. */
+  private applyVelocity(): void {
+    this._targetVel.z += this._scrollAccum;
+    this._scrollAccum *= SCROLL_DECAY;
+    this._scrollMomentum = 1 + (this._scrollMomentum - 1) * SCROLL_MOMENTUM_DECAY;
+    if (this._scrollMomentum < 1.01) this._scrollMomentum = 1;
+
+    this._targetVel.clampLength(0, MAX_VELOCITY);
+
+    this._velocity.x = this._velocity.x + (this._targetVel.x - this._velocity.x) * VELOCITY_LERP;
+    this._velocity.y = this._velocity.y + (this._targetVel.y - this._velocity.y) * VELOCITY_LERP;
+    this._velocity.z = this._velocity.z + (this._targetVel.z - this._velocity.z) * VELOCITY_LERP;
+
+    this._basePos.x += this._velocity.x;
+    this._basePos.y += this._velocity.y;
+    this._basePos.z += this._velocity.z;
+
+    if (this._basePos.z < this._minCameraZ) this._basePos.z = this._minCameraZ;
+    if (this._basePos.z > this._maxCameraZ) this._basePos.z = this._maxCameraZ;
+    if (this._pinchActive && this._pinchMinZ !== null && this._pinchMaxZ !== null) {
+      if (this._basePos.z < this._pinchMinZ) this._basePos.z = this._pinchMinZ;
+      if (this._basePos.z > this._pinchMaxZ) this._basePos.z = this._pinchMaxZ;
+    }
+
+    this._targetVel.multiplyScalar(VELOCITY_DECAY);
+    if (this._targetVel.lengthSq() < 1e-6) this._targetVel.set(0, 0, 0);
+  }
+
+  /** Smooths drift toward mouse * driftAmount (zoom-scaled parallax). */
+  private applyDrift(): void {
+    const isZooming = Math.abs(this._velocity.z) > ZOOMING_VEL_THRESHOLD;
+    const zoomFactor = Math.max(
+      ZOOM_FACTOR_MIN,
+      Math.min(ZOOM_FACTOR_MAX, this._basePos.z / ZOOM_FACTOR_DIVISOR),
+    );
+    const amount = DRIFT_AMOUNT * zoomFactor;
+    const lerpFactor = isZooming ? DRIFT_LERP_ZOOMING : DRIFT_LERP;
+    if (this._pointer.down || this._pinchActive) {
+      return;
+    }
+    if (SceneManager.IS_TOUCH_DEVICE) {
+      this._drift.x = this._drift.x + (0 - this._drift.x) * lerpFactor;
+      this._drift.y = this._drift.y + (0 - this._drift.y) * lerpFactor;
+    } else {
+      this._drift.x = this._drift.x + (this._mouse.x * amount - this._drift.x) * lerpFactor;
+      this._drift.y = this._drift.y + (this._mouse.y * amount - this._drift.y) * lerpFactor;
+    }
+  }
+
+  // --- input handlers --------------------------------------------------
+
+  private onKeyDown = (e: KeyboardEvent): void => {
+    const el = e.target as HTMLElement | null;
+    if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+    this._keys.add(e.key);
+  };
+
+  private onKeyUp = (e: KeyboardEvent): void => {
+    const el = e.target as HTMLElement | null;
+    if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+    this._keys.delete(e.key);
+  };
+
+  private onPointerDown = (e: PointerEvent): void => {
+    this.cancelFly();
+    if (e.pointerType === 'touch') {
+      this._pointer.down = true;
+      this._pointer.isTouch = true;
+      this._pointer.lastX = e.clientX;
+      this._pointer.lastY = e.clientY;
+      this._pointer.downStartX = e.clientX;
+      this._pointer.downStartY = e.clientY;
+      this._pointer.dragged = false;
+    } else {
+      this._pointer.down = true;
+      this._pointer.isTouch = false;
+      this._pointer.lastX = e.clientX;
+      this._pointer.lastY = e.clientY;
+      this._pointer.downStartX = e.clientX;
+      this._pointer.downStartY = e.clientY;
+      this._pointer.dragged = false;
+    }
+    this._userMoved = true;
+    this.updateCursor();
+  };
+
+  private onPointerMove = (e: PointerEvent): void => {
+    const rect = this._renderer.domElement.getBoundingClientRect();
+    this._mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this._mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+    if (e.pointerType === 'touch') {
+      if (this._pointer.down && !this._pinchActive) {
+        const dx = e.clientX - this._pointer.lastX;
+        const dy = e.clientY - this._pointer.lastY;
+        this._pointer.lastX = e.clientX;
+        this._pointer.lastY = e.clientY;
+        if (Math.hypot(e.clientX - this._pointer.downStartX, e.clientY - this._pointer.downStartY) > 5) {
+          this._pointer.dragged = true;
+        }
+        const zScale = this._basePos.z / ZOOM_FACTOR_DIVISOR;
+        this._targetVel.x -= dx * TOUCH_PAN_FACTOR * zScale;
+        this._targetVel.y += dy * TOUCH_PAN_FACTOR * zScale;
+        this._userMoved = true;
+      }
+      return;
+    }
+
+    if (this._pointer.down) {
+      const dx = e.clientX - this._pointer.lastX;
+      const dy = e.clientY - this._pointer.lastY;
+      this._pointer.lastX = e.clientX;
+      this._pointer.lastY = e.clientY;
+      if (Math.hypot(e.clientX - this._pointer.downStartX, e.clientY - this._pointer.downStartY) > 5) {
+        this._pointer.dragged = true;
+      }
+      const zScale = this._basePos.z / ZOOM_FACTOR_DIVISOR;
+      this._targetVel.x -= dx * MOUSE_PAN_FACTOR * zScale;
+      this._targetVel.y += dy * MOUSE_PAN_FACTOR * zScale;
+      this._userMoved = true;
+      this.updateCursor();
+    } else {
+      this.hoverRaycast(e);
+    }
+  };
+
+  private onPointerUp = (e: PointerEvent): void => {
+    if (e.pointerType === 'touch') {
+      if (this._pointer.down && !this._pointer.dragged) {
+        this.detectDoubleTap(e.clientX, e.clientY);
+      }
+      this._pointer.down = false;
+      this.updateCursor();
+      return;
+    }
+    if (this._pointer.down && !this._pointer.dragged) {
+      this.clickRaycast(e);
+    }
+    this._pointer.down = false;
+    this.updateCursor();
+  };
+
+  private detectDoubleTap(x: number, y: number): void {
+    const now = performance.now();
+    const TAP_GAP = 300;
+    const TAP_RADIUS = 30;
+    const isDoubleTap =
+      now - this._lastTapTime < TAP_GAP &&
+      Math.hypot(x - this._lastTapX, y - this._lastTapY) < TAP_RADIUS;
+    this._lastTapTime = now;
+    this._lastTapX = x;
+    this._lastTapY = y;
+
+    if (!isDoubleTap) {
+      this._pendingClickX = x;
+      this._pendingClickY = y;
+      if (this._pendingClickTimer) clearTimeout(this._pendingClickTimer);
+      this._pendingClickTimer = setTimeout(() => {
+        this._pendingClickTimer = null;
+        this.clickRaycastAt(this._pendingClickX, this._pendingClickY);
+      }, TAP_GAP);
+      return;
+    }
+
+    if (this._pendingClickTimer) {
+      clearTimeout(this._pendingClickTimer);
+      this._pendingClickTimer = null;
+    }
+    this._lastTapTime = 0;
+    this.onDoubleTap?.(x, y);
+  }
+
+  /** Called by svelte-gestures when a pinch-to-zoom gesture starts. */
+  handlePinchStart(): void {
+    this._pinchActive = true;
+    this._pointer.dragged = true;
+    this._userMoved = true;
+    this.cancelFly();
+  }
+
+  /** Called by svelte-gestures on each pinch scale change. */
+  handlePinchMove(scaleDelta: number): void {
+    if (!this._pinchActive) return;
+    const zScale = this._basePos.z / ZOOM_FACTOR_DIVISOR;
+    this._scrollAccum += scaleDelta * ZOOM_FACTOR * zScale * this._pinchSensitivity;
+    this._userMoved = true;
+  }
+
+  /** Called by svelte-gestures when the pinch gesture ends. */
+  handlePinchEnd(): void {
+    this._pinchActive = false;
+  }
+
+  /** Called by svelte-gestures on single-finger touch pan. */
+  handleTouchPan(dx: number, dy: number): void {
+    const zScale = this._basePos.z / ZOOM_FACTOR_DIVISOR;
+    this._targetVel.x -= dx * TOUCH_PAN_FACTOR * zScale;
+    this._targetVel.y += dy * TOUCH_PAN_FACTOR * zScale;
+    this._userMoved = true;
+  }
+
+  private onWheel = (e: WheelEvent): void => {
+    e.preventDefault();
+    // Pinch-to-zoom sends ctrlKey=true on macOS. Everything else
+    // (trackpad scroll, mouse wheel) navigates the timeline.
+    if (e.ctrlKey) {
+      this.cancelFly();
+      const zScale = this._basePos.z / ZOOM_FACTOR_DIVISOR;
+      this._scrollAccum += e.deltaY * ZOOM_FACTOR * zScale;
+      this._pointer.dragged = true;
+      this._userMoved = true;
+      return;
+    }
+    this.onTimelineScroll?.(e.deltaY);
+  };
+
+  /**
+   * Raycasts from pointer NDC into the mounted chunk meshes and fires
+   * `onHoverNode` with the hit node id (or null). Throttled to ~30Hz.
+   */
+  private hoverRaycast(e: PointerEvent): void {
+    const now = performance.now();
+    if (now - this._lastHoverTime < 33) return;
+    this._lastHoverTime = now;
+    const hit = this.raycast(e);
+    const id = hit ?? null;
+    if (id !== this._hoveredNodeId) {
+      if (this._hoveredNodeId !== null) {
+        this._chunkManager.findPlaneByNodeId(this._hoveredNodeId)?.setHovered(false);
+      }
+      this._hoveredNodeId = id;
+      if (id !== null) {
+        this._chunkManager.findPlaneByNodeId(id)?.setHovered(true);
+      }
+      this.updateCursor();
+    }
+    this.onHoverNode?.(id);
+  }
+
+  /** Raycasts on click and fires `onSelectNode` with the hit id (or null). */
+  private clickRaycast(e: PointerEvent): void {
+    this.clickRaycastAt(e.clientX, e.clientY);
+  }
+
+  private clickRaycastAt(clientX: number, clientY: number): void {
+    const hit = this.raycastAt(clientX, clientY);
+    this.onSelectNode?.(hit ?? null);
+  }
+
+  private raycastAt(clientX: number, clientY: number): string | undefined {
+    const rect = this._renderer.domElement.getBoundingClientRect();
+    this._pointerNdc.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    this._pointerNdc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    this._raycaster.setFromCamera(this._pointerNdc, this._camera);
+    const meshes = this._chunkManager.getPickableMeshes();
+    if (meshes.length === 0) return undefined;
+    const hits = this._raycaster.intersectObjects(meshes, false);
+    if (hits.length === 0) return undefined;
+    const nodeId = hits[0].object.userData.nodeId;
+    return typeof nodeId === 'string' ? nodeId : undefined;
+  }
+
+  /**
+   * Converts a pointer event to NDC and raycasts against the mounted chunk
+   * meshes. Returns the hit node id, or `undefined` on no hit.
+   */
+  private raycast(e: PointerEvent): string | undefined {
+    return this.raycastAt(e.clientX, e.clientY);
+  }
+
+  private onContextLoss = (): void => {
+    console.warn('[SceneManager] WebGL context lost — stopping RAF loop.');
+    this.stop();
+  };
+
+  private onDoubleClick = (e: MouseEvent): void => {
+    this.onDoubleTap?.(e.clientX, e.clientY);
+  };
+
+  private onVisibilityChange = (): void => {
+    this._visible = document.visibilityState === 'visible';
+    if (this._visible && this._running && !this._rafId) {
+      this._rafId = requestAnimationFrame(this.onFrame);
+    }
+  };
+
+  /** Updates the canvas cursor based on interaction state. */
+  private updateCursor(): void {
+    let mode: 'idle' | 'grabbing' | 'pointer';
+    if (this._pointer.down) {
+      mode = 'grabbing';
+    } else if (this._hoveredNodeId !== null) {
+      mode = 'pointer';
+    } else {
+      mode = 'idle';
+    }
+    if (mode === this._cursorMode) return;
+    this._cursorMode = mode;
+    const el = this._renderer.domElement;
+    if (mode === 'grabbing') el.style.cursor = 'grabbing';
+    else if (mode === 'pointer') el.style.cursor = 'pointer';
+    else el.style.cursor = 'grab';
+  }
+
+  private bindEvents(): void {
+    window.addEventListener('keydown', this.onKeyDown);
+    window.addEventListener('keyup', this.onKeyUp);
+    const el = this._renderer.domElement;
+    el.addEventListener('pointerdown', this.onPointerDown);
+    el.addEventListener('pointermove', this.onPointerMove);
+    el.addEventListener('pointerup', this.onPointerUp);
+    el.addEventListener('pointerleave', this.onPointerUp);
+    el.addEventListener('wheel', this.onWheel, { passive: false });
+    el.addEventListener('dblclick', this.onDoubleClick);
+    el.addEventListener('webglcontextlost', this.onContextLoss);
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
+  }
+
+  private unbindEvents(): void {
+    window.removeEventListener('keydown', this.onKeyDown);
+    window.removeEventListener('keyup', this.onKeyUp);
+    const el = this._renderer.domElement;
+    el.removeEventListener('pointerdown', this.onPointerDown);
+    el.removeEventListener('pointermove', this.onPointerMove);
+    el.removeEventListener('pointerup', this.onPointerUp);
+    el.removeEventListener('pointerleave', this.onPointerUp);
+    el.removeEventListener('wheel', this.onWheel);
+    el.removeEventListener('dblclick', this.onDoubleClick);
+    el.removeEventListener('webglcontextlost', this.onContextLoss);
+    document.removeEventListener('visibilitychange', this.onVisibilityChange);
+  }
+}
