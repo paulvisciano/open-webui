@@ -43,8 +43,14 @@
 	let TTS_AZURE_SPEECH_REGION = '';
 	let TTS_AZURE_SPEECH_BASE_URL = '';
 	let TTS_AZURE_SPEECH_OUTPUT_FORMAT = '';
-	let TTS_MISTRAL_API_KEY = '';
-	let TTS_MISTRAL_API_BASE_URL = '';
+let TTS_MISTRAL_API_KEY = '';
+let TTS_MISTRAL_API_BASE_URL = '';
+let TTS_PIPER_API_BASE_URL = '';
+let TTS_PIPER_VOICE = '';
+let TTS_PIPER_LENGTH_SCALE = 1.0;
+let TTS_KOKORO_LANG_CODE = 'a';
+let TTS_KOKORO_VOICE = 'af_heart';
+let TTS_KOKORO_SPEED = 1.0;
 
 	let STT_OPENAI_API_BASE_URL = '';
 	let STT_OPENAI_API_KEY = '';
@@ -157,7 +163,13 @@
 				AZURE_SPEECH_OUTPUT_FORMAT: TTS_AZURE_SPEECH_OUTPUT_FORMAT,
 				MISTRAL_API_KEY: TTS_MISTRAL_API_KEY,
 				MISTRAL_API_BASE_URL: TTS_MISTRAL_API_BASE_URL,
-				SPLIT_ON: TTS_SPLIT_ON
+			PIPER_API_BASE_URL: TTS_PIPER_API_BASE_URL,
+			PIPER_VOICE: TTS_PIPER_VOICE,
+			PIPER_LENGTH_SCALE: TTS_PIPER_LENGTH_SCALE,
+			KOKORO_LANG_CODE: TTS_KOKORO_LANG_CODE,
+			KOKORO_VOICE: TTS_KOKORO_VOICE,
+			KOKORO_SPEED: TTS_KOKORO_SPEED,
+			SPLIT_ON: TTS_SPLIT_ON
 			},
 			stt: {
 				OPENAI_API_BASE_URL: STT_OPENAI_API_BASE_URL,
@@ -212,6 +224,12 @@
 			TTS_AZURE_SPEECH_OUTPUT_FORMAT = res.tts.AZURE_SPEECH_OUTPUT_FORMAT;
 			TTS_MISTRAL_API_KEY = res.tts.MISTRAL_API_KEY;
 			TTS_MISTRAL_API_BASE_URL = res.tts.MISTRAL_API_BASE_URL;
+			TTS_PIPER_API_BASE_URL = res.tts.PIPER_API_BASE_URL ?? 'http://localhost:5000';
+			TTS_PIPER_VOICE = res.tts.PIPER_VOICE ?? 'en_US-lessac-medium';
+			TTS_PIPER_LENGTH_SCALE = res.tts.PIPER_LENGTH_SCALE ?? 1.0;
+			TTS_KOKORO_LANG_CODE = res.tts.KOKORO_LANG_CODE ?? 'a';
+			TTS_KOKORO_VOICE = res.tts.KOKORO_VOICE ?? 'af_heart';
+			TTS_KOKORO_SPEED = res.tts.KOKORO_SPEED ?? 1.0;
 
 			STT_OPENAI_API_BASE_URL = res.stt.OPENAI_API_BASE_URL;
 			STT_OPENAI_API_KEY = res.stt.OPENAI_API_KEY;
@@ -487,16 +505,19 @@
 
 						const value = (e.currentTarget as HTMLSelectElement).value;
 
-						if (value === 'openai') {
-							TTS_VOICE = 'alloy';
-							TTS_MODEL = 'tts-1';
-						} else if (value === 'mistral') {
-							TTS_VOICE = '';
-							TTS_MODEL = 'voxtral-mini-tts-2603';
-						} else {
-							TTS_VOICE = '';
-							TTS_MODEL = '';
-						}
+					if (value === 'openai') {
+						TTS_VOICE = 'alloy';
+						TTS_MODEL = 'tts-1';
+					} else if (value === 'mistral') {
+						TTS_VOICE = '';
+						TTS_MODEL = 'voxtral-mini-tts-2603';
+					} else if (value === 'kokoro') {
+						TTS_VOICE = TTS_KOKORO_VOICE || 'af_heart';
+						TTS_MODEL = 'kokoro-82M';
+					} else {
+						TTS_VOICE = '';
+						TTS_MODEL = '';
+					}
 					}}
 				>
 					<option value="">{$i18n.t('Web API')}</option>
@@ -504,11 +525,13 @@
 					<option value="openai">{$i18n.t('OpenAI')}</option>
 					<option value="elevenlabs">{$i18n.t('ElevenLabs')}</option>
 					<option value="azure">{$i18n.t('Azure AI Speech')}</option>
-					<option value="mistral">{$i18n.t('MistralAI')}</option>
-				</SettingsSelect>
-			</AdminSettingRow>
+				<option value="mistral">{$i18n.t('MistralAI')}</option>
+				<option value="piper">{$i18n.t('Piper')} ({$i18n.t('Local')})</option>
+			<option value="kokoro">{$i18n.t('Kokoro')} ({$i18n.t('Local')})</option>
+			</SettingsSelect>
+		</AdminSettingRow>
 
-			{#if TTS_ENGINE === 'openai'}
+		{#if TTS_ENGINE === 'openai'}
 				<div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
 					<AdminSettingField label={$i18n.t('API Base URL')}>
 						<input
@@ -579,6 +602,89 @@
 						/>
 					</AdminSettingField>
 				</div>
+			{:else if TTS_ENGINE === 'piper'}
+				<div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+					<AdminSettingField label={$i18n.t('API Base URL')}>
+						<input
+							class={inputClass}
+							placeholder="http://localhost:5000"
+							bind:value={TTS_PIPER_API_BASE_URL}
+							required
+						/>
+					</AdminSettingField>
+					<AdminSettingField label={$i18n.t('Voice')}>
+						<input
+							class={inputClass}
+							placeholder="en_US-lessac-medium"
+							bind:value={TTS_PIPER_VOICE}
+						/>
+					</AdminSettingField>
+				</div>
+			<AdminSettingField
+				label={$i18n.t('Length Scale')}
+				description={$i18n.t('Speed multiplier — lower is faster (default: 1.0).')}
+			>
+				<input
+					type="number"
+					step="0.1"
+					min="0.1"
+					class={inputClass}
+					bind:value={TTS_PIPER_LENGTH_SCALE}
+				/>
+			</AdminSettingField>
+		{:else if TTS_ENGINE === 'kokoro'}
+			<div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+				<AdminSettingField label={$i18n.t('Voice')}>
+					<input
+						list="tts-kokoro-voice-list"
+						class={inputClass}
+						bind:value={TTS_KOKORO_VOICE}
+						placeholder="af_heart"
+					/>
+					<datalist id="tts-kokoro-voice-list">
+						<option value="af_heart"></option>
+						<option value="af_bella"></option>
+						<option value="af_nicole"></option>
+						<option value="af_sarah"></option>
+						<option value="am_adam"></option>
+						<option value="am_michael"></option>
+						<option value="am_eric"></option>
+						<option value="bm_george"></option>
+						<option value="bf_emma"></option>
+					</datalist>
+				</AdminSettingField>
+				<AdminSettingField label={$i18n.t('Language Code')}>
+					<input
+						list="tts-kokoro-lang-list"
+						class={inputClass}
+						bind:value={TTS_KOKORO_LANG_CODE}
+						placeholder="a"
+					/>
+					<datalist id="tts-kokoro-lang-list">
+						<option value="a">{$i18n.t('American English')}</option>
+						<option value="b">{$i18n.t('British English')}</option>
+						<option value="e">{$i18n.t('Spanish')}</option>
+						<option value="f">{$i18n.t('French')}</option>
+						<option value="h">{$i18n.t('Hindi')}</option>
+						<option value="i">{$i18n.t('Italian')}</option>
+						<option value="j">{$i18n.t('Japanese')}</option>
+						<option value="p">{$i18n.t('Portuguese')}</option>
+						<option value="z">{$i18n.t('Mandarin Chinese')}</option>
+					</datalist>
+				</AdminSettingField>
+			</div>
+			<AdminSettingField
+				label={$i18n.t('Speed')}
+				description={$i18n.t('Speech rate multiplier (default: 1.0).')}
+			>
+				<input
+					type="number"
+					step="0.1"
+					min="0.1"
+					class={inputClass}
+					bind:value={TTS_KOKORO_SPEED}
+				/>
+			</AdminSettingField>
 			{/if}
 
 			{#if TTS_ENGINE === ''}

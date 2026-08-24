@@ -254,7 +254,60 @@
 
 		speaking = true;
 
-		if ($config.audio.tts.engine === '') {
+		if ($settings.audio?.tts?.engine === 'browser-kokoro') {
+			$audioQueue.setId(`${message.id}`);
+			$audioQueue.setPlaybackRate($settings.audio?.tts?.playbackRate ?? 1);
+			$audioQueue.onStopped = () => {
+				speaking = false;
+				speakingIdx = undefined;
+			};
+
+			loadingSpeech = true;
+			const messageContentParts: string[] = getMessageContentParts(
+				content,
+				$config?.audio?.tts?.split_on ?? 'punctuation'
+			);
+
+			if (!messageContentParts.length) {
+				toast.info($i18n.t('No content to speak'));
+				speaking = false;
+				loadingSpeech = false;
+				return;
+			}
+
+			const voiceId = getVoiceId();
+			console.debug('Prepared message content for TTS', messageContentParts, 'voice:', voiceId);
+
+			if (!$TTSWorker) {
+				await TTSWorker.set(
+					new KokoroWorker({
+						dtype: $settings.audio?.tts?.engineConfig?.dtype ?? 'fp32'
+					})
+				);
+
+				await $TTSWorker.init();
+			}
+
+			for (const [, sentence] of messageContentParts.entries()) {
+				if (signal.aborted) return;
+
+				const url = await $TTSWorker
+					.generate({ text: sentence, voice: voiceId })
+					.catch((error) => {
+						console.error(error);
+						toast.error(`${error}`);
+						speaking = false;
+						loadingSpeech = false;
+					});
+
+				if (signal.aborted) return;
+
+				if (url && speaking) {
+					$audioQueue.enqueue(url);
+					loadingSpeech = false;
+				}
+			}
+		} else if ($config.audio.tts.engine === '') {
 			let voices = [];
 			const getVoicesLoop = setInterval(() => {
 				voices = speechSynthesis.getVoices();
@@ -303,58 +356,27 @@
 			const voiceId = getVoiceId();
 			console.debug('Prepared message content for TTS', messageContentParts, 'voice:', voiceId);
 
-			if ($settings.audio?.tts?.engine === 'browser-kokoro') {
-				if (!$TTSWorker) {
-					await TTSWorker.set(
-						new KokoroWorker({
-							dtype: $settings.audio?.tts?.engineConfig?.dtype ?? 'fp32'
-						})
-					);
-
-					await $TTSWorker.init();
-				}
-
-				for (const [, sentence] of messageContentParts.entries()) {
-					if (signal.aborted) return;
-
-					const url = await $TTSWorker
-						.generate({ text: sentence, voice: voiceId })
-						.catch((error) => {
-							console.error(error);
-							toast.error(`${error}`);
-							speaking = false;
-							loadingSpeech = false;
-						});
-
-					if (signal.aborted) return;
-
-					if (url && speaking) {
-						$audioQueue.enqueue(url);
+			const requests = messageContentParts.map((sentence) =>
+				synthesizeOpenAISpeech(localStorage.token, voiceId, sentence)
+					.then((res) => (res ? res.blob() : null))
+					.catch((error) => {
+						console.error(error);
+						toast.error(`${error}`);
+						speaking = false;
 						loadingSpeech = false;
-					}
-				}
-			} else {
-				for (const [, sentence] of messageContentParts.entries()) {
-					if (signal.aborted) return;
+						return null;
+					})
+			);
 
-					const res = await synthesizeOpenAISpeech(localStorage.token, voiceId, sentence).catch(
-						(error) => {
-							console.error(error);
-							toast.error(`${error}`);
-							speaking = false;
-							loadingSpeech = false;
-						}
-					);
+			for (let i = 0; i < requests.length; i++) {
+				if (signal.aborted || !speaking) return;
 
-					if (signal.aborted) return;
+				const blob = await requests[i];
+				if (signal.aborted || !blob) continue;
 
-					if (res && speaking) {
-						const blob = await res.blob();
-						const url = URL.createObjectURL(blob);
-						$audioQueue.enqueue(url);
-						loadingSpeech = false;
-					}
-				}
+				const url = URL.createObjectURL(blob);
+				$audioQueue.enqueue(url);
+				if (i === 0) loadingSpeech = false;
 			}
 		}
 	};

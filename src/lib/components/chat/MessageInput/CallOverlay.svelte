@@ -573,7 +573,7 @@
 						emoji = null;
 					}
 
-					if ($config.audio.tts.engine !== '') {
+					if ($settings.audio?.tts?.engine === 'browser-kokoro' || $config.audio.tts.engine !== '') {
 						try {
 							console.log(
 								'%c%s',
@@ -582,9 +582,9 @@
 							);
 
 							const audio = audioCache.get(content);
-							await playAudio(audio); // Here ensure that playAudio is indeed correct method to execute
+							await playAudio(audio);
 							console.log(`Played audio for content: ${content}`);
-							await new Promise((resolve) => setTimeout(resolve, 200)); // Wait before retrying to reduce tight loop
+							await new Promise((resolve) => setTimeout(resolve, 200));
 						} catch (error) {
 							console.error('Error playing audio:', error);
 						}
