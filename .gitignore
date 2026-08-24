@@ -311,3 +311,12 @@ cypress/videos
 cypress/screenshots
 .vscode/settings.json
 .cptr
+
+# Local dev TLS certificates (do not commit private keys)
+certs/
+
+# Local tooling state
+.sisyphus/
+
+# Local session notes
+docs/session-summary.md
