@@ -753,6 +753,7 @@ async def initialize_runtime_config(app: FastAPI):
 app.state.faster_whisper_model = None
 app.state.speech_synthesiser = None
 app.state.speech_speaker_embeddings_dataset = None
+app.state.kokoro_pipeline = None
 
 
 ########################################

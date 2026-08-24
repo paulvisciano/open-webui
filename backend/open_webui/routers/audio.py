@@ -89,6 +89,12 @@ TTS_CONFIG_KEYS = {
     'AZURE_SPEECH_OUTPUT_FORMAT': 'audio.tts.azure.speech_output_format',
     'MISTRAL_API_KEY': 'audio.tts.mistral.api_key',
     'MISTRAL_API_BASE_URL': 'audio.tts.mistral.api_base_url',
+    'PIPER_API_BASE_URL': 'audio.tts.piper.api_base_url',
+    'PIPER_VOICE': 'audio.tts.piper.voice',
+    'PIPER_LENGTH_SCALE': 'audio.tts.piper.length_scale',
+    'KOKORO_LANG_CODE': 'audio.tts.kokoro.lang_code',
+    'KOKORO_VOICE': 'audio.tts.kokoro.voice',
+    'KOKORO_SPEED': 'audio.tts.kokoro.speed',
 }
 
 STT_CONFIG_KEYS = {
@@ -207,7 +213,7 @@ def transcode_audio_to_mp3(audio_data: bytes, content_type_header: str, output_p
     else:
         audio_segment = AudioSegment.from_file(io.BytesIO(audio_data))
 
-    audio_segment.export(str(output_path), format='mp3')
+    audio_segment.export(str(output_path), format='mp3', bitrate='128k')
     log.info('Transcoded %s audio to MP3: %s', mime_type, output_path)
     return True
 
@@ -248,6 +254,9 @@ class TTSConfigForm(BaseModel):
     AZURE_SPEECH_OUTPUT_FORMAT: str
     MISTRAL_API_KEY: str
     MISTRAL_API_BASE_URL: str
+    KOKORO_LANG_CODE: str
+    KOKORO_VOICE: str
+    KOKORO_SPEED: float
 
 
 class STTConfigForm(BaseModel):
@@ -324,6 +333,13 @@ def load_speech_pipeline(request):
         request.app.state.speech_speaker_embeddings_dataset = load_dataset(
             'Matthijs/cmu-arctic-xvectors', split='validation'
         )
+
+
+def load_kokoro_pipeline(request, lang_code: str):
+    if request.app.state.kokoro_pipeline is None:
+        from kokoro import KPipeline
+
+        request.app.state.kokoro_pipeline = KPipeline(lang_code=lang_code)
 
 
 async def _raise_tts_error(exc: Exception, r=None) -> None:
@@ -545,6 +561,96 @@ async def _tts_mistral(request, payload, file_path, file_body_path, user):
         await _raise_tts_error(exc, r)
 
 
+async def _tts_piper(request, payload, file_path, file_body_path, user):
+    """Generate speech via a Piper HTTP server (POST /synthesize → WAV)."""
+    api_base_url = await Config.get('audio.tts.piper.api_base_url')
+    voice = await Config.get('audio.tts.piper.voice') or ''
+    length_scale = await Config.get('audio.tts.piper.length_scale') or 1.0
+
+    body = {'text': payload['input'], 'length_scale': length_scale}
+    if voice:
+        body['voice'] = voice
+
+    r = None
+    try:
+        session = await get_session()
+        r = await session.post(
+            url=f'{api_base_url}/synthesize',
+            json=body,
+            ssl=AIOHTTP_CLIENT_SESSION_SSL,
+        )
+        r.raise_for_status()
+
+        audio_data = await r.read()
+        content_type = r.headers.get('Content-Type', 'audio/wav')
+
+        if not await asyncio.to_thread(transcode_audio_to_mp3, audio_data, content_type, file_path):
+            async with aiofiles.open(file_path, 'wb') as f:
+                await f.write(audio_data)
+
+        async with aiofiles.open(file_body_path, 'w') as f:
+            await f.write(json.dumps(payload))
+        return FileResponse(file_path)
+    except Exception as exc:
+        log.exception(exc)
+        await _raise_tts_error(exc, r)
+
+
+_KOKORO_VOICES = {
+    'af_alloy', 'af_aoede', 'af_bella', 'af_heart', 'af_jessica', 'af_kore',
+    'af_nicole', 'af_nova', 'af_river', 'af_sarah', 'af_sky', 'am_adam',
+    'am_echo', 'am_eric', 'am_fenrir', 'am_liam', 'am_michael', 'am_onyx',
+    'am_puck', 'am_santa', 'bf_alice', 'bf_emma', 'bf_isabella', 'bf_lily',
+    'bm_daniel', 'bm_fable', 'bm_george', 'bm_lewis', 'ef_dora', 'em_alex',
+    'em_santa', 'ff_siwis', 'hf_alpha', 'hf_beta', 'hm_omega', 'hm_psi',
+    'if_sara', 'im_nicola', 'jf_alpha', 'jf_gongitsune', 'jf_nezumi',
+    'jf_tebukuro', 'jm_kumo', 'pf_dora', 'pm_alex', 'pm_santa',
+    'zf_xiaobei', 'zf_xiaoni', 'zf_xiaoxiao', 'zf_xiaoyi', 'zm_yunjian',
+    'zm_yunxi', 'zm_yunxia', 'zm_yunyang',
+}
+
+
+async def _tts_kokoro(request, payload, file_path, file_body_path, user):
+    import io
+
+    import numpy as np
+    import soundfile as sf
+
+    lang_code = await Config.get('audio.tts.kokoro.lang_code') or 'a'
+    voice = await Config.get('audio.tts.kokoro.voice') or 'af_heart'
+    speed = await Config.get('audio.tts.kokoro.speed') or 1.0
+
+    requested_voice = payload.get('voice')
+    if requested_voice and requested_voice in _KOKORO_VOICES:
+        voice = requested_voice
+
+    await asyncio.to_thread(load_kokoro_pipeline, request, lang_code)
+    pipeline = request.app.state.kokoro_pipeline
+
+    def _run():
+        chunks = list(
+            pipeline(
+                payload['input'],
+                voice=voice,
+                speed=speed,
+            )
+        )
+        audio = np.concatenate([c.audio.numpy() for c in chunks if c.audio is not None])
+        wav_buf = io.BytesIO()
+        sf.write(wav_buf, audio, samplerate=24000, format='WAV')
+        return wav_buf.getvalue()
+
+    audio_data = await asyncio.to_thread(_run)
+
+    if not await asyncio.to_thread(transcode_audio_to_mp3, audio_data, 'audio/wav', file_path):
+        async with aiofiles.open(file_path, 'wb') as f:
+            await f.write(audio_data)
+
+    async with aiofiles.open(file_body_path, 'w') as f:
+        await f.write(json.dumps(payload))
+    return FileResponse(file_path)
+
+
 # Dispatcher map: engine name -> handler
 _TTS_ENGINES = {
     'openai': _tts_openai,
@@ -552,6 +658,8 @@ _TTS_ENGINES = {
     'azure': _tts_azure,
     'transformers': _tts_transformers,
     'mistral': _tts_mistral,
+    'piper': _tts_piper,
+    'kokoro': _tts_kokoro,
 }
 
 
@@ -1342,6 +1450,12 @@ async def get_available_models(request: Request) -> list[dict]:
     elif engine == 'mistral':
         available_models = [{'id': 'voxtral-mini-tts-2603'}]
 
+    elif engine == 'piper':
+        available_models = [{'id': 'piper'}]
+
+    elif engine == 'kokoro':
+        available_models = [{'id': 'kokoro-82M'}]
+
     return available_models
 
 
@@ -1446,6 +1560,36 @@ async def get_available_voices(request) -> dict:
                     return result
             except Exception as e:
                 log.error(f'Error fetching Mistral voices: {e}')
+
+    if engine == 'piper':
+        api_base_url = await Config.get('audio.tts.piper.api_base_url')
+        try:
+            session = await get_session()
+            async with session.get(
+                f'{api_base_url}/voices',
+                ssl=AIOHTTP_CLIENT_SESSION_SSL,
+                timeout=_timeout,
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+                return {v: v for v in data.get('voices', [])}
+        except Exception as e:
+            log.error(f'Error fetching Piper voices: {e}')
+            return {}
+
+    if engine == 'kokoro':
+        return {
+            'af_alloy': 'af_alloy', 'af_aoede': 'af_aoede', 'af_bella': 'af_bella',
+            'af_heart': 'af_heart', 'af_jessica': 'af_jessica', 'af_kore': 'af_kore',
+            'af_nicole': 'af_nicole', 'af_nova': 'af_nova', 'af_river': 'af_river',
+            'af_sarah': 'af_sarah', 'af_sky': 'af_sky', 'am_adam': 'am_adam',
+            'am_echo': 'am_echo', 'am_eric': 'am_eric', 'am_fenrir': 'am_fenrir',
+            'am_liam': 'am_liam', 'am_michael': 'am_michael', 'am_onyx': 'am_onyx',
+            'am_puck': 'am_puck', 'am_santa': 'am_santa', 'bf_alice': 'bf_alice',
+            'bf_emma': 'bf_emma', 'bf_isabella': 'bf_isabella', 'bf_lily': 'bf_lily',
+            'bm_daniel': 'bm_daniel', 'bm_fable': 'bm_fable', 'bm_george': 'bm_george',
+            'bm_lewis': 'bm_lewis',
+        }
 
     return {}
 
