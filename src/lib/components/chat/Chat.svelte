@@ -123,6 +123,7 @@
 	import Sidebar from '../icons/Sidebar.svelte';
 	import Image from '../common/Image.svelte';
 	import XMark from '../icons/XMark.svelte';
+	import GarbageBin from '../icons/GarbageBin.svelte';
 	import EmbeddedChatHistoryDropdown from './EmbeddedChatHistoryDropdown.svelte';
 	import InputVariablesModal from './MessageInput/InputVariablesModal.svelte';
 
@@ -4314,16 +4315,34 @@
 									onDeleteChat={onDeleteEmbeddedChat}
 								/>
 							</div>
-							<Tooltip content={$i18n.t('Close')} placement="bottom">
-								<button
-									type="button"
-									class="rounded-md p-1 text-gray-500 transition hover:text-gray-900 dark:hover:text-white"
-									on:click={() => onCloseEmbedded?.()}
-									aria-label={$i18n.t('Close')}
-								>
-									<XMark className="size-4" strokeWidth="2" />
-								</button>
-							</Tooltip>
+							<div class="flex items-center gap-1">
+								{#if $chatId && onDeleteEmbeddedChat}
+									<Tooltip content={$i18n.t('Delete')} placement="bottom">
+										<button
+											type="button"
+											class="rounded-md p-1 text-gray-500 transition hover:text-gray-900 dark:hover:text-white"
+											on:click={async () => {
+												if ($chatId) {
+													await onDeleteEmbeddedChat($chatId);
+												}
+											}}
+											aria-label={$i18n.t('Delete')}
+										>
+											<GarbageBin className="size-4" strokeWidth="1.5" />
+										</button>
+									</Tooltip>
+								{/if}
+								<Tooltip content={$i18n.t('Close')} placement="bottom">
+									<button
+										type="button"
+										class="rounded-md p-1 text-gray-500 transition hover:text-gray-900 dark:hover:text-white"
+										on:click={() => onCloseEmbedded?.()}
+										aria-label={$i18n.t('Close')}
+									>
+										<XMark className="size-4" strokeWidth="2" />
+									</button>
+								</Tooltip>
+							</div>
 						</div>
 					{:else}
 						<Navbar

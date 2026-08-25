@@ -6,7 +6,7 @@
 	import { refreshChatList } from '$lib/stores/chatList';
 
 	import { archiveAllChats, deleteAllChats, getAllChats, importChats } from '$lib/apis/chats';
-	import { getImportOrigin, convertOpenAIChats } from '$lib/utils';
+	import { getImportOrigin, convertOpenAIChats, convertKnowledgeGraphChats, parseChatFile } from '$lib/utils';
 	import { getContext } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { toast } from 'svelte-sonner';
@@ -37,13 +37,20 @@
 
 		let reader = new FileReader();
 		reader.onload = (event) => {
-			let chats = JSON.parse(event.target.result);
+			let chats = parseChatFile(event.target.result as string);
 			console.log(chats);
-			if (getImportOrigin(chats) == 'openai') {
+			const origin = getImportOrigin(chats);
+			if (origin == 'openai') {
 				try {
 					chats = convertOpenAIChats(chats);
 				} catch (error) {
 					console.log('Unable to import chats:', error);
+				}
+			} else if (origin == 'knowledge-graph') {
+				try {
+					chats = convertKnowledgeGraphChats(chats);
+				} catch (error) {
+					console.log('Unable to import KG chats:', error);
 				}
 			}
 			importChatsHandler(chats);
@@ -147,7 +154,7 @@
 			bind:this={chatImportInputElement}
 			bind:files={importFiles}
 			type="file"
-			accept=".json"
+			accept=".json,.jsonl,.ndjson"
 			hidden
 		/>
 
@@ -155,7 +162,7 @@
 			{#if $user?.role === 'admin' || ($user.permissions?.chat?.import ?? true)}
 				<UserSettingRow
 					label={$i18n.t('Import Chats')}
-					description={$i18n.t('Import chat history from a JSON export file.')}
+					description={$i18n.t('Import chat history from a JSON or JSONL export file.')}
 				>
 					<button
 						class={actionButtonClass}

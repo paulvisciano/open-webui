@@ -782,13 +782,37 @@ export const calculateSHA256 = async (file) => {
 };
 
 export const getImportOrigin = (_chats) => {
-	// Check what external service chat imports are from
 	// ChatGPT exports may include folder/project metadata entries without 'mapping',
 	// so we check if ANY item has a 'mapping' key instead of only the first one.
 	if (_chats.some((chat) => 'mapping' in chat)) {
 		return 'openai';
 	}
+	// Knowledge Graph exports have a { conv, messages } shape
+	if (_chats.some((chat) => 'conv' in chat && 'messages' in chat)) {
+		return 'knowledge-graph';
+	}
 	return 'webui';
+};
+
+export const parseChatFile = (text: string): object[] => {
+	// Try JSON array first — the existing Open WebUI / OpenAI export format
+	try {
+		const parsed = JSON.parse(text);
+		if (Array.isArray(parsed)) return parsed;
+		if (parsed && typeof parsed === 'object') return [parsed];
+	} catch {
+		// Not a single JSON document — fall through to JSONL
+	}
+
+	// JSONL / NDJSON: one JSON object per line
+	const chats: object[] = [];
+	for (const line of text.split('\n')) {
+		const trimmed = line.trim();
+		if (trimmed) {
+			chats.push(JSON.parse(trimmed));
+		}
+	}
+	return chats;
 };
 
 export const getUserPosition = async (raw = false) => {
@@ -966,6 +990,92 @@ export const convertOpenAIChats = (_chats) => {
 	if (skipped > 0) {
 		console.log(skipped, 'Non-conversation entries (folders/projects) were skipped');
 	}
+	return chats;
+};
+
+export const convertKnowledgeGraphChats = (_chats: any[]) => {
+	const chats: any[] = [];
+	let failed = 0;
+
+	for (const convo of _chats) {
+		try {
+			const conv = convo.conv;
+			const messages = convo.messages || [];
+
+			if (!conv || !conv.id) {
+				failed++;
+				continue;
+			}
+
+			const messagesMap: Record<string, any> = {};
+			const linearMessages: any[] = [];
+			let currentId = conv.currNode || null;
+			const uniqueModels = new Set<string>();
+
+			for (const msg of messages) {
+				const role = msg.role === 'user' ? 'user' : 'assistant';
+				const model = msg.model || 'unknown';
+
+				const newMsg: Record<string, any> = {
+					id: msg.id,
+					parentId: msg.parent ?? null,
+					childrenIds: msg.children || [],
+					role,
+					content: msg.content || '',
+					model,
+					done: true,
+					context: null,
+					timestamp: msg.timestamp ? Math.floor(msg.timestamp / 1000) : undefined
+				};
+
+				if (msg.reasoningContent) {
+					newMsg.reasoning = msg.reasoningContent;
+				}
+
+				if (role === 'assistant') {
+					uniqueModels.add(model);
+				}
+
+				messagesMap[msg.id] = newMsg;
+				linearMessages.push(newMsg);
+			}
+
+			if (!currentId && linearMessages.length > 0) {
+				currentId = linearMessages[linearMessages.length - 1].id;
+			}
+
+			const createdAt = conv.lastModified
+				? Math.floor(conv.lastModified / 1000)
+				: undefined;
+			const updatedAt = createdAt;
+
+			const chat = {
+				history: {
+					currentId: currentId,
+					messages: messagesMap
+				},
+				models: uniqueModels.size > 0 ? [...uniqueModels] : ['unknown'],
+				messages: linearMessages,
+				options: {},
+				timestamp: createdAt,
+				title: conv.name || 'New Chat'
+			};
+
+			chats.push({
+				chat,
+				meta: {},
+				pinned: conv.pinned ?? false,
+				folder_id: null,
+				created_at: createdAt ?? null,
+				updated_at: updatedAt ?? null
+			});
+		} catch (error) {
+			console.log('Error importing KG conversation:', error);
+			failed++;
+		}
+	}
+
+	console.log(failed, 'KG conversations could not be imported');
 	return chats;
 };
 

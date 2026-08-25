@@ -33,6 +33,16 @@
 	let showChatPanel = $state(false);
 	let chatLoading = $state(false);
 	let orbOptionsOpen = $state(false);
+	let orbCloseTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const orbScheduleClose = () => {
+		if (orbCloseTimer) clearTimeout(orbCloseTimer);
+		orbCloseTimer = setTimeout(() => { orbOptionsOpen = false; }, 100);
+	};
+
+	const orbCancelClose = () => {
+		if (orbCloseTimer) { clearTimeout(orbCloseTimer); orbCloseTimer = null; }
+	};
 
 	let recentChats = $state<any[]>([]);
 
@@ -337,11 +347,7 @@
 					</button>
 				</div>
 			{:else}
-				<div
-					class="chat-collapsed-orb"
-					onmouseenter={() => { orbOptionsOpen = true; }}
-					onmouseleave={() => { orbOptionsOpen = false; }}
-				>
+				<div class="chat-collapsed-orb">
 					<div
 						class="chat-orb-add"
 						style:opacity={orbOptionsOpen ? '1' : '0'}
@@ -352,6 +358,8 @@
 						aria-label="Add images"
 						onclick={(e) => { e.stopPropagation(); orbOptionsOpen = false; openFilePicker(); }}
 						onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); orbOptionsOpen = false; openFilePicker(); } }}
+						onmouseenter={orbCancelClose}
+						onmouseleave={orbScheduleClose}
 					>
 						<div class="coa-icon">
 							{#if uploading}
@@ -373,6 +381,8 @@
 						aria-label="Type a message"
 						onclick={(e) => { e.stopPropagation(); orbOptionsOpen = false; startNewChat(); }}
 						onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); orbOptionsOpen = false; startNewChat(); } }}
+						onmouseenter={orbCancelClose}
+						onmouseleave={orbScheduleClose}
 					>
 						<div class="coe-icon">
 							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
@@ -386,6 +396,8 @@
 						tabindex="0"
 						aria-label="Voice input"
 						onclick={() => { orbOptionsOpen = false; startVoiceChat(); }}
+						onmouseenter={() => { orbCancelClose(); orbOptionsOpen = true; }}
+						onmouseleave={orbScheduleClose}
 					>
 						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
 					</div>
@@ -405,28 +417,10 @@
 
 	{#if showChatPanel}
 		<div
-			class="chat-side-panel absolute top-0 right-0 bottom-0 flex flex-col bg-white dark:bg-gray-900 border-l border-gray-100 dark:border-gray-800/50 z-20 {voiceActive ? 'voice-hidden' : ''}"
+			class="chat-side-panel absolute top-0 right-0 bottom-0 flex flex-col bg-white dark:bg-gray-900 border-l border-gray-100 dark:border-gray-800/50 z-20 {voiceActive ? 'voice-hide' : ''}"
 			style="width: min(480px, 40vw); {voiceActive ? 'display: none;' : ''}"
 			transition:fly={{ x: '100%', duration: 300, opacity: 1 }}
 		>
-			<div
-				class="flex items-center justify-between px-4 py-3 border-b border-gray-100 dark:border-gray-800/50"
-			>
-				<span class="text-sm font-medium text-gray-700 dark:text-gray-300">
-					{selectedChatId ? 'Chat' : 'New Chat'}
-				</span>
-				<button
-					class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition"
-					onclick={closeChatPanel}
-					aria-label="Close chat panel"
-				>
-					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-						<line x1="18" y1="6" x2="6" y2="18" />
-						<line x1="6" y1="6" x2="18" y2="18" />
-					</svg>
-				</button>
-			</div>
-
 		<div class="flex-1 overflow-hidden">
 				{#if chatLoading}
 					<div class="flex h-full items-center justify-center">
