@@ -29,8 +29,13 @@ import { KokoroWorker } from '$lib/workers/KokoroWorker';
 import { WEBUI_API_BASE_URL } from '$lib/constants';
 
 const MIN_DECIBELS = -55;
-const LIVE_WHISPER_TIMESLICE_MS = 400;
-const LIVE_WHISPER_MIN_BYTES = 2800;
+const RECORDER_TIMESLICE_MS = 400;
+
+const voiceMark = (callMs: number, uttMs: number | null, step: string, extra?: string) => {
+	const clock = new Date().toISOString().slice(11, 23);
+	const utt = uttMs === null ? '-' : `+${uttMs.toFixed(0)}ms`;
+	console.log(`[voice-timing] ${clock}  call+${callMs.toFixed(0)}ms  utt${utt}  ${step}${extra ? `  ${extra}` : ''}`);
+};
 
 export interface VoiceCallOptions {
 	eventTarget: EventTarget;
@@ -62,6 +67,7 @@ export class VoiceCallService {
 	visualRms = $state(0);
 	speaking = $state(false);
 	micReady = $state(false);
+	transcribing = $state(false);
 
 	transcript = $state('');
 	liveTranscript = $state('');
@@ -71,11 +77,20 @@ export class VoiceCallService {
 	// ── Non-reactive internal state ────────────────────────────────────
 	private hasStartedSpeaking = false;
 	private recorderMime = 'audio/webm';
-	private liveWhisperBusy = false;
-	private liveWhisperQueued = false;
-	private liveWhisperTimer: ReturnType<typeof setTimeout> | null = null;
-	private liveWhisperAbort: AbortController | null = null;
 	private usedPassedContext = false;
+	private callOrigin = 0;
+	private utteranceOrigin = 0;
+	private firstTokenLogged = false;
+
+	private mark(step: string, extra?: string) {
+		const now = performance.now();
+		voiceMark(
+			this.callOrigin ? now - this.callOrigin : 0,
+			this.utteranceOrigin ? now - this.utteranceOrigin : null,
+			step,
+			extra
+		);
+	}
 	private mediaRecorder: MediaRecorder | false = false;
 	private audioStream: MediaStream | null = null;
 	private audioChunks: Blob[] = [];
@@ -108,6 +123,8 @@ export class VoiceCallService {
 	// ── Public API ─────────────────────────────────────────────────────
 
 	async start() {
+		this.callOrigin = performance.now();
+		this.mark('call_start');
 		this.model = get(models).find((m) => m.id === this.opts.modelId);
 		if (this.opts.audioStream) this.audioStream = this.opts.audioStream;
 		void this.initTTSWorker();
@@ -116,6 +133,7 @@ export class VoiceCallService {
 		document.addEventListener('keydown', this.handleKeydown);
 		await this.acquireWakeLock();
 		document.addEventListener('visibilitychange', this.handleVisibilityChange);
+		this.mark('call_ready');
 	}
 
 	private async initTTSWorker() {
@@ -132,7 +150,6 @@ export class VoiceCallService {
 	async stop() {
 		this.micReady = false;
 		await this.stopAllAudio();
-		this.cancelLiveWhisper();
 		this.speaking = false;
 		this.liveTranscript = '';
 		await this.stopRecordingCallback(false);
@@ -157,7 +174,6 @@ export class VoiceCallService {
 			}
 		}
 		if (this.muted) {
-			this.cancelLiveWhisper();
 			this.liveTranscript = '';
 		}
 	}
@@ -247,26 +263,41 @@ export class VoiceCallService {
 	private transcribeHandler = async (audioBlob: Blob) => {
 		if (!audioBlob || audioBlob.size < 100) return;
 		await tick();
-		const file = this.audioBlobToFile(audioBlob, 'recording');
-		const res = await transcribeAudio(
-			localStorage.token,
-			file,
-			get(settings)?.audio?.stt?.language
-		).catch((error) => {
-			toast.error(`${error}`);
-			return null;
-		});
-		let spoken = (res?.text ?? '').trim() || this.pendingUserText();
-		if (this.isLikelyHallucination(spoken)) {
-			const pending = this.pendingUserText();
-			spoken = this.isLikelyHallucination(pending) ? '' : pending;
+		this.transcribing = true;
+		let spoken = '';
+		const whisperStarted = performance.now();
+		this.mark('final_whisper_start', `bytes=${audioBlob.size}`);
+		try {
+			const file = this.audioBlobToFile(audioBlob, 'recording');
+			const res = await transcribeAudio(
+				localStorage.token,
+				file,
+				get(settings)?.audio?.stt?.language
+			).catch((error) => {
+				toast.error(`${error}`);
+				return null;
+			});
+			spoken = (res?.text ?? '').trim() || this.pendingUserText();
+			if (this.isLikelyHallucination(spoken)) {
+				const pending = this.pendingUserText();
+				spoken = this.isLikelyHallucination(pending) ? '' : pending;
+			}
+		} finally {
+			this.transcribing = false;
 		}
+		this.mark(
+			'final_whisper_done',
+			`dur=${(performance.now() - whisperStarted).toFixed(0)}ms  text="${spoken.slice(0, 80)}"`
+		);
 		this.liveTranscript = spoken;
 		if (spoken) {
 			this.transcript = spoken;
 			this.finalizeUser(spoken);
+			this.mark('submit_prompt_start');
 			await this.opts.submitPrompt(spoken, { _raw: true });
+			this.mark('submit_prompt_done');
 		} else {
+			this.mark('final_whisper_empty');
 			this.dropPendingUser();
 		}
 	};
@@ -282,7 +313,6 @@ export class VoiceCallService {
 
 		this.speaking = false;
 		this.hasStartedSpeaking = false;
-		this.cancelLiveWhisper();
 
 		if (this.confirmed) {
 			this.loading = true;
@@ -318,12 +348,20 @@ export class VoiceCallService {
 		this.mediaRecorder.onstart = () => {
 			this.audioChunks = [];
 			this.micReady = true;
+			this.mark('mic_recording');
 		};
 
 		this.mediaRecorder.ondataavailable = (event) => {
 			if (!event.data || event.data.size === 0) return;
+			if (!this.hasStartedSpeaking) {
+				if (this.audioChunks.length === 0) {
+					this.audioChunks.push(event.data);
+				} else {
+					this.audioChunks = [this.audioChunks[0], event.data];
+				}
+				return;
+			}
 			this.audioChunks.push(event.data);
-			if (this.hasStartedSpeaking) this.scheduleLiveWhisper();
 		};
 
 		this.mediaRecorder.onstop = () => {
@@ -331,7 +369,7 @@ export class VoiceCallService {
 		};
 
 		if (this.mediaRecorder.state !== 'recording') {
-			this.mediaRecorder.start(LIVE_WHISPER_TIMESLICE_MS);
+			this.mediaRecorder.start(RECORDER_TIMESLICE_MS);
 		}
 
 		this.analyseAudio(this.audioStream);
@@ -406,6 +444,9 @@ export class VoiceCallService {
 					this.speaking = true;
 					this.transcript = '';
 					this.liveTranscript = '';
+					this.utteranceOrigin = performance.now();
+					this.firstTokenLogged = false;
+					this.mark('speech_detected');
 					this.stopAllAudio();
 				}
 				lastSoundTime = Date.now();
@@ -414,6 +455,7 @@ export class VoiceCallService {
 			if (this.hasStartedSpeaking) {
 				if (Date.now() - lastSoundTime > 2000) {
 					this.confirmed = true;
+					this.mark('silence_commit');
 					if (this.mediaRecorder) {
 						(this.mediaRecorder as MediaRecorder).stop();
 						return;
@@ -461,6 +503,7 @@ export class VoiceCallService {
 		new Promise<void>((resolve) => {
 			const el = document.getElementById('audioElement') as HTMLAudioElement | null;
 			if (!el) return resolve();
+			this.mark('tts_play_start');
 			el.src = audio.src;
 			el.muted = true;
 			el.playbackRate = get(settings)?.audio?.tts?.playbackRate ?? 1;
@@ -470,6 +513,7 @@ export class VoiceCallService {
 				})
 				.catch(console.error);
 			el.onended = async () => {
+				this.mark('tts_play_done');
 				await new Promise((r) => setTimeout(r, 100));
 				resolve();
 			};
@@ -495,6 +539,8 @@ export class VoiceCallService {
 
 	private fetchAudio = async (content: string) => {
 		if (!this.audioCache.has(content)) {
+			const ttsStarted = performance.now();
+			this.mark('tts_synth_start', `chars=${content.length}`);
 			try {
 				const s = get(settings);
 				if (s?.showEmojiInCall ?? false) {
@@ -536,6 +582,7 @@ export class VoiceCallService {
 			} catch (e) {
 				console.error('Error synthesizing speech:', e);
 			}
+			this.mark('tts_synth_done', `dur=${(performance.now() - ttsStarted).toFixed(0)}ms`);
 		}
 		return this.audioCache.get(content);
 	};
@@ -571,6 +618,7 @@ export class VoiceCallService {
 			}
 		}
 		this.assistantSpeaking = false;
+		this.mark('tts_queue_idle');
 	};
 
 	// ── Chat Event Handlers ────────────────────────────────────────────
@@ -582,10 +630,10 @@ export class VoiceCallService {
 			this.currentMessageId = id;
 			this.assistantText = '';
 			this.messageLog = [...this.messageLog, { role: 'assistant', content: '' }];
-			this.cancelLiveWhisper();
 			this.audioAbortController.abort();
 			this.audioAbortController = new AbortController();
 			this.assistantSpeaking = true;
+			this.mark('llm_start', `id=${id.slice(0, 8)}`);
 			this.monitorAndPlayAudio(id, this.audioAbortController.signal);
 		}
 	};
@@ -622,6 +670,10 @@ export class VoiceCallService {
 		};
 		if (!fullContent) return;
 		if (this.currentMessageId && this.currentMessageId !== id) return;
+		if (!this.firstTokenLogged) {
+			this.firstTokenLogged = true;
+			this.mark('llm_first_token', `chars=${fullContent.length}`);
+		}
 		this.applyAssistantText(fullContent);
 	};
 
@@ -630,6 +682,7 @@ export class VoiceCallService {
 		this.finishedMessages[id] = true;
 		this.chatStreaming = false;
 		if (content) this.applyAssistantText(content);
+		this.mark('llm_done', `chars=${(content ?? '').length}`);
 		this.currentMessageId = null;
 	};
 
@@ -656,11 +709,6 @@ export class VoiceCallService {
 		return this.lastUser()?.content?.trim() || this.liveTranscript.trim();
 	}
 
-	private ensurePendingUser() {
-		if (this.lastUser()?.pending) return;
-		this.messageLog = [...this.messageLog, { role: 'user', content: '', pending: true }];
-	}
-
 	private isDeafToMic() {
 		if (this.muted || this.loading) return true;
 		if (this.assistantSpeaking || this.chatStreaming) {
@@ -683,29 +731,6 @@ export class VoiceCallService {
 		const chars = compact.replace(/\s/g, '');
 		const digits = chars.replace(/\D/g, '').length;
 		return chars.length >= 12 && digits / chars.length > 0.4;
-	}
-
-	private updatePendingUser(text: string) {
-		if (!text || !this.hasStartedSpeaking || this.confirmed || this.isDeafToMic()) return;
-		if (this.isLikelyHallucination(text)) return;
-
-		const last = this.messageLog.at(-1);
-		if (last?.role === 'user' && last.pending) {
-			this.messageLog = this.messageLog.map((m, i) =>
-				i === this.messageLog.length - 1 && m.role === 'user'
-					? { role: 'user', content: text, pending: true }
-					: m
-			);
-			return;
-		}
-		if (last?.role === 'user') return;
-
-		this.ensurePendingUser();
-		this.messageLog = this.messageLog.map((m, i) =>
-			i === this.messageLog.length - 1 && m.role === 'user'
-				? { role: 'user', content: text, pending: true }
-				: m
-		);
 	}
 
 	private finalizeUser(text: string) {
@@ -734,73 +759,6 @@ export class VoiceCallService {
 		const type = blob.type || this.recorderMime || 'audio/webm';
 		const ext = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : type.includes('wav') ? 'wav' : 'webm';
 		return blobToFile(blob, `${stem}.${ext}`);
-	}
-
-	private scheduleLiveWhisper() {
-		if (this.isDeafToMic() || this.confirmed || !this.hasStartedSpeaking) return;
-		if (this.liveWhisperBusy) {
-			this.liveWhisperQueued = true;
-			return;
-		}
-		if (this.liveWhisperTimer) return;
-		this.liveWhisperTimer = setTimeout(() => {
-			this.liveWhisperTimer = null;
-			void this.runLiveWhisper();
-		}, 650);
-	}
-
-	private cancelLiveWhisper() {
-		this.liveWhisperQueued = false;
-		if (this.liveWhisperTimer) {
-			clearTimeout(this.liveWhisperTimer);
-			this.liveWhisperTimer = null;
-		}
-		this.liveWhisperAbort?.abort();
-		this.liveWhisperAbort = null;
-	}
-
-	private async runLiveWhisper() {
-		if (this.isDeafToMic() || this.confirmed || !this.hasStartedSpeaking) return;
-		if (this.audioChunks.length === 0) return;
-
-		const blob = new Blob(this.audioChunks, { type: this.recorderMime });
-		if (blob.size < LIVE_WHISPER_MIN_BYTES) {
-			this.scheduleLiveWhisper();
-			return;
-		}
-
-		this.liveWhisperBusy = true;
-		const abort = new AbortController();
-		this.liveWhisperAbort = abort;
-
-		try {
-			const res = await transcribeAudio(
-				localStorage.token,
-				this.audioBlobToFile(blob, 'live'),
-				get(settings)?.audio?.stt?.language,
-				{ signal: abort.signal }
-			);
-			if (abort.signal.aborted || this.confirmed || !this.hasStartedSpeaking || this.isDeafToMic()) {
-				return;
-			}
-			const text = (res?.text ?? '').trim();
-			if (text) {
-				this.liveTranscript = text;
-				this.speaking = true;
-				this.updatePendingUser(text);
-			}
-		} catch {
-			return;
-		} finally {
-			this.liveWhisperBusy = false;
-			if (this.liveWhisperAbort === abort) {
-				this.liveWhisperAbort = null;
-			}
-			if (this.liveWhisperQueued && this.hasStartedSpeaking && !this.confirmed && !this.muted) {
-				this.liveWhisperQueued = false;
-				this.scheduleLiveWhisper();
-			}
-		}
 	}
 
 	// ── Wake Lock ──────────────────────────────────────────────────────
@@ -849,7 +807,8 @@ export class VoiceCallService {
 	get statusText(): string {
 		if (!this.micReady) return 'Starting microphone…';
 		if (this.muted) return 'Muted';
-		if (this.loading) return 'Thinking';
+		if (this.transcribing) return 'Transcribing';
+		if (this.loading || this.chatStreaming) return 'Thinking';
 		if (this.assistantSpeaking) return 'Tap to skip';
 		if (this.speaking) return 'Listening';
 		return 'You may start speaking';
