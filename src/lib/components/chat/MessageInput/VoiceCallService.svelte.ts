@@ -29,6 +29,8 @@ import { KokoroWorker } from '$lib/workers/KokoroWorker';
 import { WEBUI_API_BASE_URL } from '$lib/constants';
 
 const MIN_DECIBELS = -55;
+const LIVE_WHISPER_TIMESLICE_MS = 400;
+const LIVE_WHISPER_MIN_BYTES = 2800;
 
 export interface VoiceCallOptions {
 	eventTarget: EventTarget;
@@ -36,11 +38,14 @@ export interface VoiceCallOptions {
 	stopResponse: (processQueue?: boolean) => Promise<void>;
 	chatId: string;
 	modelId: string;
+	audioStream?: MediaStream;
+	audioContext?: AudioContext;
 }
 
 export interface VoiceMessage {
 	role: 'user' | 'assistant';
 	content: string;
+	pending?: boolean;
 }
 
 export class VoiceCallService {
@@ -54,13 +59,23 @@ export class VoiceCallService {
 	camera = $state(false);
 	chatStreaming = $state(false);
 	rmsLevel = $state(0);
+	visualRms = $state(0);
+	speaking = $state(false);
+	micReady = $state(false);
 
 	transcript = $state('');
+	liveTranscript = $state('');
 	assistantText = $state('');
 	messageLog = $state<VoiceMessage[]>([]);
 
 	// ── Non-reactive internal state ────────────────────────────────────
 	private hasStartedSpeaking = false;
+	private recorderMime = 'audio/webm';
+	private liveWhisperBusy = false;
+	private liveWhisperQueued = false;
+	private liveWhisperTimer: ReturnType<typeof setTimeout> | null = null;
+	private liveWhisperAbort: AbortController | null = null;
+	private usedPassedContext = false;
 	private mediaRecorder: MediaRecorder | false = false;
 	private audioStream: MediaStream | null = null;
 	private audioChunks: Blob[] = [];
@@ -94,7 +109,8 @@ export class VoiceCallService {
 
 	async start() {
 		this.model = get(models).find((m) => m.id === this.opts.modelId);
-		await this.initTTSWorker();
+		if (this.opts.audioStream) this.audioStream = this.opts.audioStream;
+		void this.initTTSWorker();
 		await this.startRecording();
 		this.attachChatListeners();
 		document.addEventListener('keydown', this.handleKeydown);
@@ -114,7 +130,11 @@ export class VoiceCallService {
 	}
 
 	async stop() {
+		this.micReady = false;
 		await this.stopAllAudio();
+		this.cancelLiveWhisper();
+		this.speaking = false;
+		this.liveTranscript = '';
 		await this.stopRecordingCallback(false);
 		await this.stopCamera();
 		await this.stopAudioStream();
@@ -129,11 +149,16 @@ export class VoiceCallService {
 		this.muted = !this.muted;
 		if (this.muted && this.hasStartedSpeaking) {
 			this.hasStartedSpeaking = false;
+			this.speaking = false;
 			this.confirmed = false;
 			this.audioChunks = [];
 			if (this.mediaRecorder && (this.mediaRecorder as MediaRecorder).state === 'recording') {
 				(this.mediaRecorder as MediaRecorder).stop();
 			}
+		}
+		if (this.muted) {
+			this.cancelLiveWhisper();
+			this.liveTranscript = '';
 		}
 	}
 
@@ -222,7 +247,7 @@ export class VoiceCallService {
 	private transcribeHandler = async (audioBlob: Blob) => {
 		if (!audioBlob || audioBlob.size < 100) return;
 		await tick();
-		const file = blobToFile(audioBlob, 'recording.wav');
+		const file = this.audioBlobToFile(audioBlob, 'recording');
 		const res = await transcribeAudio(
 			localStorage.token,
 			file,
@@ -231,12 +256,18 @@ export class VoiceCallService {
 			toast.error(`${error}`);
 			return null;
 		});
-		if (res?.text) {
-			this.transcript = res.text;
-			this.messageLog = [...this.messageLog, { role: 'user', content: res.text }];
-			if (res.text !== '') {
-				await this.opts.submitPrompt(res.text, { _raw: true });
-			}
+		let spoken = (res?.text ?? '').trim() || this.pendingUserText();
+		if (this.isLikelyHallucination(spoken)) {
+			const pending = this.pendingUserText();
+			spoken = this.isLikelyHallucination(pending) ? '' : pending;
+		}
+		this.liveTranscript = spoken;
+		if (spoken) {
+			this.transcript = spoken;
+			this.finalizeUser(spoken);
+			await this.opts.submitPrompt(spoken, { _raw: true });
+		} else {
+			this.dropPendingUser();
 		}
 	};
 
@@ -249,6 +280,10 @@ export class VoiceCallService {
 			this.startRecording();
 		}
 
+		this.speaking = false;
+		this.hasStartedSpeaking = false;
+		this.cancelLiveWhisper();
+
 		if (this.confirmed) {
 			this.loading = true;
 			this.emoji = null;
@@ -260,7 +295,7 @@ export class VoiceCallService {
 				}
 			}
 
-			const audioBlob = new Blob(_audioChunks, { type: 'audio/wav' });
+			const audioBlob = new Blob(_audioChunks, { type: this.recorderMime });
 			await this.transcribeHandler(audioBlob);
 			this.confirmed = false;
 			this.loading = false;
@@ -274,21 +309,30 @@ export class VoiceCallService {
 			});
 		}
 
-		this.mediaRecorder = new MediaRecorder(this.audioStream);
+		const mime = this.pickRecorderMime();
+		this.mediaRecorder = mime
+			? new MediaRecorder(this.audioStream, { mimeType: mime })
+			: new MediaRecorder(this.audioStream);
+		this.recorderMime = this.mediaRecorder.mimeType || mime || 'audio/webm';
 
 		this.mediaRecorder.onstart = () => {
 			this.audioChunks = [];
+			this.micReady = true;
 		};
 
 		this.mediaRecorder.ondataavailable = (event) => {
-			if (this.hasStartedSpeaking) {
-				this.audioChunks.push(event.data);
-			}
+			if (!event.data || event.data.size === 0) return;
+			this.audioChunks.push(event.data);
+			if (this.hasStartedSpeaking) this.scheduleLiveWhisper();
 		};
 
 		this.mediaRecorder.onstop = () => {
 			this.stopRecordingCallback();
 		};
+
+		if (this.mediaRecorder.state !== 'recording') {
+			this.mediaRecorder.start(LIVE_WHISPER_TIMESLICE_MS);
+		}
 
 		this.analyseAudio(this.audioStream);
 	};
@@ -318,7 +362,14 @@ export class VoiceCallService {
 	};
 
 	private analyseAudio = (stream: MediaStream) => {
-		const audioContext = new AudioContext();
+		let audioContext: AudioContext;
+		if (this.opts.audioContext && !this.usedPassedContext) {
+			audioContext = this.opts.audioContext;
+			this.usedPassedContext = true;
+		} else {
+			audioContext = new AudioContext();
+		}
+		if (audioContext.state === 'suspended') void audioContext.resume();
 		const source = audioContext.createMediaStreamSource(stream);
 		const analyser = audioContext.createAnalyser();
 		analyser.minDecibels = MIN_DECIBELS;
@@ -332,7 +383,8 @@ export class VoiceCallService {
 		const processFrame = () => {
 			if (!this.mediaRecorder) return;
 
-			if (this.muted || (this.assistantSpeaking && !(get(settings)?.voiceInterruption ?? false))) {
+			const deaf = this.isDeafToMic();
+			if (deaf) {
 				analyser.maxDecibels = 0;
 				analyser.minDecibels = -1;
 			} else {
@@ -343,19 +395,17 @@ export class VoiceCallService {
 			analyser.getByteTimeDomainData(timeDomainData);
 			analyser.getByteFrequencyData(domainData);
 
-			this.rmsLevel = this.calculateRMS(timeDomainData);
+			const rms = this.calculateRMS(timeDomainData);
+			this.visualRms = this.muted ? 0 : rms;
+			this.rmsLevel = deaf ? 0 : rms;
 
-			if (this.muted || (this.assistantSpeaking && !(get(settings)?.voiceInterruption ?? false))) {
-				this.rmsLevel = 0;
-			}
-
-			const hasSound = domainData.some((v) => v > 0);
+			const hasSound = !deaf && domainData.some((v) => v > 0);
 			if (hasSound) {
-				if (this.mediaRecorder && (this.mediaRecorder as MediaRecorder).state !== 'recording') {
-					(this.mediaRecorder as MediaRecorder).start();
-				}
 				if (!this.hasStartedSpeaking) {
 					this.hasStartedSpeaking = true;
+					this.speaking = true;
+					this.transcript = '';
+					this.liveTranscript = '';
 					this.stopAllAudio();
 				}
 				lastSoundTime = Date.now();
@@ -492,39 +542,35 @@ export class VoiceCallService {
 
 	private monitorAndPlayAudio = async (id: string, signal: AbortSignal) => {
 		while (!signal.aborted) {
-			if (this.messages[id] && this.messages[id].length > 0) {
-				const content = this.messages[id].shift()!;
-				if (this.audioCache.has(content)) {
-					const s = get(settings);
-					if ((s?.showEmojiInCall ?? false) && this.emojiCache.has(content)) {
-						this.emoji = this.emojiCache.get(content)!;
-					} else {
-						this.emoji = null;
-					}
-
-					if (s?.audio?.tts?.engine === 'browser-kokoro' || get(config)?.audio?.tts?.engine !== '') {
-						try {
-							const audio = this.audioCache.get(content);
-							await this.playAudio(audio);
-							await new Promise((r) => setTimeout(r, 200));
-						} catch (e) {
-							console.error('Error playing audio:', e);
-						}
-					} else {
+			const queue = this.messages[id];
+			if (queue && queue.length > 0) {
+				const content = queue.shift()!;
+				await this.fetchAudio(content);
+				const cached = this.audioCache.get(content);
+				const s = get(settings);
+				if ((s?.showEmojiInCall ?? false) && this.emojiCache.has(content)) {
+					this.emoji = this.emojiCache.get(content)!;
+				} else {
+					this.emoji = null;
+				}
+				try {
+					if (cached && cached !== true) {
+						await this.playAudio(cached);
+					} else if (!get(config)?.audio?.tts?.engine && s?.audio?.tts?.engine !== 'browser-kokoro') {
 						await this.speakSpeechSynthesisHandler(content);
 					}
-				} else {
-					console.log('[voice-service] audio not cached yet, re-queueing', content.slice(0, 50));
-					this.messages[id].unshift(content);
-					await new Promise((r) => setTimeout(r, 200));
+				} catch (e) {
+					console.error('Error playing audio:', e);
 				}
-			} else if (this.finishedMessages[id] && this.messages[id] && this.messages[id].length === 0) {
+				await new Promise((r) => setTimeout(r, 150));
+			} else if (this.finishedMessages[id]) {
 				this.assistantSpeaking = false;
 				break;
 			} else {
 				await new Promise((r) => setTimeout(r, 200));
 			}
 		}
+		this.assistantSpeaking = false;
 	};
 
 	// ── Chat Event Handlers ────────────────────────────────────────────
@@ -536,6 +582,7 @@ export class VoiceCallService {
 			this.currentMessageId = id;
 			this.assistantText = '';
 			this.messageLog = [...this.messageLog, { role: 'assistant', content: '' }];
+			this.cancelLiveWhisper();
 			this.audioAbortController.abort();
 			this.audioAbortController = new AbortController();
 			this.assistantSpeaking = true;
@@ -551,33 +598,209 @@ export class VoiceCallService {
 			} else {
 				this.messages[id].push(content);
 			}
-			this.assistantText = (this.assistantText + ' ' + content).trim();
-			this.messageLog = this.messageLog.map((m, i) =>
-				i === this.messageLog.length - 1 && m.role === 'assistant'
-					? { ...m, content: this.assistantText }
-					: m
-			);
 			this.fetchAudio(content);
 		}
 	};
 
+	private applyAssistantText(text: string) {
+		if (!text) return;
+		this.assistantText = text;
+		const last = this.messageLog.at(-1);
+		if (last?.role === 'assistant') {
+			this.messageLog = this.messageLog.map((m, i) =>
+				i === this.messageLog.length - 1 && m.role === 'assistant' ? { ...m, content: text } : m
+			);
+			return;
+		}
+		this.messageLog = [...this.messageLog, { role: 'assistant', content: text }];
+	}
+
+	private chatContentHandler = (e: Event) => {
+		const { id, fullContent } = (e as CustomEvent).detail as {
+			id: string;
+			fullContent?: string;
+		};
+		if (!fullContent) return;
+		if (this.currentMessageId && this.currentMessageId !== id) return;
+		this.applyAssistantText(fullContent);
+	};
+
 	private chatFinishHandler = async (e: Event) => {
-		const { id } = (e as CustomEvent).detail;
+		const { id, content } = (e as CustomEvent).detail as { id: string; content?: string };
 		this.finishedMessages[id] = true;
 		this.chatStreaming = false;
+		if (content) this.applyAssistantText(content);
 		this.currentMessageId = null;
 	};
 
 	private attachChatListeners() {
 		this.opts.eventTarget.addEventListener('chat:start', this.chatStartHandler as EventListener);
 		this.opts.eventTarget.addEventListener('chat', this.chatEventHandler as EventListener);
+		this.opts.eventTarget.addEventListener('chat:content', this.chatContentHandler as EventListener);
 		this.opts.eventTarget.addEventListener('chat:finish', this.chatFinishHandler as EventListener);
 	}
 
 	private detachChatListeners() {
 		this.opts.eventTarget.removeEventListener('chat:start', this.chatStartHandler as EventListener);
 		this.opts.eventTarget.removeEventListener('chat', this.chatEventHandler as EventListener);
+		this.opts.eventTarget.removeEventListener('chat:content', this.chatContentHandler as EventListener);
 		this.opts.eventTarget.removeEventListener('chat:finish', this.chatFinishHandler as EventListener);
+	}
+
+	private lastUser(): VoiceMessage | undefined {
+		const last = this.messageLog.at(-1);
+		return last?.role === 'user' ? last : undefined;
+	}
+
+	private pendingUserText(): string {
+		return this.lastUser()?.content?.trim() || this.liveTranscript.trim();
+	}
+
+	private ensurePendingUser() {
+		if (this.lastUser()?.pending) return;
+		this.messageLog = [...this.messageLog, { role: 'user', content: '', pending: true }];
+	}
+
+	private isDeafToMic() {
+		if (this.muted || this.loading) return true;
+		if (this.assistantSpeaking || this.chatStreaming) {
+			return !(get(settings)?.voiceInterruption ?? false);
+		}
+		return false;
+	}
+
+	private isLikelyHallucination(text: string) {
+		const compact = text.replace(/\s+/g, ' ').trim();
+		if (!compact) return true;
+		const tokens = compact.split(' ');
+		const norm = tokens
+			.map((t) => t.replace(/[^\p{L}\p{N}]+/gu, '').toLowerCase())
+			.filter(Boolean);
+		if (norm.length >= 8) {
+			const unique = new Set(norm);
+			if (unique.size <= 4) return true;
+		}
+		const chars = compact.replace(/\s/g, '');
+		const digits = chars.replace(/\D/g, '').length;
+		return chars.length >= 12 && digits / chars.length > 0.4;
+	}
+
+	private updatePendingUser(text: string) {
+		if (!text || !this.hasStartedSpeaking || this.confirmed || this.isDeafToMic()) return;
+		if (this.isLikelyHallucination(text)) return;
+
+		const last = this.messageLog.at(-1);
+		if (last?.role === 'user' && last.pending) {
+			this.messageLog = this.messageLog.map((m, i) =>
+				i === this.messageLog.length - 1 && m.role === 'user'
+					? { role: 'user', content: text, pending: true }
+					: m
+			);
+			return;
+		}
+		if (last?.role === 'user') return;
+
+		this.ensurePendingUser();
+		this.messageLog = this.messageLog.map((m, i) =>
+			i === this.messageLog.length - 1 && m.role === 'user'
+				? { role: 'user', content: text, pending: true }
+				: m
+		);
+	}
+
+	private finalizeUser(text: string) {
+		if (this.lastUser()) {
+			this.messageLog = this.messageLog.map((m, i) =>
+				i === this.messageLog.length - 1 && m.role === 'user'
+					? { role: 'user', content: text }
+					: m
+			);
+			return;
+		}
+		this.messageLog = [...this.messageLog, { role: 'user', content: text }];
+	}
+
+	private dropPendingUser() {
+		if (!this.lastUser()?.pending) return;
+		this.messageLog = this.messageLog.slice(0, -1);
+	}
+
+	private pickRecorderMime(): string {
+		const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
+		return candidates.find((type) => MediaRecorder.isTypeSupported(type)) ?? '';
+	}
+
+	private audioBlobToFile(blob: Blob, stem: string): File {
+		const type = blob.type || this.recorderMime || 'audio/webm';
+		const ext = type.includes('mp4') ? 'm4a' : type.includes('ogg') ? 'ogg' : type.includes('wav') ? 'wav' : 'webm';
+		return blobToFile(blob, `${stem}.${ext}`);
+	}
+
+	private scheduleLiveWhisper() {
+		if (this.isDeafToMic() || this.confirmed || !this.hasStartedSpeaking) return;
+		if (this.liveWhisperBusy) {
+			this.liveWhisperQueued = true;
+			return;
+		}
+		if (this.liveWhisperTimer) return;
+		this.liveWhisperTimer = setTimeout(() => {
+			this.liveWhisperTimer = null;
+			void this.runLiveWhisper();
+		}, 650);
+	}
+
+	private cancelLiveWhisper() {
+		this.liveWhisperQueued = false;
+		if (this.liveWhisperTimer) {
+			clearTimeout(this.liveWhisperTimer);
+			this.liveWhisperTimer = null;
+		}
+		this.liveWhisperAbort?.abort();
+		this.liveWhisperAbort = null;
+	}
+
+	private async runLiveWhisper() {
+		if (this.isDeafToMic() || this.confirmed || !this.hasStartedSpeaking) return;
+		if (this.audioChunks.length === 0) return;
+
+		const blob = new Blob(this.audioChunks, { type: this.recorderMime });
+		if (blob.size < LIVE_WHISPER_MIN_BYTES) {
+			this.scheduleLiveWhisper();
+			return;
+		}
+
+		this.liveWhisperBusy = true;
+		const abort = new AbortController();
+		this.liveWhisperAbort = abort;
+
+		try {
+			const res = await transcribeAudio(
+				localStorage.token,
+				this.audioBlobToFile(blob, 'live'),
+				get(settings)?.audio?.stt?.language,
+				{ signal: abort.signal }
+			);
+			if (abort.signal.aborted || this.confirmed || !this.hasStartedSpeaking || this.isDeafToMic()) {
+				return;
+			}
+			const text = (res?.text ?? '').trim();
+			if (text) {
+				this.liveTranscript = text;
+				this.speaking = true;
+				this.updatePendingUser(text);
+			}
+		} catch {
+			return;
+		} finally {
+			this.liveWhisperBusy = false;
+			if (this.liveWhisperAbort === abort) {
+				this.liveWhisperAbort = null;
+			}
+			if (this.liveWhisperQueued && this.hasStartedSpeaking && !this.confirmed && !this.muted) {
+				this.liveWhisperQueued = false;
+				this.scheduleLiveWhisper();
+			}
+		}
 	}
 
 	// ── Wake Lock ──────────────────────────────────────────────────────
@@ -624,9 +847,11 @@ export class VoiceCallService {
 	}
 
 	get statusText(): string {
-		if (this.loading) return 'thinking';
-		if (this.muted) return 'muted';
-		if (this.assistantSpeaking) return 'interrupt';
-		return 'listening';
+		if (!this.micReady) return 'Starting microphone…';
+		if (this.muted) return 'Muted';
+		if (this.loading) return 'Thinking';
+		if (this.assistantSpeaking) return 'Tap to skip';
+		if (this.speaking) return 'Listening';
+		return 'You may start speaking';
 	}
 }
