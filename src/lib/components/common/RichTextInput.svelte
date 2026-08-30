@@ -317,6 +317,7 @@
 	export let generateAutoCompletion: Function = async () => null;
 	export let autocomplete = false;
 	export let messageInput = false;
+	export let autofocus = true;
 	export let shiftEnter = false;
 	export let largeTextAsFile = false;
 	export let insertPromptAsRichText = false;
@@ -516,8 +517,9 @@
 
 		selectNextTemplate(editor.view.state, editor.view.dispatch);
 
-		// Ensure the editor is still valid before trying to focus
-		focus();
+		if (autofocus) {
+			focus();
+		}
 	};
 
 	export const insertContent = (content) => {
@@ -909,8 +911,8 @@
 					: []),
 				...(collaboration && provider ? [provider.getEditorExtension()] : [])
 			],
-			content: provider ? undefined : content,
-			autofocus: messageInput ? true : false,
+			content: collaboration ? undefined : content,
+			autofocus: messageInput && autofocus ? true : false,
 			onTransaction: () => {
 				if (!editor) return;
 
