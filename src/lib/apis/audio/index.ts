@@ -64,7 +64,12 @@ export const updateAudioConfig = async (token: string, payload: OpenAIConfigForm
 	return res;
 };
 
-export const transcribeAudio = async (token: string, file: File, language?: string) => {
+export const transcribeAudio = async (
+	token: string,
+	file: File,
+	language?: string,
+	options?: { signal?: AbortSignal }
+) => {
 	const data = new FormData();
 	data.append('file', file);
 	if (language) {
@@ -78,13 +83,15 @@ export const transcribeAudio = async (token: string, file: File, language?: stri
 			Accept: 'application/json',
 			authorization: `Bearer ${token}`
 		},
-		body: data
+		body: data,
+		signal: options?.signal
 	})
 		.then(async (res) => {
 			if (!res.ok) throw await res.json();
 			return res.json();
 		})
 		.catch((err) => {
+			if (err?.name === 'AbortError') return null;
 			error = err.detail;
 			console.error(err);
 			return null;
