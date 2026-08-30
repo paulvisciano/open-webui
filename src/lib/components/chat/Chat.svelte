@@ -143,6 +143,7 @@
 	export let onEmbeddedChatTitle: ((chatId: string, title: string) => void | Promise<void>) | null =
 		null;
 	export let embeddedVoiceActive = false;
+	export let onStartEmbeddedVoice: (() => void) | null = null;
 	export let onVoiceReady:
 		| ((api: {
 				eventTarget: EventTarget;
@@ -864,7 +865,9 @@
 				await setDefaults();
 			}
 
-			messageInput?.focus({ preventScroll: true });
+			if (!embedded) {
+				messageInput?.focus({ preventScroll: true });
+			}
 		} else if (!embedded) {
 			await goto('/');
 		} else {
@@ -913,7 +916,9 @@
 		await setDefaults();
 		loading = false;
 		await tick();
-		messageInput?.focus({ preventScroll: true });
+		if (!embedded) {
+			messageInput?.focus({ preventScroll: true });
+		}
 	};
 
 	const onSelect = async (e) => {
@@ -1618,7 +1623,9 @@
 				await restoreChatInput(storageChatInput);
 			}
 
-			messageInput?.focus({ preventScroll: true });
+			if (!embedded) {
+				messageInput?.focus({ preventScroll: true });
+			}
 
 			if (onVoiceReady) {
 				onVoiceReady({
@@ -2275,8 +2282,9 @@
 			$models.map((m) => m.id).includes(modelId) ? modelId : ''
 		);
 
-		await tick();
-		messageInput?.focus({ preventScroll: true });
+		if (!embedded) {
+			messageInput?.focus({ preventScroll: true });
+		}
 	};
 
 	const loadChat = async () => {
@@ -4336,27 +4344,34 @@
 								/>
 							</div>
 							<div class="flex items-center gap-1">
-								{#if $chatId && onDeleteEmbeddedChat}
-									<Tooltip content={$i18n.t('Delete')} placement="bottom">
-										<button
-											type="button"
-											class="rounded-md p-1 text-gray-500 transition hover:text-gray-900 dark:hover:text-white"
-											on:click={async () => {
-												if ($chatId) {
-													await onDeleteEmbeddedChat($chatId);
-												}
-											}}
-											aria-label={$i18n.t('Delete')}
-										>
-											<GarbageBin className="size-4" strokeWidth="1.5" />
-										</button>
-									</Tooltip>
-								{/if}
+							{#if ($chatId || chatIdProp) && onDeleteEmbeddedChat}
+								<Tooltip content={$i18n.t('Delete')} placement="bottom">
+									<button
+										type="button"
+										class="rounded-md p-2 text-gray-500 transition hover:text-gray-900 dark:hover:text-white"
+										on:click={async (e) => {
+											e.preventDefault();
+											e.stopPropagation();
+											const id = $chatId || chatIdProp;
+											if (id) {
+												await onDeleteEmbeddedChat(id);
+											}
+										}}
+										aria-label={$i18n.t('Delete')}
+									>
+										<GarbageBin className="size-4" strokeWidth="1.5" />
+									</button>
+								</Tooltip>
+							{/if}
 								<Tooltip content={$i18n.t('Close')} placement="bottom">
 									<button
 										type="button"
-										class="rounded-md p-1 text-gray-500 transition hover:text-gray-900 dark:hover:text-white"
-										on:click={() => onCloseEmbedded?.()}
+										class="rounded-md p-2 text-gray-500 transition hover:text-gray-900 dark:hover:text-white"
+										on:click={(e) => {
+											e.preventDefault();
+											e.stopPropagation();
+											onCloseEmbedded?.();
+										}}
 										aria-label={$i18n.t('Close')}
 									>
 										<XMark className="size-4" strokeWidth="2" />
@@ -4506,11 +4521,13 @@
 										bind:dragged
 										dropzoneId={messageInputDropzoneId}
 										chatId={$chatId}
+										autoFocus={!embedded}
 										{contextUsage}
 										{contextCompactionEnabled}
 										{embedded}
 										compactHandler={handleManualCompact}
 										statusHandler={handleStatusCommand}
+										onStartVoiceMode={embedded ? onStartEmbeddedVoice : null}
 										forkHandler={handleForkChat}
 										{toolApprovalMode}
 										onToolApprovalModeChange={handleToolApprovalModeChange}
@@ -4598,11 +4615,13 @@
 										bind:dragged
 										dropzoneId={messageInputDropzoneId}
 										chatId={$chatId}
+										autoFocus={!embedded}
 										{contextUsage}
 										{contextCompactionEnabled}
 										{embedded}
 										compactHandler={handleManualCompact}
 										statusHandler={handleStatusCommand}
+										onStartVoiceMode={embedded ? onStartEmbeddedVoice : null}
 										forkHandler={handleForkChat}
 										{toolApprovalMode}
 										onToolApprovalModeChange={handleToolApprovalModeChange}

@@ -414,8 +414,9 @@
 			}
 
 			chatInputElement?.setText(text);
-			if (!$showCallOverlay) {
+			if (autoFocus && !$showCallOverlay) {
 				focus();
+			}
 			}
 
 			if (text !== '') {
@@ -723,6 +724,8 @@
 
 	let user = null;
 	export let placeholder = '';
+	export let autoFocus = true;
+	export let onStartVoiceMode: (() => void) | null = null;
 
 	type ModelCapability =
 		| 'vision'
@@ -1551,10 +1554,12 @@
 		];
 		loaded = true;
 
-		window.setTimeout(() => {
-			const chatInput = document.getElementById('chat-input');
-			chatInput?.focus();
-		}, 0);
+		if (autoFocus) {
+			window.setTimeout(() => {
+				const chatInput = document.getElementById('chat-input');
+				chatInput?.focus();
+			}, 0);
+		}
 
 		window.addEventListener('keydown', onKeyDown);
 		window.addEventListener('keyup', onKeyUp);
@@ -2024,6 +2029,7 @@
 													json={true}
 													richText={$settings?.richTextInput ?? true}
 													messageInput={true}
+												autofocus={autoFocus}
 													showFormattingToolbar={$settings?.showFormattingToolbar ?? false}
 													floatingMenuPlacement={'top-start'}
 													insertPromptAsRichText={$settings?.insertPromptAsRichText ?? false}
@@ -2636,7 +2642,10 @@
 
 																return;
 															}
-															// check if user has access to getUserMedia
+															if (onStartVoiceMode) {
+																onStartVoiceMode();
+																return;
+															}
 															try {
 																let stream = await navigator.mediaDevices.getUserMedia({
 																	audio: true
