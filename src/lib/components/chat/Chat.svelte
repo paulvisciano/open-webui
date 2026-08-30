@@ -1949,6 +1949,25 @@
 		message.ttsSentContentPartCount = sentContentPartCount + dispatchContentParts.length;
 	};
 
+	const dispatchCallOverlayContent = (message) => {
+		if (!$showCallOverlay && !embeddedVoiceActive) {
+			return;
+		}
+
+		const fullContent =
+			getOutputText(message?.output) || removeAllDetails(message?.content ?? '');
+		if (!fullContent) return;
+
+		eventTarget.dispatchEvent(
+			new CustomEvent('chat:content', {
+				detail: {
+					id: message.id,
+					fullContent
+				}
+			})
+		);
+	};
+
 	const getContents = () => {
 		const messages = history ? createMessagesList(history, history.currentId) : [];
 		let contents = [];
@@ -2834,6 +2853,7 @@
 
 		history.messages[message.id] = message;
 		history = history;
+		dispatchCallOverlayContent(message);
 
 		if (done) {
 			message.done = true;
