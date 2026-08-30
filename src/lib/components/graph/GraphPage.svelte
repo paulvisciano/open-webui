@@ -12,6 +12,7 @@
 	import CanvasView from './CanvasView.svelte';
 	import Chat from '$lib/components/chat/Chat.svelte';
 	import GraphVoiceOverlay from './GraphVoiceOverlay.svelte';
+	import VoiceWaveform from './VoiceWaveform.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import { VoiceCallService } from '$lib/components/chat/MessageInput/VoiceCallService.svelte';
 
@@ -47,6 +48,7 @@
 	let recentChats = $state<any[]>([]);
 
 	let voiceActive = $state(false);
+	let voiceStarting = $state(false);
 	let voiceService = $state<VoiceCallService | null>(null);
 	let voiceChatApi: {
 		eventTarget: EventTarget;
@@ -110,26 +112,59 @@
 	};
 
 	const startVoiceChat = async () => {
+		if (voiceActive || voiceStarting) return;
 		orbOptionsOpen = false;
-		if (!showChatPanel) {
-			await startNewChat();
-		}
-		await tick();
-		if (!voiceChatApi) {
-			await new Promise<void>((resolve) => {
-				voiceReadyResolve = resolve;
+		voiceStarting = true;
+
+		let stream: MediaStream | null = null;
+		let audioContext: AudioContext | null = null;
+		try {
+			stream = await navigator.mediaDevices.getUserMedia({
+				audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
 			});
+			audioContext = new AudioContext();
+			if (audioContext.state === 'suspended') await audioContext.resume();
+		} catch {
+			toast.error('Microphone permission denied');
+			voiceStarting = false;
+			return;
 		}
-		if (voiceChatApi) {
+
+		try {
+			if (!showChatPanel) {
+				await startNewChat();
+			}
+			await tick();
+			if (!voiceChatApi) {
+				await new Promise<void>((resolve) => {
+					voiceReadyResolve = resolve;
+				});
+			}
+			if (!voiceChatApi) {
+				stream.getTracks().forEach((t) => t.stop());
+				await audioContext.close();
+				voiceStarting = false;
+				return;
+			}
 			voiceService = new VoiceCallService({
 				eventTarget: voiceChatApi.eventTarget,
 				submitPrompt: voiceChatApi.submitPrompt,
 				stopResponse: voiceChatApi.stopResponse,
 				chatId: voiceChatApi.chatId() ?? selectedChatId,
-				modelId: voiceChatApi.modelId() ?? ''
+				modelId: voiceChatApi.modelId() ?? '',
+				audioStream: stream,
+				audioContext
 			});
 			voiceActive = true;
 			await voiceService.start();
+		} catch (err) {
+			console.error('[graph] startVoiceChat failed', err);
+			stream.getTracks().forEach((t) => t.stop());
+			await audioContext.close();
+			voiceService = null;
+			voiceActive = false;
+		} finally {
+			voiceStarting = false;
 		}
 	};
 
@@ -246,6 +281,7 @@
 				!target.isContentEditable
 			) {
 				e.preventDefault();
+				if (voiceStarting) return;
 				if (voiceActive) {
 					endVoiceChat();
 				} else {
@@ -278,53 +314,55 @@
 			onqueryAbout={queryAbout}
 		/>
 
-		<div class="chat-collapsed-orb-host">
-			{#if voiceActive && voiceService}
-				<div class="voice-orb-row">
+		{#if voiceStarting || (voiceActive && voiceService)}
+			<div class="voice-stage">
+				<div class="voice-vignette" aria-hidden="true"></div>
+				<div class="voice-hero">
 					<button
-						class="voice-ctrl {voiceService.muted ? 'muted' : ''}"
-						onclick={() => voiceService.toggleMute()}
-						aria-label={voiceService.muted ? 'Unmute' : 'Mute'}
+						type="button"
+						class="voice-circle {voiceService?.loading ? 'thinking' : ''} {voiceService?.speaking ? 'recording' : ''} {voiceService?.assistantSpeaking ? 'speaking' : ''}"
+						aria-label={voiceService?.statusText ?? 'Starting microphone'}
+						onclick={() => {
+							if (voiceService?.assistantSpeaking) voiceService.stopAllAudio();
+						}}
 					>
-						{#if voiceService.muted}
-							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="size-5">
-								<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z"/>
-								<line x1="3" y1="3" x2="21" y2="21" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-							</svg>
-						{:else}
-							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="size-5">
-								<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z"/>
-							</svg>
-						{/if}
+						<VoiceWaveform
+							rms={voiceService?.speaking ? voiceService.visualRms : 0}
+							mode={voiceService?.speaking ? 'user' : voiceService?.assistantSpeaking ? 'assistant' : 'idle'}
+						/>
 					</button>
-
-					<div class="voice-orb-center">
-						<div
-							class="chat-orb voice-active"
-							role="button"
-							tabindex="0"
-							aria-label={voiceService.statusText}
-							onclick={() => {
-								if (voiceService.assistantSpeaking) {
-									voiceService.stopAllAudio();
-								}
-							}}
-							style:transform={`scale(${1 + Math.min(voiceService.rmsLevel * 100, 8) / 40})`}
+					<p class="voice-status">{voiceStarting && !voiceService ? 'Starting microphone…' : voiceService?.statusText}</p>
+					{#if voiceService}
+						<GraphVoiceOverlay service={voiceService} />
+					{/if}
+				</div>
+				<div class="voice-dock">
+					{#if voiceService}
+						<button
+							class="voice-ctrl {voiceService.muted ? 'muted' : ''}"
+							onclick={() => voiceService.toggleMute()}
+							aria-label={voiceService.muted ? 'Unmute' : 'Mute'}
 						>
-							{#if voiceService.emoji}
-								<span class="voice-orb-emoji" style="font-size: {1.5 + Math.min(voiceService.rmsLevel * 100, 8) / 20}rem">{voiceService.emoji}</span>
-							{:else if voiceService.loading || voiceService.assistantSpeaking}
+							{#if voiceService.muted}
+								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="size-5">
+									<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z"/>
+									<line x1="3" y1="3" x2="21" y2="21" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+								</svg>
+							{:else}
+								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="size-5">
+									<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z"/>
+								</svg>
+							{/if}
+						</button>
+						<button
+							class="voice-mic {voiceService.speaking ? 'recording' : ''} {voiceService.micReady ? 'live' : ''}"
+							onclick={() => {
+								if (voiceService.assistantSpeaking) voiceService.stopAllAudio();
+							}}
+							aria-label={voiceService.statusText}
+						>
+							{#if voiceService.loading}
 								<svg class="voice-spinner" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
-									<style>
-										.spq { animation: sp8 1.05s infinite; }
-										.spo { animation-delay: 0.1s; }
-										.spz { animation-delay: 0.2s; }
-										@keyframes sp8 {
-											0%, 57.14% { animation-timing-function: cubic-bezier(0.33,0.66,0.66,1); transform: translate(0); }
-											28.57% { animation-timing-function: cubic-bezier(0.33,0,0.66,0.33); transform: translateY(-6px); }
-											100% { transform: translate(0); }
-										}
-									</style>
 									<circle class="spq" cx="4" cy="12" r="3" />
 									<circle class="spq spo" cx="12" cy="12" r="3" />
 									<circle class="spq spz" cx="20" cy="12" r="3" />
@@ -332,21 +370,19 @@
 							{:else}
 								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
 							{/if}
-						</div>
-						<div class="voice-orb-status">{voiceService.statusText}</div>
-					</div>
-
-					<button
-						class="voice-ctrl end-call"
-						onclick={endVoiceChat}
-						aria-label="End call"
-					>
-						<svg viewBox="0 0 20 20" fill="currentColor" class="size-5">
-							<path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z"/>
-						</svg>
-					</button>
+						</button>
+						<button class="voice-stop" onclick={endVoiceChat} aria-label="Stop">Stop</button>
+					{:else}
+						<button class="voice-mic" disabled aria-label="Starting microphone">
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+						</button>
+					{/if}
 				</div>
-			{:else}
+			</div>
+		{/if}
+
+		{#if !(voiceStarting || (voiceActive && voiceService))}
+		<div class="chat-collapsed-orb-host">
 				<div class="chat-collapsed-orb">
 					<div
 						class="chat-orb-add"
@@ -402,8 +438,8 @@
 						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
 					</div>
 				</div>
-			{/if}
 		</div>
+		{/if}
 
 		<input
 			bind:this={fileInput}
@@ -453,18 +489,15 @@
 		</div>
 	{/if}
 
-	{#if voiceActive && voiceService}
-		<GraphVoiceOverlay service={voiceService} />
-	{/if}
 </div>
 
 <style>
 	.chat-collapsed-orb-host {
 		position: absolute;
 		left: 50%;
-		bottom: calc(2rem + env(safe-area-inset-bottom, 0px));
+		bottom: calc(2.25rem + env(safe-area-inset-bottom, 0px));
 		transform: translateX(-50%);
-		z-index: 30;
+		z-index: 50;
 		pointer-events: auto;
 		display: flex;
 		flex-direction: column;
@@ -627,10 +660,39 @@
 	}
 
 	.chat-orb.voice-active {
-		transition: transform 0.1s ease-out;
+		transition: transform 0.1s ease-out, border-color 0.25s ease, box-shadow 0.25s ease;
 	}
 	.chat-orb.voice-active::before {
 		animation-duration: 1.5s;
+	}
+	.chat-orb.starting {
+		opacity: 0.7;
+		border-color: oklch(60% 0.04 210 / 30%);
+	}
+	.chat-orb.mic-ready {
+		border-color: oklch(82% 0.14 210 / 45%);
+		box-shadow:
+			0 0 0 1px oklch(82% 0.14 210 / 18%),
+			0 0 28px oklch(82% 0.14 210 / 28%),
+			0 12px 40px oklch(0% 0 0 / 50%);
+	}
+	.chat-orb.recording {
+		border-color: oklch(62% 0.2 18 / 70%);
+		box-shadow:
+			0 0 0 1px oklch(62% 0.2 18 / 25%),
+			0 0 32px oklch(62% 0.2 18 / 30%),
+			0 12px 40px oklch(0% 0 0 / 50%);
+	}
+	.chat-orb.recording::after {
+		content: '';
+		position: absolute;
+		top: 8px;
+		right: 8px;
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: oklch(62% 0.22 18);
+		box-shadow: 0 0 8px oklch(62% 0.22 18 / 80%);
 	}
 	.voice-orb-emoji {
 		line-height: 1;
@@ -651,7 +713,7 @@
 		display: flex;
 		flex-direction: column;
 		align-items: center;
-		gap: 8px;
+		gap: 10px;
 		justify-content: flex-end;
 		position: relative;
 	}
@@ -699,5 +761,135 @@
 	.voice-ctrl svg {
 		width: 18px;
 		height: 18px;
+	}
+
+	.voice-stage {
+		position: absolute;
+		inset: 0;
+		z-index: 45;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: space-between;
+		padding: calc(4.5rem + env(safe-area-inset-top, 0px)) 24px calc(1.75rem + env(safe-area-inset-bottom, 0px));
+		pointer-events: none;
+	}
+	.voice-vignette {
+		position: absolute;
+		inset: 0;
+		background:
+			radial-gradient(ellipse 80% 55% at 50% 38%, oklch(18% 0.04 200 / 35%) 0%, transparent 62%),
+			linear-gradient(to bottom, oklch(8% 0.02 260 / 28%) 0%, oklch(8% 0.02 260 / 55%) 100%);
+		pointer-events: none;
+	}
+	.voice-hero {
+		position: relative;
+		z-index: 1;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 1.15rem;
+		flex: 1;
+		justify-content: center;
+		pointer-events: none;
+		width: 100%;
+	}
+	.voice-circle {
+		width: min(58vw, 240px);
+		height: min(58vw, 240px);
+		border: 0;
+		padding: 0;
+		border-radius: 50%;
+		background: oklch(16% 0.03 200 / 40%);
+		box-shadow:
+			0 0 0 1px oklch(82% 0.14 210 / 16%),
+			0 0 48px oklch(82% 0.14 210 / 18%),
+			0 20px 60px oklch(0% 0 0 / 35%);
+		overflow: hidden;
+		pointer-events: auto;
+		cursor: pointer;
+	}
+	.voice-circle.thinking {
+		box-shadow:
+			0 0 0 1px oklch(82% 0.14 210 / 22%),
+			0 0 56px oklch(82% 0.14 210 / 22%);
+	}
+	.voice-circle.recording {
+		box-shadow:
+			0 0 0 1px oklch(62% 0.2 18 / 40%),
+			0 0 48px oklch(82% 0.14 210 / 28%);
+	}
+	.voice-status {
+		margin: 0;
+		font-size: 0.95rem;
+		letter-spacing: 0.01em;
+		color: oklch(82% 0.04 210 / 80%);
+		text-align: center;
+	}
+	.voice-dock {
+		position: relative;
+		z-index: 1;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 22px;
+		pointer-events: auto;
+		padding-bottom: 0.25rem;
+	}
+	.voice-dock .voice-ctrl {
+		width: 48px;
+		height: 48px;
+	}
+	.voice-mic {
+		width: 76px;
+		height: 76px;
+		border-radius: 50%;
+		border: 0;
+		background: oklch(72% 0.14 175);
+		color: oklch(16% 0.02 200);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		box-shadow:
+			0 0 0 6px oklch(72% 0.14 175 / 18%),
+			0 16px 40px oklch(0% 0 0 / 40%);
+		cursor: pointer;
+	}
+	.voice-mic svg {
+		width: 28px;
+		height: 28px;
+	}
+	.voice-mic.recording {
+		background: oklch(62% 0.2 18);
+		color: white;
+		box-shadow:
+			0 0 0 6px oklch(62% 0.2 18 / 22%),
+			0 16px 40px oklch(0% 0 0 / 40%);
+	}
+	.voice-mic.live:not(.recording) {
+		background: oklch(82% 0.14 210);
+	}
+	.voice-stop {
+		min-width: 48px;
+		height: 48px;
+		padding: 0 16px;
+		border-radius: 999px;
+		border: 0;
+		background: oklch(96% 0.01 210);
+		color: oklch(18% 0.02 260);
+		font-size: 14px;
+		font-weight: 600;
+		cursor: pointer;
+		box-shadow: 0 8px 24px oklch(0% 0 0 / 35%);
+	}
+	.voice-spinner .spq {
+		animation: sp8 1.05s infinite;
+	}
+	.voice-spinner .spo { animation-delay: 0.1s; }
+	.voice-spinner .spz { animation-delay: 0.2s; }
+	@keyframes sp8 {
+		0%, 57.14% { animation-timing-function: cubic-bezier(0.33, 0.66, 0.66, 1); transform: translate(0); }
+		28.57% { animation-timing-function: cubic-bezier(0.33, 0, 0.66, 0.33); transform: translateY(-6px); }
+		100% { transform: translate(0); }
 	}
 </style>
