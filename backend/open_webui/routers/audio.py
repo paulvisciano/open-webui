@@ -1,6 +1,7 @@
 """Audio router — TTS speech synthesis and STT transcription endpoints."""
 
 import asyncio
+import time
 import base64
 import hashlib
 import html
@@ -724,9 +725,14 @@ async def speech(request: Request, user=Depends(get_verified_user)):
 
 
 async def _transcribe_whisper(request, file_path, languages, file_dir, id):
+    load_t0 = time.perf_counter()
     if request.app.state.faster_whisper_model is None:
         request.app.state.faster_whisper_model = await asyncio.to_thread(
             set_faster_whisper_model, await Config.get('audio.stt.whisper_model')
+        )
+        log.info(
+            '[voice-timing] whisper_model_load %.0fms',
+            (time.perf_counter() - load_t0) * 1000,
         )
 
     model = request.app.state.faster_whisper_model
@@ -742,7 +748,13 @@ async def _transcribe_whisper(request, file_path, languages, file_dir, id):
         log.info("Detected language '%s' with probability %f", info.language, info.language_probability)
         return ''.join([segment.text for segment in list(segments)])
 
+    infer_t0 = time.perf_counter()
     transcript = await asyncio.to_thread(_run)
+    log.info(
+        '[voice-timing] whisper_infer %.0fms chars=%d',
+        (time.perf_counter() - infer_t0) * 1000,
+        len(transcript.strip()),
+    )
     data = {'text': transcript.strip()}
 
     async with aiofiles.open(os.path.join(file_dir, f'{id}.json'), 'w') as f:
@@ -1185,6 +1197,7 @@ async def _transcribe_mistral(request, file_path, filename, metadata, file_dir, 
 
 
 async def transcribe(request: Request, file_path: str, metadata: Optional[dict] = None, user=None):
+    pipe_t0 = time.perf_counter()
     log.info('transcribe: %s %s', file_path, metadata)
 
     if BYPASS_PYDUB_PREPROCESSING:
@@ -1192,7 +1205,12 @@ async def transcribe(request: Request, file_path: str, metadata: Optional[dict] 
         chunk_paths = [file_path]
     else:
         if is_audio_conversion_required(file_path):
+            conv_t0 = time.perf_counter()
             file_path = await asyncio.to_thread(convert_audio_to_mp3, file_path)
+            log.info(
+                '[voice-timing] audio_convert_mp3 %.0fms',
+                (time.perf_counter() - conv_t0) * 1000,
+            )
             if not file_path:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -1235,6 +1253,10 @@ async def transcribe(request: Request, file_path: str, metadata: Optional[dict] 
                 except Exception:
                     pass
 
+    log.info(
+        '[voice-timing] transcribe_total %.0fms',
+        (time.perf_counter() - pipe_t0) * 1000,
+    )
     return {
         'text': ' '.join([result['text'] for result in results]),
     }
