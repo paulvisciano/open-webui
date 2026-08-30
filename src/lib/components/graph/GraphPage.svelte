@@ -4,7 +4,7 @@
 	import type { Writable } from 'svelte/store';
 	import type { i18n as i18nType } from 'i18next';
 
-	import { showSidebar } from '$lib/stores';
+	import { showSidebar, mobile } from '$lib/stores';
 	import { createNewChat, getChatList, deleteChatById } from '$lib/apis/chats';
 	import { processImage } from '$lib/apis/graph';
 	import { toast } from 'svelte-sonner';
@@ -18,6 +18,7 @@
 
 	import { graphStore } from './stores/graph.svelte';
 	import type { KGNode } from './constants';
+	import { createSheetDrag, type SheetSnap } from './composables/use-sheet-drag';
 
 	const i18n: Writable<i18nType> = getContext('i18n');
 
@@ -32,6 +33,8 @@
 	let selectedChatId = $state<string>('');
 	let chatDraftKey = $state<string>('');
 	let showChatPanel = $state(false);
+	let chatSheetEl: HTMLDivElement | undefined = $state();
+	let sheetSnap: SheetSnap = $state('peek');
 	let chatLoading = $state(false);
 	let orbOptionsOpen = $state(false);
 	let orbCloseTimer: ReturnType<typeof setTimeout> | null = null;
@@ -99,19 +102,23 @@
 		chatLoading = true;
 		selectedChatId = chatId;
 		chatDraftKey = '';
+		sheetSnap = 'peek';
 		showChatPanel = true;
 		graphStore.setActiveConversation(chatId);
 		await tick();
+		document.getElementById('chat-input')?.blur();
+		(document.activeElement as HTMLElement | null)?.blur();
 		chatLoading = false;
 	};
 
 	const startNewChat = async () => {
 		selectedChatId = '';
 		chatDraftKey = `${Date.now()}`;
+		sheetSnap = 'peek';
 		showChatPanel = true;
 	};
 
-	const startVoiceChat = async () => {
+	const startVoiceChat = async ({ continueChat = false } = {}) => {
 		if (voiceActive || voiceStarting) return;
 		orbOptionsOpen = false;
 		voiceStarting = true;
@@ -138,7 +145,9 @@
 		}
 
 		try {
-			if (!showChatPanel) {
+			if (!continueChat) {
+				await startNewChat();
+			} else if (!showChatPanel) {
 				await startNewChat();
 			}
 			await tick();
@@ -185,8 +194,22 @@
 	const closeChatPanel = () => {
 		if (voiceActive) return;
 		showChatPanel = false;
+		sheetSnap = 'peek';
 		graphStore.setActiveConversation('');
 	};
+
+	$effect(() => {
+		if (!showChatPanel || !chatSheetEl || !$mobile || voiceActive) return;
+		const drag = createSheetDrag({
+			sheet: chatSheetEl,
+			onDismiss: closeChatPanel,
+			getSnap: () => sheetSnap,
+			setSnap: (snap) => {
+				sheetSnap = snap;
+			}
+		});
+		return () => drag.destroy();
+	});
 
 	const createChatOnFirstMessage = async () => {
 		const token = localStorage.token;
@@ -215,14 +238,20 @@
 	const deleteEmbeddedChat = async (id: string) => {
 		if (!id) return;
 		const token = localStorage.token;
+		const wasCurrent = id === selectedChatId;
 		await deleteChatById(token, id).catch((err) => {
 			console.error('[graph] deleteChat failed', err);
+			toast.error(err instanceof Error ? err.message : 'Failed to delete conversation');
+			return null;
 		});
 		await refreshRecentChats();
 		await graphStore.loadConversations(token);
-		if (id === selectedChatId) {
+		if (wasCurrent) {
 			selectedChatId = '';
 			chatDraftKey = '';
+			showChatPanel = false;
+			sheetSnap = 'peek';
+			graphStore.setActiveConversation('');
 		}
 	};
 
@@ -320,6 +349,22 @@
 			onselectconversation={openChat}
 			onqueryAbout={queryAbout}
 		/>
+
+		{#if !$showSidebar && !(voiceStarting || (voiceActive && voiceService))}
+			<button
+				type="button"
+				id="sidebar-toggle-button"
+				class="graph-menu-btn"
+				aria-label="Open menu"
+				onclick={() => showSidebar.set(true)}
+			>
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+					<line x1="4" y1="7" x2="20" y2="7" />
+					<line x1="4" y1="12" x2="20" y2="12" />
+					<line x1="4" y1="17" x2="20" y2="17" />
+				</svg>
+			</button>
+		{/if}
 
 		{#if voiceStarting || (voiceActive && voiceService)}
 			<div class="voice-stage">
@@ -458,13 +503,27 @@
 		/>
 	</div>
 
+	{#if showChatPanel && $mobile && !voiceActive}
+		<button type="button" class="chat-sheet-backdrop" aria-label="Close conversation" onclick={closeChatPanel}></button>
+	{/if}
+
 	{#if showChatPanel}
 		<div
-			class="chat-side-panel absolute top-0 right-0 bottom-0 flex flex-col bg-white dark:bg-gray-900 border-l border-gray-100 dark:border-gray-800/50 z-20 {voiceActive ? 'voice-hide' : ''}"
-			style="width: min(480px, 40vw); {voiceActive ? 'display: none;' : ''}"
-			transition:fly={{ x: '100%', duration: 300, opacity: 1 }}
+			bind:this={chatSheetEl}
+			class="chat-side-panel flex flex-col bg-white dark:bg-gray-900 border-gray-100 dark:border-gray-800/50 z-30 {voiceActive ? 'voice-hide' : ''} {$mobile ? 'chat-sheet' : ''} {sheetSnap === 'full' ? 'sheet-expanded' : ''}"
+			style={voiceActive
+				? 'display: none;'
+				: $mobile
+					? ''
+					: 'width: min(480px, 40vw);'}
+			transition:fly={$mobile ? { duration: 0 } : { x: '100%', duration: 320 }}
 		>
-		<div class="flex-1 overflow-hidden">
+			{#if $mobile}
+				<div class="sheet-handle" data-sheet-handle="true">
+					<div class="sheet-handle-pill"></div>
+				</div>
+			{/if}
+		<div class="flex-1 overflow-hidden min-h-0">
 				{#if chatLoading}
 					<div class="flex h-full items-center justify-center">
 						<Spinner className="size-5" />
@@ -490,6 +549,7 @@
 								voiceReadyResolve = null;
 							}
 						}}
+					onStartEmbeddedVoice={() => startVoiceChat({ continueChat: true })}
 					/>
 				{/if}
 			</div>
@@ -499,12 +559,36 @@
 </div>
 
 <style>
+	.graph-menu-btn {
+		position: absolute;
+		top: calc(0.7rem + env(safe-area-inset-top, 0px));
+		left: 0.7rem;
+		z-index: 50;
+		width: 44px;
+		height: 44px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border: 0;
+		border-radius: 12px;
+		background: oklch(16% 0.02 255 / 70%);
+		backdrop-filter: blur(16px) saturate(1.3);
+		-webkit-backdrop-filter: blur(16px) saturate(1.3);
+		color: oklch(92% 0.01 210);
+		box-shadow: 0 8px 24px oklch(0% 0 0 / 35%);
+		cursor: pointer;
+	}
+	.graph-menu-btn svg {
+		width: 22px;
+		height: 22px;
+	}
+
 	.chat-collapsed-orb-host {
 		position: absolute;
 		left: 50%;
 		bottom: calc(2.25rem + env(safe-area-inset-bottom, 0px));
 		transform: translateX(-50%);
-		z-index: 50;
+		z-index: 15;
 		pointer-events: auto;
 		display: flex;
 		flex-direction: column;
@@ -657,7 +741,58 @@
 	}
 
 	.chat-side-panel {
+		position: absolute;
+		top: 0;
+		right: 0;
+		bottom: 0;
+		border-left: 1px solid;
+		border-color: inherit;
 		box-shadow: -8px 0 24px -8px oklch(0% 0 0 / 20%);
+		z-index: 30;
+	}
+	.chat-sheet-backdrop {
+		position: absolute;
+		inset: 0;
+		z-index: 25;
+		border: 0;
+		background: oklch(0% 0 0 / 42%);
+		cursor: pointer;
+	}
+	.chat-sheet {
+		position: fixed;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		top: 0;
+		width: 100%;
+		height: 100dvh;
+		max-height: 100dvh;
+		border-left: 0;
+		border-radius: 18px 18px 0 0;
+		transform: translate3d(0, 42%, 0);
+		transition: transform 0.4s cubic-bezier(0.32, 0.72, 0, 1);
+		box-shadow: 0 -12px 40px oklch(0% 0 0 / 35%);
+		padding-bottom: env(safe-area-inset-bottom, 0px);
+	}
+	.chat-sheet.sheet-dragging {
+		transition: none;
+	}
+	.chat-sheet.sheet-expanded {
+		border-radius: 0;
+	}
+	.sheet-handle {
+		flex-shrink: 0;
+		display: flex;
+		justify-content: center;
+		padding: 10px 0 8px;
+		touch-action: none;
+		cursor: grab;
+	}
+	.sheet-handle-pill {
+		width: 36px;
+		height: 5px;
+		border-radius: 99px;
+		background: oklch(55% 0.02 255 / 45%);
 	}
 
 	.voice-hidden {

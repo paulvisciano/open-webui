@@ -1,139 +1,175 @@
 import { browser } from '$app/environment';
 
+export type SheetSnap = 'peek' | 'full';
+
 interface SheetDragOptions {
-  sheet: HTMLElement;
-  onDismiss: () => void;
-  dismissThreshold?: number;
-  velocityThreshold?: number;
+	sheet: HTMLElement;
+	onDismiss: () => void;
+	getSnap: () => SheetSnap;
+	setSnap: (snap: SheetSnap) => void;
+	peekRatio?: number;
+	dismissThreshold?: number;
+	velocityThreshold?: number;
 }
 
-/**
- * Native-feeling bottom-sheet drag-to-dismiss. During a drag the sheet
- * translates 1:1 with the finger (clamped so it never moves above its rest
- * position). On release the sheet snaps open or closed based on how far it
- * was dragged and how fast, matching iOS/Android sheet behaviour.
- *
- * The drag is ignored when started on a vertically-scrollable region that
- * isn't already scrolled to its top, so scrolling the message thread doesn't
- * accidentally trigger a dismiss.
- */
 export function createSheetDrag(options: SheetDragOptions) {
-  if (!browser) return { destroy: () => {} };
+	if (!browser) return { destroy: () => {} };
 
-  const { sheet, onDismiss } = options;
-  const dismissThreshold = options.dismissThreshold ?? 100;
-  const velocityThreshold = options.velocityThreshold ?? 0.5;
+	const {
+		sheet,
+		onDismiss,
+		getSnap,
+		setSnap,
+		peekRatio = 0.42,
+		dismissThreshold = 110,
+		velocityThreshold = 0.55
+	} = options;
 
-  let startY = 0;
-  let currentY = 0;
-  let startTime = 0;
-  let dragging = false;
-  let scrollable: HTMLElement | null = null;
-  let scrollableAtTop = false;
+	let startY = 0;
+	let currentY = 0;
+	let startTime = 0;
+	let startTranslate = 0;
+	let dragging = false;
+	let armed = false;
+	let scrollable: HTMLElement | null = null;
 
-  function isScrollableAtTop(el: HTMLElement): boolean {
-    return el.scrollTop <= 1;
-  }
+	const restY = (snap: SheetSnap, h: number) => (snap === 'full' ? 0 : h * peekRatio);
 
-  function isInteractive(target: EventTarget | null): boolean {
-    let node = target as HTMLElement | null;
-    while (node && node !== sheet) {
-      const tag = node.tagName;
-      if (
-        tag === 'BUTTON' ||
-        tag === 'TEXTAREA' ||
-        tag === 'INPUT' ||
-        tag === 'SELECT' ||
-        tag === 'A' ||
-        node.isContentEditable
-      ) {
-        return true;
-      }
-      node = node.parentElement;
-    }
-    return false;
-  }
+	const applyRest = (snap: SheetSnap, animate = true) => {
+		const y = restY(snap, sheet.getBoundingClientRect().height);
+		sheet.classList.toggle('sheet-expanded', snap === 'full');
+		if (animate) sheet.classList.remove('sheet-dragging');
+		else sheet.classList.add('sheet-dragging');
+		sheet.style.transform = `translate3d(0, ${y}px, 0)`;
+	};
 
-  function findScrollableAncestor(target: EventTarget | null): HTMLElement | null {
-    let node = target as HTMLElement | null;
-    while (node && node !== sheet) {
-      const style = getComputedStyle(node);
-      if (
-        (style.overflowY === 'auto' || style.overflowY === 'scroll') &&
-        node.scrollHeight > node.clientHeight
-      ) {
-        return node;
-      }
-      node = node.parentElement;
-    }
-    return null;
-  }
+	applyRest(getSnap(), false);
+	requestAnimationFrame(() => applyRest(getSnap(), true));
 
-  function onTouchStart(e: TouchEvent) {
-    if (e.touches.length !== 1) return;
-    if (isInteractive(e.target)) {
-      dragging = false;
-      return;
-    }
-    startY = e.touches[0].clientY;
-    currentY = startY;
-    startTime = Date.now();
-    scrollable = findScrollableAncestor(e.target);
-    scrollableAtTop = scrollable ? isScrollableAtTop(scrollable) : true;
-    dragging = scrollableAtTop;
-  }
+	function isScrollableAtTop(el: HTMLElement): boolean {
+		return el.scrollTop <= 1;
+	}
 
-  function onTouchMove(e: TouchEvent) {
-    if (!dragging || e.touches.length !== 1) return;
-    currentY = e.touches[0].clientY;
-    const dy = currentY - startY;
-    if (dy <= 0) {
-      sheet.style.transform = '';
-      return;
-    }
-    if (scrollable && !isScrollableAtTop(scrollable)) {
-      dragging = false;
-      sheet.style.transform = '';
-      return;
-    }
-    e.preventDefault();
-    sheet.classList.add('sheet-dragging');
-    sheet.style.transform = `translateY(${dy}px)`;
-  }
+	function findScrollableAncestor(target: EventTarget | null): HTMLElement | null {
+		let node = target as HTMLElement | null;
+		while (node && node !== sheet) {
+			const style = getComputedStyle(node);
+			if (
+				(style.overflowY === 'auto' || style.overflowY === 'scroll') &&
+				node.scrollHeight > node.clientHeight + 8
+			) {
+				return node;
+			}
+			node = node.parentElement;
+		}
+		return null;
+	}
 
-  function onTouchEnd() {
-    if (!dragging) {
-      cleanup();
-      return;
-    }
-    const dy = currentY - startY;
-    const dt = Date.now() - startTime;
-    const velocity = dy / Math.max(dt, 1);
-    const shouldDismiss = dy > dismissThreshold || (dy > 40 && velocity > velocityThreshold);
-    cleanup();
-    if (shouldDismiss) {
-      onDismiss();
-    }
-  }
+	function isHandle(target: EventTarget | null): boolean {
+		let node = target as HTMLElement | null;
+		while (node && node !== sheet) {
+			if (node.dataset?.sheetHandle === 'true') return true;
+			node = node.parentElement;
+		}
+		return false;
+	}
 
-  function cleanup() {
-    dragging = false;
-    sheet.classList.remove('sheet-dragging');
-    sheet.style.transform = '';
-    scrollable = null;
-  }
+	function onTouchStart(e: TouchEvent) {
+		if (e.touches.length !== 1) return;
+		startY = e.touches[0].clientY;
+		currentY = startY;
+		startTime = Date.now();
+		startTranslate = restY(getSnap(), sheet.getBoundingClientRect().height);
+		scrollable = findScrollableAncestor(e.target);
+		const atTop = scrollable ? isScrollableAtTop(scrollable) : true;
+		const handle = isHandle(e.target);
+		armed = handle || atTop || getSnap() === 'peek';
+		dragging = false;
+	}
 
-  sheet.addEventListener('touchstart', onTouchStart, { passive: true });
-  sheet.addEventListener('touchmove', onTouchMove, { passive: false });
-  sheet.addEventListener('touchend', onTouchEnd, { passive: true });
-  sheet.addEventListener('touchcancel', onTouchEnd, { passive: true });
+	function onTouchMove(e: TouchEvent) {
+		if (!armed || e.touches.length !== 1) return;
+		currentY = e.touches[0].clientY;
+		const dy = currentY - startY;
+		if (!dragging) {
+			if (Math.abs(dy) < 8) return;
+			if (dy < 0 && getSnap() === 'full' && scrollable && !isScrollableAtTop(scrollable)) {
+				armed = false;
+				return;
+			}
+			if (dy > 0 && scrollable && !isScrollableAtTop(scrollable) && !isHandle(e.target)) {
+				armed = false;
+				return;
+			}
+			dragging = true;
+			sheet.classList.add('sheet-dragging');
+		}
+		e.preventDefault();
+		const h = sheet.getBoundingClientRect().height;
+		let y = startTranslate + dy;
+		if (y < 0) y = y * 0.18;
+		if (y > h) y = h;
+		sheet.style.transform = `translate3d(0, ${y}px, 0)`;
+	}
 
-  return {
-    destroy() {
-      sheet.removeEventListener('touchstart', onTouchStart);
-      sheet.removeEventListener('touchmove', onTouchMove);
-      sheet.removeEventListener('touchend', onTouchEnd);
-      sheet.removeEventListener('touchcancel', onTouchEnd);
-    },
-  };
+	function onTouchEnd() {
+		if (!dragging) {
+			armed = false;
+			return;
+		}
+		const h = sheet.getBoundingClientRect().height;
+		const dy = currentY - startY;
+		const y = Math.max(0, startTranslate + dy);
+		const dt = Math.max(Date.now() - startTime, 1);
+		const velocity = dy / dt;
+		const peekY = restY('peek', h);
+		const snap = getSnap();
+
+		dragging = false;
+		armed = false;
+		sheet.classList.remove('sheet-dragging');
+
+		if (velocity > velocityThreshold && dy > 36) {
+			if (snap === 'full') {
+				setSnap('peek');
+				applyRest('peek');
+			} else {
+				onDismiss();
+			}
+			return;
+		}
+		if (velocity < -velocityThreshold && dy < -28) {
+			setSnap('full');
+			applyRest('full');
+			return;
+		}
+
+		const midPeekDismiss = (peekY + h) / 2;
+		const midFullPeek = peekY / 2;
+		if (y >= midPeekDismiss || (snap === 'peek' && dy > dismissThreshold)) {
+			onDismiss();
+			return;
+		}
+		if (y <= midFullPeek) {
+			setSnap('full');
+			applyRest('full');
+			return;
+		}
+		setSnap('peek');
+		applyRest('peek');
+	}
+
+	sheet.addEventListener('touchstart', onTouchStart, { passive: true });
+	sheet.addEventListener('touchmove', onTouchMove, { passive: false });
+	sheet.addEventListener('touchend', onTouchEnd, { passive: true });
+	sheet.addEventListener('touchcancel', onTouchEnd, { passive: true });
+
+	return {
+		destroy() {
+			sheet.removeEventListener('touchstart', onTouchStart);
+			sheet.removeEventListener('touchmove', onTouchMove);
+			sheet.removeEventListener('touchend', onTouchEnd);
+			sheet.removeEventListener('touchcancel', onTouchEnd);
+		}
+	};
 }
