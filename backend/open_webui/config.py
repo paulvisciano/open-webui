@@ -1544,7 +1544,7 @@ IMAGES_EDIT_COMFYUI_WORKFLOW_NODES = images_edit_comfyui_workflow_nodes
 ####################################
 
 # Transcription
-WHISPER_MODEL = os.getenv('WHISPER_MODEL', 'base')
+WHISPER_MODEL = os.getenv('WHISPER_MODEL', 'small')
 
 WHISPER_COMPUTE_TYPE = os.getenv('WHISPER_COMPUTE_TYPE', 'int8')
 WHISPER_MODEL_DIR = os.getenv('WHISPER_MODEL_DIR', f'{CACHE_DIR}/whisper/models')
