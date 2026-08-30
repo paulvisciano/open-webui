@@ -244,6 +244,17 @@ for i in $(seq 1 30); do
     [[ "$i" -eq 30 ]] && { echo " ✗ FAILED"; tail -20 /tmp/open-webui-mcp.log; exit 1; }
 done
 
+# Kokoro TTS runs in-process inside the backend (not a separate daemon).
+if ! command -v espeak-ng &>/dev/null; then
+    echo "WARNING: espeak-ng not found — server Kokoro TTS needs it (brew install espeak-ng)"
+fi
+echo "▶ Ensuring kokoro TTS is installed..."
+VENV_PY="$SCRIPT_DIR/.venv/bin/python"
+if [[ ! -x "$VENV_PY" ]] || ! "$VENV_PY" -c "from kokoro import KPipeline" &>/dev/null; then
+    echo "  installing kokoro==0.9.4 into the project venv..."
+    uv pip install 'kokoro==0.9.4' --python "$VENV_PY"
+fi
+
 echo "▶ Starting Open WebUI backend on port $PORT..."
 
 # Auto-detect primary LAN IP for cross-device access (phone, tablet, etc.)
