@@ -115,6 +115,8 @@
 		if (voiceActive || voiceStarting) return;
 		orbOptionsOpen = false;
 		voiceStarting = true;
+		const t0 = performance.now();
+		console.log('[voice-timing]', new Date().toISOString().slice(11, 23), 'ui_start_pressed');
 
 		let stream: MediaStream | null = null;
 		let audioContext: AudioContext | null = null;
@@ -124,6 +126,11 @@
 			});
 			audioContext = new AudioContext();
 			if (audioContext.state === 'suspended') await audioContext.resume();
+			console.log(
+				'[voice-timing]',
+				new Date().toISOString().slice(11, 23),
+				`getUserMedia_done  +${(performance.now() - t0).toFixed(0)}ms`
+			);
 		} catch {
 			toast.error('Microphone permission denied');
 			voiceStarting = false;
@@ -320,7 +327,7 @@
 				<div class="voice-hero">
 					<button
 						type="button"
-						class="voice-circle {voiceService?.loading ? 'thinking' : ''} {voiceService?.speaking ? 'recording' : ''} {voiceService?.assistantSpeaking ? 'speaking' : ''}"
+						class="voice-circle {voiceService?.loading || voiceService?.transcribing ? 'thinking' : ''} {voiceService?.speaking ? 'recording' : ''} {voiceService?.assistantSpeaking ? 'speaking' : ''}"
 						aria-label={voiceService?.statusText ?? 'Starting microphone'}
 						onclick={() => {
 							if (voiceService?.assistantSpeaking) voiceService.stopAllAudio();
@@ -361,7 +368,7 @@
 							}}
 							aria-label={voiceService.statusText}
 						>
-							{#if voiceService.loading}
+							{#if voiceService.loading || voiceService.transcribing}
 								<svg class="voice-spinner" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
 									<circle class="spq" cx="4" cy="12" r="3" />
 									<circle class="spq spo" cx="12" cy="12" r="3" />
@@ -778,8 +785,8 @@
 		position: absolute;
 		inset: 0;
 		background:
-			radial-gradient(ellipse 80% 55% at 50% 38%, oklch(18% 0.04 200 / 35%) 0%, transparent 62%),
-			linear-gradient(to bottom, oklch(8% 0.02 260 / 28%) 0%, oklch(8% 0.02 260 / 55%) 100%);
+			radial-gradient(ellipse 80% 55% at 50% 38%, oklch(12% 0.03 200 / 55%) 0%, transparent 62%),
+			linear-gradient(to bottom, oklch(6% 0.02 260 / 52%) 0%, oklch(6% 0.02 260 / 78%) 100%);
 		pointer-events: none;
 	}
 	.voice-hero {
