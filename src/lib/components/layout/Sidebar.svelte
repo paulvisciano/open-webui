@@ -1743,7 +1743,7 @@
 											</div>
 										{/if}
 									</div>
-									<div class=" self-center font-normal truncate">{$user?.name}</div>
+									<div class="font-display self-center font-normal truncate">{$user?.name}</div>
 								</button>
 							</UserMenu>
 						{/if}
