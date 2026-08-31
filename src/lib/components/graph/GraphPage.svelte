@@ -586,7 +586,7 @@
 	.chat-collapsed-orb-host {
 		position: absolute;
 		left: 50%;
-		bottom: calc(2.25rem + env(safe-area-inset-bottom, 0px));
+		bottom: calc(0.95rem + env(safe-area-inset-bottom, 0px));
 		transform: translateX(-50%);
 		z-index: 15;
 		pointer-events: auto;
@@ -913,7 +913,7 @@
 		flex-direction: column;
 		align-items: center;
 		justify-content: space-between;
-		padding: calc(4.5rem + env(safe-area-inset-top, 0px)) 24px calc(1.75rem + env(safe-area-inset-bottom, 0px));
+		padding: calc(4.5rem + env(safe-area-inset-top, 0px)) 24px calc(6.5rem + env(safe-area-inset-bottom, 0px));
 		pointer-events: none;
 	}
 	.voice-vignette {
@@ -969,14 +969,16 @@
 		text-align: center;
 	}
 	.voice-dock {
-		position: relative;
-		z-index: 1;
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: max(4px, env(safe-area-inset-bottom, 0px));
+		z-index: 2;
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		gap: 22px;
 		pointer-events: auto;
-		padding-bottom: 0.25rem;
 	}
 	.voice-dock .voice-ctrl {
 		width: 48px;
