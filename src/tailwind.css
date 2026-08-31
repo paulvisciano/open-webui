@@ -22,6 +22,13 @@
 	--color-gray-850: oklch(0.27 0 0);
 	--color-gray-900: oklch(0.2 0 0);
 	--color-gray-950: oklch(0.16 0 0);
+
+	--font-display: 'Fraunces', 'Iowan Old Style', Georgia, serif;
+	--font-sans: 'Inter', 'Vazirmatn', ui-sans-serif, system-ui, sans-serif;
+	--font-body: 'Inter', 'Vazirmatn', ui-sans-serif, system-ui, sans-serif;
+	--font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+	--default-font-family: var(--font-sans);
+	--default-mono-font-family: var(--font-mono);
 }
 
 /*
@@ -43,15 +50,21 @@
 }
 
 @layer base {
-	html {
+	html,
+	body,
+	button,
+	input,
+	textarea,
+	select {
 		font-family: var(--font-sans);
 	}
 
-	pre {
-		font-family:
-			-apple-system, BlinkMacSystemFont, 'Inter', 'Vazirmatn', ui-sans-serif, system-ui, 'Segoe UI',
-			Roboto, Ubuntu, Cantarell, 'Noto Sans', sans-serif, 'Helvetica Neue', Arial,
-			'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
+	pre,
+	code,
+	kbd,
+	samp {
+		font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+	}
 	}
 
 	pre {

@@ -2,25 +2,79 @@
 
 @font-face {
 	font-family: 'Inter';
-	src: url('/assets/fonts/Inter-Variable.ttf');
+	font-style: normal;
+	font-weight: 100 900;
 	font-display: swap;
+	src: url('/assets/fonts/Inter-Variable.ttf') format('truetype');
+}
+
+@font-face {
+	font-family: 'Fraunces';
+	font-style: normal;
+	font-weight: 300 600;
+	font-display: swap;
+	src: url('/assets/fonts/fraunces-latin.woff2') format('woff2');
 }
 
 @font-face {
 	font-family: 'Vazirmatn';
-	src: url('/assets/fonts/Vazirmatn-Variable.ttf');
+	font-style: normal;
+	font-weight: 100 900;
 	font-display: swap;
+	src: url('/assets/fonts/Vazirmatn-Variable.ttf') format('truetype');
+}
+
+@font-face {
+	font-family: 'JetBrains Mono';
+	font-style: normal;
+	font-weight: 400;
+	font-display: swap;
+	src: url('/assets/fonts/jetbrains-mono-latin-400.woff2') format('woff2');
+}
+
+@font-face {
+	font-family: 'JetBrains Mono';
+	font-style: normal;
+	font-weight: 500;
+	font-display: swap;
+	src: url('/assets/fonts/jetbrains-mono-latin-500.woff2') format('woff2');
 }
 
 /* --app-text-scale is updated via the UI Scale slider (Interface.svelte) */
 :root {
 	--app-text-scale: 1;
+
+	--font-display: 'Fraunces', 'Iowan Old Style', Georgia, serif;
+	--font-sans: 'Inter', 'Vazirmatn', ui-sans-serif, system-ui, sans-serif;
+	--font-body: 'Inter', 'Vazirmatn', ui-sans-serif, system-ui, sans-serif;
+	--font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 }
 
 html {
 	word-break: break-word;
 	/* font-size scales the entire document via the same UI control */
 	font-size: calc(1rem * var(--app-text-scale, 1));
+	font-family: var(--font-sans);
+}
+
+body {
+	font-family: var(--font-sans);
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+	font-family: var(--font-display);
+}
+
+#sidebar-webui-name,
+#sidebar-new-chat-button,
+#sidebar-search-button,
+#pinned-menu-items-list a {
+	font-family: var(--font-display);
 }
 
 #sidebar-chat-item {
@@ -28,12 +82,14 @@ html {
 	min-height: calc(32px * var(--app-text-scale, 1));
 	padding-inline: calc(11px * var(--app-text-scale, 1));
 	padding-block: calc(6px * var(--app-text-scale, 1));
+	font-family: var(--font-display);
 }
 
 #sidebar-chat-item div[dir='auto'] {
 	/* chat title line height follows the text scale */
 	height: calc(20px * var(--app-text-scale, 1));
 	line-height: calc(20px * var(--app-text-scale, 1));
+	font-family: var(--font-display);
 }
 
 #sidebar-chat-item input {
@@ -129,6 +185,22 @@ textarea::-webkit-scrollbar-corner {
 
 .markdown a {
 	@apply underline;
+}
+
+.markdown-prose,
+.markdown-prose-sm,
+.markdown-prose-xs,
+.input-prose,
+.input-prose-sm {
+	font-family: var(--font-body);
+}
+
+.markdown-prose :is(h1, h2, h3, h4, h5, h6),
+.markdown-prose-sm :is(h1, h2, h3, h4, h5, h6),
+.markdown-prose-xs :is(h1, h2, h3, h4, h5, h6),
+.input-prose :is(h1, h2, h3, h4, h5, h6),
+.input-prose-sm :is(h1, h2, h3, h4, h5, h6) {
+	font-family: var(--font-display);
 }
 
 .drag-region {
@@ -623,7 +695,7 @@ html.high-contrast.dark .ProseMirror p.is-editor-empty:first-child::before {
 
 .tiptap pre {
 	border-radius: 0.5rem;
-	font-family: 'JetBrainsMono', monospace;
+		font-family: var(--font-mono);
 	margin: 1.5rem 0;
 	padding: 0.75rem 1rem;
 
