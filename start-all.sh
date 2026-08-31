@@ -144,7 +144,7 @@ LLAMA_CMD=(
     --dry-multiplier "$LLM_DRY_MULTIPLIER" --dry-base "$LLM_DRY_BASE" --dry-allowed-length "$LLM_DRY_ALLOWED_LENGTH"
     --xtc-probability "$LLM_XTC_PROBABILITY" --xtc-threshold "$LLM_XTC_THRESHOLD"
     --reasoning off --reasoning-budget 0
-    --host 0.0.0.0 --port "$LLM_PORT"
+    --host 0.0.0.0 --port "$LLM_PORT" --verbose
 )
 
 echo "▶ Starting llama-server on port $LLM_PORT..."
