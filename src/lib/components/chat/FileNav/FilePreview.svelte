@@ -631,7 +631,7 @@
 	:global(.office-preview table) {
 		border-collapse: collapse;
 		font-size: 0.75rem;
-		font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+		font-family: var(--font-mono);
 		line-height: 1.3;
 	}
 	:global(.office-preview table td),

@@ -72,7 +72,7 @@
 
 <style>
 	.json-root {
-		font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+		font-family: var(--font-mono);
 		font-size: 0.75rem;
 		line-height: 1.6;
 		padding: 0.75rem 1rem;

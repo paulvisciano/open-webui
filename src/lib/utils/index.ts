@@ -549,7 +549,7 @@ export const copyToClipboard = async (text, html = null, formatted = false) => {
 						overflow: auto;
 					}
 					code {
-						font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+						font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 						font-size: 0.875rem;
 					}
 					.hljs-keyword { color: #d73a49; }
