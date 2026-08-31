@@ -61,8 +61,8 @@
 
   let timelineEntries = $derived.by(() => {
     if (!timeIndex || timeIndex.indexToLabel.length === 0) return [];
-    // timeIndex is oldest→newest; keep natural order so scrolling down
-    // (positive deltaY) moves forward in time, scrolling up goes back.
+    // timeIndex is oldest→newest; keep natural order so scrolling up
+    // (negative deltaY) moves back in time, scrolling down goes forward.
     const labels = timeIndex.indexToLabel;
     return labels.map((label, idx) => ({ idx, label }));
   });
@@ -354,9 +354,10 @@
       wheelInitialized = true;
     }
 
-    // Apply sensitivity dampening for scroll-wheel (touch uses moveTimelineWheel)
+    // Apply sensitivity dampening for scroll-wheel (touch uses moveTimelineWheel).
+    // Positive deltaY (scroll down) increases offset → newer; scroll up → older.
     const dampened = delta * SCROLL_SENSITIVITY;
-    wheelOffset = clampWheelOffset(wheelOffset - dampened);
+    wheelOffset = clampWheelOffset(wheelOffset + dampened);
 
     // Update bucket index in real time (visual only, rounds to nearest)
     updateBucketFromWheel();
