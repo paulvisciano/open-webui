@@ -33,6 +33,7 @@
 		line-height: 1.45;
 		font-weight: 400;
 		letter-spacing: -0.01em;
+		font-family: var(--font-display);
 		color: oklch(94% 0.01 210);
 		text-wrap: pretty;
 	}

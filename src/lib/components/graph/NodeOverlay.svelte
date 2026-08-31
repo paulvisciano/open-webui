@@ -1261,10 +1261,10 @@
     --glass-light: oklch(20% 0.015 255 / 30%);
     --hairline:    oklch(50% 0.03 255 / 8%);
 
-    --font-mono:   ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
-    --font-sans:   -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-    --font-display: 'Iowan Old Style', 'Charter', Georgia, 'SF Pro Display', serif;
-    --font-body:    -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+    --font-mono:   'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+    --font-sans:   'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-display: 'Fraunces', 'Iowan Old Style', Georgia, serif;
+    --font-body:    'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   }
 
   /* Focus-visible — keyboard accessibility */

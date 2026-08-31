@@ -332,7 +332,7 @@
     --dock-muted: oklch(65% 0.02 255);
     --dock-faint: oklch(55% 0.02 255);
     --dock-hairline: oklch(50% 0.03 255 / 8%);
-    --dock-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+    --dock-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
   }
 
   .processing-dock {

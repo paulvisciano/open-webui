@@ -867,7 +867,7 @@
 		white-space: nowrap;
 		font-size: 12px;
 		color: oklch(65% 0.02 255);
-		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+		font-family: var(--font-display);
 		margin-top: 8px;
 	}
 	.voice-ctrl {
@@ -967,6 +967,7 @@
 		letter-spacing: 0.01em;
 		color: oklch(82% 0.04 210 / 80%);
 		text-align: center;
+		font-family: var(--font-display);
 	}
 	.voice-dock {
 		position: absolute;

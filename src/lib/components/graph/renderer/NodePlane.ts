@@ -28,6 +28,14 @@ import type { CanvasNode } from './types';
 const OPACITY_LERP = 0.18;
 
 /**
+ * Brand typography — paulvisciano.com.
+ * Canvas `ctx.font` requires literal family strings (no CSS variables).
+ */
+const FONT_DISPLAY = '"Fraunces", "Iowan Old Style", Georgia, serif';
+const FONT_BODY = '"Inter", -apple-system, BlinkMacSystemFont, system-ui, sans-serif';
+const FONT_MONO = '"JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace';
+
+/**
  * Renders one `CanvasNode` as a textured/colored plane on the canvas.
  *
  * The mesh is positioned at `chunkOrigin + (localX, localY, localZ)` and
@@ -382,8 +390,9 @@ export class NodePlane {
 
     const titleFont = Math.max(30, Math.round(30 * scale));
     const titleY = Math.round(24 * scale);
-    const sansFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
-    ctx.font = `800 ${titleFont}px ${sansFamily}`;
+    const displayFamily = FONT_DISPLAY;
+    const bodyFamily = FONT_BODY;
+    ctx.font = `600 ${titleFont}px ${displayFamily}`;
     ctx.fillStyle = fg;
     ctx.textBaseline = 'top';
     ctx.textAlign = 'left';
@@ -404,7 +413,7 @@ export class NodePlane {
     const bodyMaxY = footY - Math.round(10 * scale);
     const maxBodyLines = Math.max(0, Math.floor((bodyMaxY - bodyY) / bodyLineH));
     if (isActive && preview && maxBodyLines > 0) {
-      ctx.font = `400 ${bodyFont}px ${sansFamily}`;
+      ctx.font = `400 ${bodyFont}px ${bodyFamily}`;
       ctx.fillStyle = muted;
       ctx.textBaseline = 'top';
       ctx.textAlign = 'left';
@@ -419,7 +428,7 @@ export class NodePlane {
     ctx.lineTo(canvasW - padX, footY);
     ctx.stroke();
 
-    const monoFamily = 'ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace';
+    const monoFamily = FONT_MONO;
     const footTextY = footY + Math.round(8 * scale);
     if (isStreaming) {
       const streamColor = '#a78bfa';
@@ -568,7 +577,7 @@ export class NodePlane {
     const fontPx = Math.max(16, Math.round(canvasH / 26));
     const lineHeight = Math.round(fontPx * 1.32);
     ctx.fillStyle = '#2b2620';
-    ctx.font = `${fontPx}px sans-serif`;
+    ctx.font = `${fontPx}px ${FONT_BODY}`;
     ctx.textBaseline = 'top';
     ctx.textAlign = 'left';
 

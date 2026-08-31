@@ -35,6 +35,7 @@
   let containerEl: HTMLDivElement | undefined = $state();
   let sceneManager: SceneManager | undefined = $state();
   let mounted = false;
+  let fontsLoaded = $state(false);
   let firstLayoutApplied = false;
   let pendingTimer: ReturnType<typeof setTimeout> | null = null;
   let lastAppliedAt = 0;
@@ -496,19 +497,28 @@
 
   onMount(() => {
     mounted = true;
-    if (containerEl && graphStore.nodes.length > 0) {
+    containerEl?.addEventListener('pointermove', onContainerPointerMove);
+    const loadFonts = typeof document !== 'undefined' && document.fonts
+      ? Promise.all([
+          document.fonts.load('600 32px Fraunces'),
+          document.fonts.load('400 16px Inter'),
+          document.fonts.load('500 13px "JetBrains Mono"'),
+        ]).catch(() => undefined)
+      : Promise.resolve();
+    loadFonts.then(() => {
+      if (!mounted) return;
+      fontsLoaded = true;
+      if (containerEl && graphStore.nodes.length > 0 && !sceneManager) {
         sceneManager = new SceneManager(containerEl);
         wireSceneManager(sceneManager);
         exposeSceneManager(sceneManager);
         rebuildLayout();
         sceneManager.start();
         firstLayoutApplied = true;
-    } else {
-        // No data yet — kick off the initial load. The $effect below will mount
-        // the renderer once graphStore.nodes populates.
+      } else if (!sceneManager) {
         loadGraph();
-    }
-    containerEl?.addEventListener('pointermove', onContainerPointerMove);
+      }
+    });
   });
 
   onDestroy(() => {
@@ -548,7 +558,7 @@
     void graphStore.edges;
     void graphStore.photoImages;
 
-    if (!mounted) return;
+    if (!mounted || !fontsLoaded) return;
     if (!firstLayoutApplied) {
       if (containerEl && !sceneManager && graphStore.nodes.length > 0) {
         sceneManager = new SceneManager(containerEl);
@@ -742,6 +752,11 @@
     --canvas-glass:       oklch(16% 0.015 255 / 45%);
     --canvas-glass-light: oklch(20% 0.015 255 / 30%);
     --canvas-hairline:    oklch(50% 0.03 255 / 8%);
+
+    /* Brand typography — paulvisciano.com */
+    --font-display: 'Fraunces', 'Iowan Old Style', Georgia, serif;
+    --font-body:    'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --font-mono:    'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
   }
 
   .canvas-container {
@@ -763,11 +778,12 @@
     gap: 14px;
     pointer-events: none;
     color: var(--canvas-accent);
-    font-family: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+    font-family: var(--font-mono);
     animation: float-in 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
   }
 
   .empty-title {
+    font-family: var(--font-display);
     font-size: 1.25rem;
     font-weight: 600;
     letter-spacing: 0.08em;
@@ -782,7 +798,7 @@
     color: var(--canvas-muted);
     max-width: 22rem;
     text-align: center;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    font-family: var(--font-body);
   }
 
   .empty-icon {
@@ -810,7 +826,7 @@
     border-radius: 100px;
     border: 1px solid oklch(62% 0.20 18 / 20%);
     color: oklch(62% 0.20 18 / 80%);
-    font-family: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.14em;
@@ -838,7 +854,7 @@
     border-radius: 100px;
     box-shadow: 0 0 0 1px oklch(50% 0.03 255 / 8%);
     color: var(--canvas-muted);
-    font-family: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: 11px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -867,7 +883,7 @@
   }
 
   .navigate-overlay-label {
-    font-family: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+    font-family: var(--font-display);
     font-size: 16px;
     letter-spacing: 0.2em;
     text-transform: uppercase;
@@ -913,7 +929,7 @@
   }
 
   .timeline-header-label {
-    font-family: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: 11px;
     letter-spacing: 0.1em;
     text-transform: uppercase;
@@ -986,7 +1002,7 @@
     cursor: pointer;
     user-select: none;
     -webkit-user-select: none;
-    font-family: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: 18px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -1007,6 +1023,7 @@
   }
   .timeline-wheel-item.active {
     color: var(--canvas-accent);
+    font-family: var(--font-display);
     font-weight: 600;
     font-size: 22px;
   }
@@ -1031,7 +1048,7 @@
     border-radius: 100px;
     box-shadow: 0 0 0 1px oklch(50% 0.03 255 / 8%);
     color: var(--canvas-faint);
-    font-family: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+    font-family: var(--font-mono);
     font-size: 11px;
     letter-spacing: 0.04em;
     pointer-events: none;
