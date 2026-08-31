@@ -241,7 +241,7 @@
 					}
 				}}
 			>
-				<div class="line-clamp-1 text-sm font-normal">
+				<div class="font-display line-clamp-1 text-sm font-normal">
 					{$i18n.t(statusLabels[svc.statusText] ?? svc.statusText)}
 				</div>
 			</button>
