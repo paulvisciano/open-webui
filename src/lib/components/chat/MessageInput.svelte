@@ -417,7 +417,6 @@
 			if (autoFocus && !$showCallOverlay) {
 				focus();
 			}
-			}
 
 			if (text !== '') {
 				text = await inputVariableHandler(text);
