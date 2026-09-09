@@ -3430,7 +3430,7 @@
 					($user?.role === 'admin' || $user?.permissions?.features?.code_interpreter)
 						? codeInterpreterEnabled
 						: false,
-				web_search: webSearchActive
+				web_search: embeddedVoiceActive ? false : webSearchActive
 			};
 
 		if ($settings?.memory ?? $config?.features?.enable_memories ?? false) {
