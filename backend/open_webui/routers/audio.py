@@ -610,7 +610,7 @@ async def _tts_kokoro(request, payload, file_path, file_body_path, user):
             await f.write(audio_data)
 
     async with aiofiles.open(file_body_path, 'w') as f:
-        await f.write(json.dumps(payload))
+        await f.write(JSONCodec.dumps(payload))
     return FileResponse(file_path)
 
 
