@@ -167,7 +167,7 @@
 							</div>
 						{/if}
 
-						<div class="translate-y-[0.5px] {chevron ? '' : 'pl-0.5'}">
+						<div class="folder-name translate-y-[0.5px] {chevron ? '' : 'pl-0.5'}">
 							{name}
 						</div>
 					</button>

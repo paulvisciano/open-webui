@@ -18,6 +18,8 @@
 	import { toast } from 'svelte-sonner';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 	import { goto, invalidate, invalidateAll } from '$app/navigation';
+	import { page } from '$app/stores';
+	import { graphStore } from '$lib/components/graph/stores/graph.svelte';
 	import { onMount, getContext, createEventDispatcher, tick } from 'svelte';
 	import { LinkPreview } from 'bits-ui';
 	import {
@@ -161,6 +163,15 @@
 		// Optimistically mark as read in UI when clicked
 		unread = false;
 		lastReadAt = Date.now() / 1000;
+
+		const onGraph =
+			$page.url.pathname === '/graph' || $page.url.pathname.startsWith('/graph/');
+		if (onGraph) {
+			event?.preventDefault();
+			graphStore.requestOpenChat(id);
+			showSidebar.set(false);
+			return;
+		}
 
 		if ($mobile) {
 			event?.preventDefault();
@@ -536,7 +547,7 @@
 		{/if}
 		<div
 			dir="auto"
-			class="text-left self-center overflow-hidden w-full h-5 truncate {unread
+			class="chat-item-title text-left self-center overflow-hidden w-full h-5 truncate {unread
 				? 'font-normal text-gray-800 dark:text-gray-200'
 				: ''} {($mobile || showInlineActions) && !readonly ? 'pr-12' : ''}"
 		>
@@ -546,7 +557,7 @@
 
 	<!-- Time ago indicator -->
 	{#if (updatedAt ?? createdAt) && !showInlineActions && !($mobile && !readonly)}
-		<div class="shrink-0 self-center text-[0.625rem] text-gray-400 dark:text-gray-500 pl-2">
+		<div class="chat-item-ago shrink-0 self-center text-[0.625rem] text-gray-400 dark:text-gray-500 pl-2">
 			{formatTimeAgo((updatedAt ?? createdAt) as number)}
 		</div>
 	{/if}

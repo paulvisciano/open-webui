@@ -222,6 +222,7 @@
 	};
 
 	$: activeMenuItemId = getActiveMenuItemId($page.url.pathname);
+	$: isGraphPage = activeMenuItemId === 'graph';
 
 	const initPinnedMenuSortable = () => {
 		const el = document.getElementById('pinned-menu-items-list');
@@ -644,7 +645,8 @@
 
 	const resizeSidebarHandler = (endClientX: number) => {
 		const dx = endClientX - startClientX;
-		const newSidebarWidth = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth + dx));
+		const delta = isGraphPage ? -dx : dx;
+		const newSidebarWidth = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth + delta));
 
 		sidebarWidth.set(newSidebarWidth);
 		document.documentElement.style.setProperty('--sidebar-width', `${newSidebarWidth}px`);
@@ -923,14 +925,16 @@
 		></div>
 	{/if}
 
-	<SearchModal
-		bind:show={$showSearch}
-		onClose={() => {
-			if ($mobile) {
-				showSidebar.set(false);
-			}
-		}}
-	/>
+	{#if !isGraphPage}
+		<SearchModal
+			bind:show={$showSearch}
+			onClose={() => {
+				if ($mobile) {
+					showSidebar.set(false);
+				}
+			}}
+		/>
+	{/if}
 
 	<button
 		id="sidebar-new-chat-button"
@@ -941,7 +945,7 @@
 		}}
 	/>
 
-	{#if !$mobile && !$showSidebar}
+	{#if !$mobile && !$showSidebar && !isGraphPage}
 		<div
 			class="w-[calc(42px*var(--app-text-scale,1))] shrink-0 py-[calc(0.25rem*var(--app-text-scale,1))] px-[calc(0.25rem*var(--app-text-scale,1))] flex flex-col justify-between text-gray-700 dark:text-gray-300 hover:bg-gray-50/30 dark:hover:bg-gray-800/30 h-full z-10 transition-all border-e-[0.5px] border-gray-50 dark:border-gray-850/30"
 			id="sidebar"
@@ -971,11 +975,11 @@
 								<!-- LICENSE covers this Open WebUI sidebar logo.
 							Do not alter, remove, obscure, or replace it except as LICENSE permits:
 							https://docs.openwebui.com/license. -->
-								<img
-									src="{WEBUI_BASE_URL}/static/favicon.png"
-									class="sidebar-new-chat-icon size-5 rounded-full group-hover:hidden"
-									alt=""
-								/>
+							<img
+								src="/static/favicon.png"
+								class="sidebar-new-chat-icon size-5 rounded-full group-hover:hidden"
+								alt=""
+							/>
 
 								<Sidebar className="size-4 hidden group-hover:flex" />
 							</div>
@@ -1137,15 +1141,21 @@
 				? `ml-[4.5rem] md:ml-0 `
 				: $mobile
 					? ''
-					: ''} shrink-0 text-gray-700 dark:text-gray-300 text-[0.8125rem] leading-5 fixed top-0 left-0 overflow-x-hidden
+					: ''} shrink-0 text-gray-700 dark:text-gray-300 text-[0.8125rem] leading-5 fixed top-0 {isGraphPage
+				? 'right-0 graph-sidebar'
+				: 'left-0'} overflow-x-hidden {isGraphPage ? 'flex-none w-0 min-w-0' : ''}
         "
 			style={$mobile
 				? panelStyle
-				: `width: ${$showSidebar ? 'var(--sidebar-width)' : '0'}; transition: width 250ms cubic-bezier(0.22, 1, 0.36, 1);`}
+				: isGraphPage
+					? `width: var(--sidebar-width); transform: translateX(${$showSidebar ? '0' : '100%'}); transition: transform 250ms cubic-bezier(0.22, 1, 0.36, 1);`
+					: `width: ${$showSidebar ? 'var(--sidebar-width)' : '0'}; transition: width 250ms cubic-bezier(0.22, 1, 0.36, 1);`}
 			data-state={$showSidebar}
 		>
 			<div
-				class=" my-auto flex flex-col justify-between h-screen max-h-[100dvh] w-[var(--sidebar-width)] overflow-x-hidden scrollbar-hidden z-50 border-e border-gray-50 dark:border-gray-850/30"
+				class=" my-auto flex flex-col justify-between h-screen max-h-[100dvh] w-[var(--sidebar-width)] overflow-x-hidden scrollbar-hidden z-50 {isGraphPage
+					? 'border-s'
+					: 'border-e'} border-gray-50 dark:border-gray-850/30"
 			>
 				<div
 					class="sidebar px-1 pt-1.5 pb-1 flex justify-between space-x-1 text-gray-600 dark:text-gray-400 sticky top-0 z-10 -mb-2"
@@ -1160,8 +1170,7 @@
 					Do not alter, remove, obscure, or replace it except as LICENSE permits:
 					https://docs.openwebui.com/license. -->
 						<img
-							crossorigin="anonymous"
-							src="{WEBUI_BASE_URL}/static/favicon.png"
+							src="/static/favicon.png"
 							class="sidebar-new-chat-icon size-5 rounded-full"
 							alt=""
 						/>
@@ -1279,7 +1288,9 @@
 											aria-label={$i18n.t(meta.label)}
 										>
 											<div class="self-center flex size-4 shrink-0 items-center justify-center">
-												{#if itemId === 'notes'}
+												{#if itemId === 'graph'}
+													<GraphIcon className="size-4" strokeWidth="1.5" />
+												{:else if itemId === 'notes'}
 													<NotesIcon className="size-4" strokeWidth="1.5" />
 												{:else if itemId === 'workspace'}
 													<WorkspaceIcon className="size-4" strokeWidth="1.5" />
@@ -1623,12 +1634,12 @@
 								{#if $chats}
 									{#each $chats as chat, idx (`chat-${chat?.id ?? idx}`)}
 										{#if idx === 0 || (idx > 0 && chat.time_range !== $chats[idx - 1].time_range)}
-											<div
-												class="w-full pl-2.5 text-xs text-gray-500 dark:text-gray-500 font-normal {idx ===
-												0
-													? ''
-													: 'pt-4'} pb-1"
-											>
+										<div
+											class="time-range-label w-full pl-2.5 text-xs text-gray-500 dark:text-gray-500 font-normal {idx ===
+											0
+												? ''
+												: 'pt-4'} pb-1"
+										>
 												{$i18n.t(chat.time_range)}
 												<!-- localisation keys for time_range to be recognized from the i18next parser (so they don't get automatically removed):
 							{$i18n.t('Today')}
@@ -1754,8 +1765,13 @@
 
 		{#if !$mobile && visible}
 			<div
-				class="relative flex items-center justify-center group border-r border-gray-50 dark:border-gray-850/30 hover:border-gray-200 dark:hover:border-gray-800 transition z-20 bg-transparent p-0 appearance-none"
+				class="{isGraphPage
+					? 'fixed top-0 bottom-0 graph-sidebar-resizer'
+					: 'relative'} flex items-center justify-center group {isGraphPage
+					? 'border-l'
+					: 'border-r'} border-gray-50 dark:border-gray-850/30 hover:border-gray-200 dark:hover:border-gray-800 transition z-20 bg-transparent p-0 appearance-none"
 				id="sidebar-resizer"
+				style={isGraphPage ? 'right: var(--sidebar-width);' : undefined}
 				on:pointerdown={resizeStartHandler}
 				role="separator"
 			>
@@ -1774,5 +1790,112 @@
 			will-change: transform;
 			touch-action: pan-y;
 		}
+	}
+
+	:global(.graph-sidebar) {
+		--gs-fg: oklch(92% 0.015 210);
+		--gs-muted: oklch(68% 0.03 210);
+		--gs-accent: oklch(82% 0.14 210);
+		--gs-hairline: oklch(82% 0.14 210 / 22%);
+		background: transparent !important;
+		color: var(--gs-fg);
+	}
+
+	:global(.graph-sidebar > div) {
+		background: oklch(8% 0.02 255 / 82%);
+		backdrop-filter: blur(32px) saturate(1.5);
+		-webkit-backdrop-filter: blur(32px) saturate(1.5);
+		border-color: var(--gs-hairline) !important;
+		box-shadow:
+			-18px 0 48px oklch(0% 0 0 / 42%),
+			inset 1px 0 0 oklch(82% 0.14 210 / 10%);
+	}
+
+	:global(.graph-sidebar .sidebar-bg-gradient-to-b),
+	:global(.graph-sidebar .sidebar-bg-gradient-to-t) {
+		background-image: linear-gradient(
+			to bottom,
+			oklch(8% 0.02 255 / 88%),
+			transparent
+		) !important;
+		background-color: transparent !important;
+	}
+
+	:global(.graph-sidebar .sidebar-bg-gradient-to-t) {
+		background-image: linear-gradient(
+			to top,
+			oklch(8% 0.02 255 / 88%),
+			transparent
+		) !important;
+	}
+
+	:global(.graph-sidebar #sidebar-webui-name) {
+		color: var(--gs-fg) !important;
+		letter-spacing: 0.01em;
+	}
+
+	:global(.graph-sidebar a),
+	:global(.graph-sidebar button) {
+		color: var(--gs-fg);
+	}
+
+	:global(.graph-sidebar #sidebar-new-chat-button),
+	:global(.graph-sidebar #sidebar-search-button),
+	:global(.graph-sidebar [id^='sidebar-'][id$='-button']) {
+		border-radius: 12px;
+	}
+
+	:global(.graph-sidebar #sidebar-new-chat-button:hover),
+	:global(.graph-sidebar #sidebar-search-button:hover),
+	:global(.graph-sidebar [id^='sidebar-'][id$='-button']:hover),
+	:global(.graph-sidebar #sidebar-chat-item:hover),
+	:global(.graph-sidebar .group:hover #sidebar-chat-item) {
+		background: oklch(82% 0.14 210 / 8%) !important;
+	}
+
+	:global(.graph-sidebar #sidebar-graph-button) {
+		background: oklch(82% 0.14 210 / 12%) !important;
+		box-shadow: inset 0 0 0 1px oklch(82% 0.14 210 / 32%);
+		color: var(--gs-accent);
+	}
+
+	:global(.graph-sidebar #sidebar-chat-item.selected) {
+		background: oklch(82% 0.14 210 / 10%) !important;
+		box-shadow: inset 0 0 0 1px oklch(82% 0.14 210 / 24%);
+	}
+
+	:global(.graph-sidebar .time-range-label),
+	:global(.graph-sidebar .section-name),
+	:global(.graph-sidebar .folder-name) {
+		font-family: 'JetBrains Mono', ui-monospace, monospace !important;
+		font-size: 0.58rem !important;
+		letter-spacing: 0.18em;
+		text-transform: uppercase;
+		color: var(--gs-accent) !important;
+	}
+
+	:global(.graph-sidebar #sidebar-folder-button:hover),
+	:global(.graph-sidebar .sticky.bottom-0 button:hover) {
+		background: oklch(82% 0.14 210 / 8%) !important;
+	}
+
+	:global(.graph-sidebar .chat-item-title) {
+		font-family: 'Fraunces', 'Iowan Old Style', Georgia, serif !important;
+		letter-spacing: -0.02em;
+		color: oklch(95% 0.01 210);
+	}
+
+	:global(.graph-sidebar .chat-item-ago) {
+		font-family: 'JetBrains Mono', ui-monospace, monospace !important;
+		letter-spacing: 0.04em;
+		color: oklch(82% 0.14 210 / 58%) !important;
+	}
+
+	:global(.graph-sidebar-resizer) {
+		border-color: var(--gs-hairline, oklch(82% 0.14 210 / 22%)) !important;
+	}
+
+	:global(.graph-sidebar-resizer:hover) {
+		border-color: oklch(82% 0.14 210 / 55%) !important;
 	}
 </style>
