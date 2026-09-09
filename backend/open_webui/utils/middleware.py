@@ -2673,8 +2673,18 @@ async def process_chat_payload(request, form_data, user, metadata, model):
                 'features.web_search',
                 await Config.get('user.permissions'),
             ):
-                # Skip forced RAG web search when native FC is enabled - model can use web_search tool
-                if metadata.get('params', {}).get('function_calling') == 'legacy':
+                params = metadata.get('params') or {}
+                model_meta = (model.get('info') or {}).get('meta') or {}
+                caps = model_meta.get('capabilities') or {}
+                builtin_tools_meta = model_meta.get('builtinTools') or {}
+                native_web_search = (
+                    bool(metadata.get('session_id'))
+                    and params.get('function_calling') != 'legacy'
+                    and caps.get('builtin_tools', True)
+                    and builtin_tools_meta.get('web_search', True)
+                    and caps.get('web_search', True)
+                )
+                if not native_web_search:
                     form_data = await chat_web_search_handler(request, form_data, extra_params, user)
 
         if 'image_generation' in features and features['image_generation']:
