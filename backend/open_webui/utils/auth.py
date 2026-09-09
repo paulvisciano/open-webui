@@ -362,6 +362,13 @@ async def get_current_user(
     if token is None and 'token' in request.cookies:
         token = request.cookies.get('token')
 
+    # Query-param fallback for <img> / Three.TextureLoader, which cannot send
+    # Authorization headers. Header and cookie still take precedence.
+    if token is None:
+        qp_token = request.query_params.get('token')
+        if qp_token:
+            token = qp_token
+
     # Fallback to request.state.token (set by middleware, e.g. for x-api-key)
     if token is None and hasattr(request.state, 'token') and request.state.token:
         token = request.state.token.credentials
