@@ -1638,12 +1638,6 @@ AUDIO_TTS_MISTRAL_API_KEY = os.getenv('AUDIO_TTS_MISTRAL_API_KEY', '')
 
 AUDIO_TTS_MISTRAL_API_BASE_URL = os.getenv('AUDIO_TTS_MISTRAL_API_BASE_URL', 'https://api.mistral.ai/v1')
 
-AUDIO_TTS_PIPER_API_BASE_URL = os.getenv('AUDIO_TTS_PIPER_API_BASE_URL', 'http://localhost:5000')
-
-AUDIO_TTS_PIPER_VOICE = os.getenv('AUDIO_TTS_PIPER_VOICE', 'en_US-lessac-medium')
-
-AUDIO_TTS_PIPER_LENGTH_SCALE = float(os.getenv('AUDIO_TTS_PIPER_LENGTH_SCALE', '1.0'))
-
 AUDIO_TTS_KOKORO_LANG_CODE = os.getenv('AUDIO_TTS_KOKORO_LANG_CODE', 'a')
 AUDIO_TTS_KOKORO_VOICE = os.getenv('AUDIO_TTS_KOKORO_VOICE', 'af_heart')
 AUDIO_TTS_KOKORO_SPEED = float(os.getenv('AUDIO_TTS_KOKORO_SPEED', '1.0'))
@@ -3097,9 +3091,6 @@ DEFAULT_CONFIG = {
     'audio.tts.azure.speech_output_format': AUDIO_TTS_AZURE_SPEECH_OUTPUT_FORMAT,
     'audio.tts.mistral.api_key': AUDIO_TTS_MISTRAL_API_KEY,
     'audio.tts.mistral.api_base_url': AUDIO_TTS_MISTRAL_API_BASE_URL,
-    'audio.tts.piper.api_base_url': AUDIO_TTS_PIPER_API_BASE_URL,
-    'audio.tts.piper.voice': AUDIO_TTS_PIPER_VOICE,
-    'audio.tts.piper.length_scale': AUDIO_TTS_PIPER_LENGTH_SCALE,
     'audio.tts.kokoro.lang_code': AUDIO_TTS_KOKORO_LANG_CODE,
     'audio.tts.kokoro.voice': AUDIO_TTS_KOKORO_VOICE,
     'audio.tts.kokoro.speed': AUDIO_TTS_KOKORO_SPEED,

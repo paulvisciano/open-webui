@@ -61,7 +61,7 @@ The lang code must match the voice's language prefix. Mismatching produces garbl
   - Reads lang code, voice, speed from config
   - Validates payload voice against allowlist, falls back to config default if invalid
   - Runs `KPipeline` off-thread via `asyncio.to_thread` (avoids blocking the event loop during inference)
-  - Writes WAV to an in-memory buffer, transcodes to MP3 via `transcode_audio_to_mp3` (same pattern as piper engine) so cached files are real MP3 with correct MIME type
+  - Writes WAV to an in-memory buffer, transcodes to MP3 via `transcode_audio_to_mp3` so cached files are real MP3 with correct MIME type
 - Registered `'kokoro'` in `_TTS_ENGINES` dispatcher
 - `get_available_models` returns `kokoro-82M`
 - `get_available_voices` returns 28 English voices (`af_*`, `am_*`, `bf_*`, `bm_*`)
@@ -90,7 +90,7 @@ The lang code must match the voice's language prefix. Mismatching produces garbl
 
 1. **Wrong MIME type (no audio playback):** Initial handler wrote WAV bytes to a `.mp3` cache path. `FileResponse` inferred `Content-Type: audio/mpeg` from the extension, but the content was WAV — browsers silently failed to play it. Fixed by writing to an in-memory buffer and transcoding to real MP3 via `transcode_audio_to_mp3`.
 
-2. **404 on voice download:** The frontend was sending the old Piper voice (`en_US-lessac-medium`) in the speech request payload. Kokoro tried to download a non-existent voice file from HuggingFace → 404 → exception → no audio. Fixed by adding a `_KOKORO_VOICES` allowlist; invalid payload voices are ignored and the config default is used.
+2. **404 on voice download:** The frontend was sending a stale voice id (`en_US-lessac-medium`) in the speech request payload. Kokoro tried to download a non-existent voice file from HuggingFace → 404 → exception → no audio. Fixed by adding a `_KOKORO_VOICES` allowlist; invalid payload voices are ignored and the config default is used.
 
 3. **Sequential TTS delay:** The original `for...of` loop awaited each sentence's HTTP response before starting the next request, causing cumulative delay before audio started. Fixed by firing all requests in parallel and enqueuing results in order.
 

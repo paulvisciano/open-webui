@@ -90,9 +90,6 @@ TTS_CONFIG_KEYS = {
     'AZURE_SPEECH_OUTPUT_FORMAT': 'audio.tts.azure.speech_output_format',
     'MISTRAL_API_KEY': 'audio.tts.mistral.api_key',
     'MISTRAL_API_BASE_URL': 'audio.tts.mistral.api_base_url',
-    'PIPER_API_BASE_URL': 'audio.tts.piper.api_base_url',
-    'PIPER_VOICE': 'audio.tts.piper.voice',
-    'PIPER_LENGTH_SCALE': 'audio.tts.piper.length_scale',
     'KOKORO_LANG_CODE': 'audio.tts.kokoro.lang_code',
     'KOKORO_VOICE': 'audio.tts.kokoro.voice',
     'KOKORO_SPEED': 'audio.tts.kokoro.speed',
@@ -562,41 +559,6 @@ async def _tts_mistral(request, payload, file_path, file_body_path, user):
         await _raise_tts_error(exc, r)
 
 
-async def _tts_piper(request, payload, file_path, file_body_path, user):
-    """Generate speech via a Piper HTTP server (POST /synthesize → WAV)."""
-    api_base_url = await Config.get('audio.tts.piper.api_base_url')
-    voice = await Config.get('audio.tts.piper.voice') or ''
-    length_scale = await Config.get('audio.tts.piper.length_scale') or 1.0
-
-    body = {'text': payload['input'], 'length_scale': length_scale}
-    if voice:
-        body['voice'] = voice
-
-    r = None
-    try:
-        session = await get_session()
-        r = await session.post(
-            url=f'{api_base_url}/synthesize',
-            json=body,
-            ssl=AIOHTTP_CLIENT_SESSION_SSL,
-        )
-        r.raise_for_status()
-
-        audio_data = await r.read()
-        content_type = r.headers.get('Content-Type', 'audio/wav')
-
-        if not await asyncio.to_thread(transcode_audio_to_mp3, audio_data, content_type, file_path):
-            async with aiofiles.open(file_path, 'wb') as f:
-                await f.write(audio_data)
-
-        async with aiofiles.open(file_body_path, 'w') as f:
-            await f.write(json.dumps(payload))
-        return FileResponse(file_path)
-    except Exception as exc:
-        log.exception(exc)
-        await _raise_tts_error(exc, r)
-
-
 _KOKORO_VOICES = {
     'af_alloy', 'af_aoede', 'af_bella', 'af_heart', 'af_jessica', 'af_kore',
     'af_nicole', 'af_nova', 'af_river', 'af_sarah', 'af_sky', 'am_adam',
@@ -659,7 +621,6 @@ _TTS_ENGINES = {
     'azure': _tts_azure,
     'transformers': _tts_transformers,
     'mistral': _tts_mistral,
-    'piper': _tts_piper,
     'kokoro': _tts_kokoro,
 }
 
@@ -1472,9 +1433,6 @@ async def get_available_models(request: Request) -> list[dict]:
     elif engine == 'mistral':
         available_models = [{'id': 'voxtral-mini-tts-2603'}]
 
-    elif engine == 'piper':
-        available_models = [{'id': 'piper'}]
-
     elif engine == 'kokoro':
         available_models = [{'id': 'kokoro-82M'}]
 
@@ -1582,22 +1540,6 @@ async def get_available_voices(request) -> dict:
                     return result
             except Exception as e:
                 log.error(f'Error fetching Mistral voices: {e}')
-
-    if engine == 'piper':
-        api_base_url = await Config.get('audio.tts.piper.api_base_url')
-        try:
-            session = await get_session()
-            async with session.get(
-                f'{api_base_url}/voices',
-                ssl=AIOHTTP_CLIENT_SESSION_SSL,
-                timeout=_timeout,
-            ) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-                return {v: v for v in data.get('voices', [])}
-        except Exception as e:
-            log.error(f'Error fetching Piper voices: {e}')
-            return {}
 
     if engine == 'kokoro':
         return {

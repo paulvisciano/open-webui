@@ -45,9 +45,6 @@
 	let TTS_AZURE_SPEECH_OUTPUT_FORMAT = '';
 let TTS_MISTRAL_API_KEY = '';
 let TTS_MISTRAL_API_BASE_URL = '';
-let TTS_PIPER_API_BASE_URL = '';
-let TTS_PIPER_VOICE = '';
-let TTS_PIPER_LENGTH_SCALE = 1.0;
 let TTS_KOKORO_LANG_CODE = 'a';
 let TTS_KOKORO_VOICE = 'af_heart';
 let TTS_KOKORO_SPEED = 1.0;
@@ -163,9 +160,6 @@ let TTS_KOKORO_SPEED = 1.0;
 				AZURE_SPEECH_OUTPUT_FORMAT: TTS_AZURE_SPEECH_OUTPUT_FORMAT,
 				MISTRAL_API_KEY: TTS_MISTRAL_API_KEY,
 				MISTRAL_API_BASE_URL: TTS_MISTRAL_API_BASE_URL,
-			PIPER_API_BASE_URL: TTS_PIPER_API_BASE_URL,
-			PIPER_VOICE: TTS_PIPER_VOICE,
-			PIPER_LENGTH_SCALE: TTS_PIPER_LENGTH_SCALE,
 			KOKORO_LANG_CODE: TTS_KOKORO_LANG_CODE,
 			KOKORO_VOICE: TTS_KOKORO_VOICE,
 			KOKORO_SPEED: TTS_KOKORO_SPEED,
@@ -224,9 +218,6 @@ let TTS_KOKORO_SPEED = 1.0;
 			TTS_AZURE_SPEECH_OUTPUT_FORMAT = res.tts.AZURE_SPEECH_OUTPUT_FORMAT;
 			TTS_MISTRAL_API_KEY = res.tts.MISTRAL_API_KEY;
 			TTS_MISTRAL_API_BASE_URL = res.tts.MISTRAL_API_BASE_URL;
-			TTS_PIPER_API_BASE_URL = res.tts.PIPER_API_BASE_URL ?? 'http://localhost:5000';
-			TTS_PIPER_VOICE = res.tts.PIPER_VOICE ?? 'en_US-lessac-medium';
-			TTS_PIPER_LENGTH_SCALE = res.tts.PIPER_LENGTH_SCALE ?? 1.0;
 			TTS_KOKORO_LANG_CODE = res.tts.KOKORO_LANG_CODE ?? 'a';
 			TTS_KOKORO_VOICE = res.tts.KOKORO_VOICE ?? 'af_heart';
 			TTS_KOKORO_SPEED = res.tts.KOKORO_SPEED ?? 1.0;
@@ -526,7 +517,6 @@ let TTS_KOKORO_SPEED = 1.0;
 					<option value="elevenlabs">{$i18n.t('ElevenLabs')}</option>
 					<option value="azure">{$i18n.t('Azure AI Speech')}</option>
 				<option value="mistral">{$i18n.t('MistralAI')}</option>
-				<option value="piper">{$i18n.t('Piper')} ({$i18n.t('Local')})</option>
 			<option value="kokoro">{$i18n.t('Kokoro')} ({$i18n.t('Local')})</option>
 			</SettingsSelect>
 		</AdminSettingRow>
@@ -602,36 +592,6 @@ let TTS_KOKORO_SPEED = 1.0;
 						/>
 					</AdminSettingField>
 				</div>
-			{:else if TTS_ENGINE === 'piper'}
-				<div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
-					<AdminSettingField label={$i18n.t('API Base URL')}>
-						<input
-							class={inputClass}
-							placeholder="http://localhost:5000"
-							bind:value={TTS_PIPER_API_BASE_URL}
-							required
-						/>
-					</AdminSettingField>
-					<AdminSettingField label={$i18n.t('Voice')}>
-						<input
-							class={inputClass}
-							placeholder="en_US-lessac-medium"
-							bind:value={TTS_PIPER_VOICE}
-						/>
-					</AdminSettingField>
-				</div>
-			<AdminSettingField
-				label={$i18n.t('Length Scale')}
-				description={$i18n.t('Speed multiplier — lower is faster (default: 1.0).')}
-			>
-				<input
-					type="number"
-					step="0.1"
-					min="0.1"
-					class={inputClass}
-					bind:value={TTS_PIPER_LENGTH_SCALE}
-				/>
-			</AdminSettingField>
 		{:else if TTS_ENGINE === 'kokoro'}
 			<div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
 				<AdminSettingField label={$i18n.t('Voice')}>
