@@ -75,6 +75,9 @@ export class NodePlane {
   private _noteTexture?: THREE.CanvasTexture;
   private _hoverTexture?: THREE.CanvasTexture;
   private _hovered = false;
+  private _inlineVideo: HTMLVideoElement | null = null;
+  private _videoTexture: THREE.VideoTexture | null = null;
+  private _stillMap: THREE.Texture | null = null;
 
   /**
    * @param node - the canvas node to render.
@@ -190,13 +193,7 @@ export class NodePlane {
    */
   updateFade(cameraPos: THREE.Vector3, chunkOrigin: THREE.Vector3): void {
     if (this._disposed) return;
-
-    if (this._node.kind === 'conversation') {
-      this._mesh.visible = false;
-      this._material.opacity = 0;
-      this._material.depthWrite = false;
-      return;
-    }
+    if (this._videoTexture) this._videoTexture.needsUpdate = true;
 
     if (this._vanishing) {
       const t = Math.min(1, (performance.now() - this._vanishStartMs) / VANISH_DURATION_MS);
@@ -380,9 +377,54 @@ export class NodePlane {
     if (thumb) this.applyTexture(thumb);
   }
 
+  get isPlayingInline(): boolean {
+    return !!this._inlineVideo && !this._inlineVideo.paused;
+  }
+
+  playInline(url: string): void {
+    if (this._disposed) return;
+    this.stopInline();
+    this._stillMap = this._material.map;
+    const video = document.createElement('video');
+    video.src = url;
+    video.playsInline = true;
+    video.loop = true;
+    video.crossOrigin = 'anonymous';
+    video.muted = false;
+    void video.play().catch(() => {
+      video.muted = true;
+      void video.play().catch(() => {});
+    });
+    const tex = new THREE.VideoTexture(video);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    this._material.map = tex;
+    this._material.needsUpdate = true;
+    this._inlineVideo = video;
+    this._videoTexture = tex;
+  }
+
+  stopInline(): void {
+    if (this._inlineVideo) {
+      this._inlineVideo.pause();
+      this._inlineVideo.removeAttribute('src');
+      this._inlineVideo.load();
+      this._inlineVideo = null;
+    }
+    if (this._videoTexture) {
+      this._videoTexture.dispose();
+      this._videoTexture = null;
+    }
+    if (this._stillMap) {
+      this._material.map = this._stillMap;
+      this._stillMap = null;
+      this._material.needsUpdate = true;
+    }
+  }
+
   /** Releases the material (the geometry is shared and not disposed here). */
   dispose(): void {
     if (this._disposed) return;
+    this.stopInline();
     this._disposed = true;
     if (this._fullUrl && this._fullEvictCb) {
       textureCache.releaseFullRes(this._fullUrl, this._fullEvictCb);
@@ -425,69 +467,34 @@ export class NodePlane {
       ? this._formatCardDate(createdAt)
       : '';
 
-    const accent = CYAN_ACCENT;
-    const padX = 28;
+    const wood = Math.max(10, Math.round(canvasW * 0.045));
+    const gilt = Math.max(2, Math.round(canvasW * 0.01));
+    ctx.fillStyle = '#3d2818';
+    ctx.fillRect(0, 0, canvasW, canvasH);
+    ctx.fillStyle = '#c4a056';
+    ctx.fillRect(wood, wood, canvasW - wood * 2, canvasH - wood * 2);
+    ctx.fillStyle = hovered || isActive || isStreaming ? '#f7efe0' : '#f3ead6';
+    const inner = wood + gilt;
+    ctx.fillRect(inner, inner, canvasW - inner * 2, canvasH - inner * 2);
+
+    const padX = inner + Math.round(canvasW * 0.06);
     const maxTextWidth = canvasW - padX * 2;
-    const radius = 18;
     const scale = canvasH / 420;
 
-    this._fillGlassCard(ctx, canvasW, canvasH, radius, scale);
-
-    if (isActive) {
-      ctx.save();
-      ctx.shadowColor = 'rgba(19,220,246,0.55)';
-      ctx.shadowBlur = Math.round(48 * scale);
-      ctx.strokeStyle = accent;
-      ctx.lineWidth = 3;
-      this._roundRect(ctx, 1.5, 1.5, canvasW - 3, canvasH - 3, radius - 1);
-      ctx.stroke();
-      ctx.shadowBlur = Math.round(110 * scale);
-      ctx.shadowColor = 'rgba(19,220,246,0.22)';
-      this._roundRect(ctx, 1.5, 1.5, canvasW - 3, canvasH - 3, radius - 1);
-      ctx.stroke();
-      ctx.restore();
-    } else if (isStreaming) {
-      ctx.save();
-      ctx.shadowColor = 'rgba(167,139,250,0.5)';
-      ctx.shadowBlur = Math.round(40 * scale);
-      ctx.strokeStyle = '#a78bfa';
-      ctx.lineWidth = 2;
-      this._roundRect(ctx, 1, 1, canvasW - 2, canvasH - 2, radius - 1);
-      ctx.stroke();
-      ctx.shadowBlur = Math.round(80 * scale);
-      ctx.shadowColor = 'rgba(167,139,250,0.18)';
-      this._roundRect(ctx, 1, 1, canvasW - 2, canvasH - 2, radius - 1);
-      ctx.stroke();
-      ctx.restore();
-    } else if (hovered) {
-      ctx.save();
-      ctx.shadowColor = 'rgba(19,220,246,0.32)';
-      ctx.shadowBlur = Math.round(32 * scale);
-      ctx.strokeStyle = accent;
-      ctx.lineWidth = 2;
-      this._roundRect(ctx, 1, 1, canvasW - 2, canvasH - 2, radius - 1);
-      ctx.stroke();
-      ctx.shadowBlur = Math.round(80 * scale);
-      ctx.shadowColor = 'rgba(19,220,246,0.12)';
-      this._roundRect(ctx, 1, 1, canvasW - 2, canvasH - 2, radius - 1);
-      ctx.stroke();
-      ctx.restore();
-    }
-
     const glyphFont = Math.max(13, Math.round(14 * scale));
-    const glyphY = Math.round(22 * scale);
-    ctx.font = `500 ${glyphFont}px ${FONT_MONO}`;
-    ctx.fillStyle = CYAN_CYBER;
+    const glyphY = inner + Math.round(18 * scale);
+    ctx.font = `500 ${glyphFont}px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#8a6a3a';
     ctx.textBaseline = 'top';
     ctx.textAlign = 'left';
-    this._setLetterSpacing(ctx, `${Math.round(0.18 * glyphFont)}px`);
+    this._setLetterSpacing(ctx, `${Math.round(0.2 * glyphFont)}px`);
     ctx.fillText(isStreaming ? 'THINKING' : isActive ? 'ACTIVE' : 'CONVERSATION', padX, glyphY);
     this._setLetterSpacing(ctx, '0px');
 
-    const titleFont = Math.max(28, Math.round(32 * scale));
-    const titleY = glyphY + glyphFont + Math.round(14 * scale);
+    const titleFont = Math.max(26, Math.round(30 * scale));
+    const titleY = glyphY + glyphFont + Math.round(12 * scale);
     ctx.font = `500 ${titleFont}px ${FONT_DISPLAY}`;
-    ctx.fillStyle = '#f4fbff';
+    ctx.fillStyle = '#24180f';
     this._setLetterSpacing(ctx, `${Math.round(-0.02 * titleFont)}px`);
     const titleLineH = Math.round(titleFont * 1.22);
     this._drawWrapped(ctx, title, padX, titleY, maxTextWidth, titleLineH, 2);
@@ -496,10 +503,10 @@ export class NodePlane {
     if (dateLabel) {
       const dateFont = Math.max(13, Math.round(14 * scale));
       const dateY = titleY + titleLineH * 2 + Math.round(10 * scale);
-      ctx.font = `500 ${dateFont}px ${FONT_MONO}`;
-      ctx.fillStyle = CYAN_CYBER;
-      this._setLetterSpacing(ctx, `${Math.round(0.16 * dateFont)}px`);
-      ctx.fillText(dateLabel.toUpperCase(), padX, Math.min(dateY, canvasH - dateFont - Math.round(22 * scale)));
+      ctx.font = `500 ${dateFont}px ${FONT_DISPLAY}`;
+      ctx.fillStyle = '#8a6a3a';
+      this._setLetterSpacing(ctx, `${Math.round(0.08 * dateFont)}px`);
+      ctx.fillText(dateLabel.toUpperCase(), padX, Math.min(dateY, canvasH - inner - dateFont - 8));
       this._setLetterSpacing(ctx, '0px');
     }
 
@@ -558,6 +565,22 @@ export class NodePlane {
       h = Math.imul(h, 16777619);
     }
     return h >>> 0;
+  }
+
+  private _framePalette(): {
+    frame: [string, string, string];
+    mat: string;
+    fillet: string;
+    caption: string;
+  } {
+    const palettes = [
+      { frame: ['#3a3a3a', '#080808', '#161616'] as [string, string, string], mat: '#f6f3ec', fillet: '#111', caption: '#6a6458' },
+      { frame: ['#4a3428', '#160e08', '#2a1c14'] as [string, string, string], mat: '#f4ead8', fillet: '#1a120c', caption: '#6e5c44' },
+      { frame: ['#c8b08a', '#6a5438', '#8e7350'] as [string, string, string], mat: '#f7f2e8', fillet: '#3a2c1c', caption: '#7a6a50' },
+      { frame: ['#d2c09a', '#7a6840', '#a89068'] as [string, string, string], mat: '#f8f4ea', fillet: '#5a4a2c', caption: '#7a6c50' },
+      { frame: ['#efeae2', '#b4aca0', '#d0c8bc'] as [string, string, string], mat: '#e6e0d4', fillet: '#8a8278', caption: '#6a645c' },
+    ];
+    return palettes[this._hashSeed(this._node.id) % palettes.length];
   }
 
   private _drawWaveformBars(
@@ -718,15 +741,17 @@ export class NodePlane {
     cx: number,
     cy: number,
     size: number,
+    fill = '#d4af37',
+    ring = 'rgba(212,175,55,0.7)',
   ): void {
     const r = size / 2;
     ctx.save();
-    ctx.strokeStyle = 'rgba(212,175,55,0.7)';
+    ctx.strokeStyle = ring;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
     ctx.stroke();
-    ctx.fillStyle = '#d4af37';
+    ctx.fillStyle = fill;
     ctx.beginPath();
     const ox = cx + r * 0.08;
     ctx.moveTo(ox - r * 0.22, cy - r * 0.32);
@@ -786,7 +811,68 @@ export class NodePlane {
     return `${day} · ${d.getFullYear()}`;
   }
 
+  private _createVideoScreenTexture(source: THREE.Texture): THREE.CanvasTexture {
+    const imgSize = this._imageSize(source);
+    const aspect = imgSize
+      ? imgSize.w / imgSize.h
+      : this._mesh.scale.x > 0 && this._mesh.scale.y > 0
+        ? this._mesh.scale.x / this._mesh.scale.y
+        : 16 / 9;
+    const long = 1024;
+    const canvasW = aspect >= 1 ? long : Math.max(192, Math.round(long * aspect));
+    const canvasH = aspect >= 1 ? Math.max(192, Math.round(long / aspect)) : long;
+    const canvas = document.createElement('canvas');
+    canvas.width = canvasW;
+    canvas.height = canvasH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return new THREE.CanvasTexture(canvas);
+
+    const bezel = Math.max(3, Math.round(Math.min(canvasW, canvasH) * 0.012));
+    ctx.fillStyle = '#090909';
+    ctx.fillRect(0, 0, canvasW, canvasH);
+
+    const ix = bezel;
+    const iy = bezel;
+    const iw = canvasW - bezel * 2;
+    const ih = canvasH - bezel * 2;
+    const img = source.image as { width?: number; height?: number } | undefined;
+    if (img && (img.width ?? 0) > 0 && (img.height ?? 0) > 0) {
+      try {
+        ctx.drawImage(img as CanvasImageSource, ix, iy, iw, ih);
+      } catch {
+        ctx.fillStyle = '#111';
+        ctx.fillRect(ix, iy, iw, ih);
+      }
+    } else {
+      ctx.fillStyle = '#111';
+      ctx.fillRect(ix, iy, iw, ih);
+    }
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(ix + 0.5, iy + 0.5, iw - 1, ih - 1);
+
+    const play = Math.round(Math.min(iw, ih) * 0.14);
+    this._drawPlayGlyph(ctx, ix + iw / 2, iy + ih / 2, play, 'rgba(255,255,255,0.92)', 'rgba(0,0,0,0.35)');
+
+    const dateLabel = this._mediaDateLabel();
+    if (dateLabel) {
+      const dateFont = Math.max(11, Math.round(Math.min(canvasW, canvasH) * 0.028));
+      ctx.font = `500 ${dateFont}px ${FONT_MONO}`;
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'bottom';
+      ctx.fillStyle = 'rgba(255,255,255,0.72)';
+      ctx.fillText(dateLabel.toUpperCase(), ix + iw - 10, iy + ih - 10);
+    }
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.needsUpdate = true;
+    return texture;
+  }
+
   private _createMediaCaptionTexture(source: THREE.Texture, isVideo: boolean): THREE.CanvasTexture {
+    if (isVideo) return this._createVideoScreenTexture(source);
     const imgSize = this._imageSize(source);
     const aspect = imgSize
       ? imgSize.w / imgSize.h
@@ -803,80 +889,24 @@ export class NodePlane {
     if (!ctx) return new THREE.CanvasTexture(canvas);
 
     const minSide = Math.min(canvasW, canvasH);
-    const outer = Math.max(10, Math.round(minSide * 0.055));
-    const bead = Math.max(5, Math.round(minSide * 0.028));
-    const scoop = Math.max(4, Math.round(minSide * 0.02));
-    const gilt = Math.max(2, Math.round(minSide * 0.012));
-    const rebate = Math.max(2, Math.round(minSide * 0.008));
-    const mat = Math.max(16, Math.round(minSide * 0.072));
-    const inset = outer + bead + scoop + gilt + rebate + mat;
+    const rail = Math.max(7, Math.round(minSide * 0.02));
+    const fillet = Math.max(1, Math.round(minSide * 0.0035));
+    const mat = Math.max(28, Math.round(minSide * 0.11));
+    const inset = rail + fillet + mat;
     const innerW = canvasW - inset * 2;
     const innerH = canvasH - inset * 2;
+    const pal = this._framePalette();
 
-    ctx.fillStyle = '#140c08';
-    ctx.fillRect(0, 0, canvasW, canvasH);
-
-    this._fillMolding(ctx, 0, 0, canvasW, canvasH, outer, '#7a4e2a', '#1c0e08', '#3f2414');
-    this._grainWoodRing(ctx, 0, 0, canvasW, canvasH, outer);
-
-    const bx = outer;
-    const by = outer;
-    const bw = canvasW - outer * 2;
-    const bh = canvasH - outer * 2;
-    this._fillMolding(ctx, bx, by, bw, bh, bead, '#8d5a32', '#241208', '#4a2c18');
-    this._grainWoodRing(ctx, bx, by, bw, bh, bead);
-
-    const sx = bx + bead;
-    const sy = by + bead;
-    const sw = bw - bead * 2;
-    const sh = bh - bead * 2;
-    this._fillMolding(ctx, sx, sy, sw, sh, scoop, '#5c3820', '#120804', '#2e1a10');
-    this._grainWoodRing(ctx, sx, sy, sw, sh, scoop);
-
-    const gx = sx + scoop;
-    const gy = sy + scoop;
-    const gw = sw - scoop * 2;
-    const gh = sh - scoop * 2;
-    this._fillMolding(ctx, gx, gy, gw, gh, gilt, '#f4e2a4', '#7a5414', '#c4a056');
-
-    const rx = gx + gilt;
-    const ry = gy + gilt;
-    const rw = gw - gilt * 2;
-    const rh = gh - gilt * 2;
-    ctx.fillStyle = '#0a0705';
-    ctx.fillRect(rx, ry, rw, rh);
-
-    const mx = rx + rebate;
-    const my = ry + rebate;
-    const mw = rw - rebate * 2;
-    const mh = rh - rebate * 2;
-    ctx.fillStyle = '#efe6d2';
-    ctx.fillRect(mx, my, mw, mh);
-    const matShade = ctx.createLinearGradient(mx, my, mx + mw, my + mh);
-    matShade.addColorStop(0, 'rgba(255,255,255,0.22)');
-    matShade.addColorStop(0.45, 'rgba(0,0,0,0)');
-    matShade.addColorStop(1, 'rgba(90,70,40,0.1)');
-    ctx.fillStyle = matShade;
-    ctx.fillRect(mx, my, mw, mh);
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(mx, my, mw, mh);
-    ctx.clip();
-    ctx.strokeStyle = 'rgba(70,50,28,0.06)';
-    ctx.lineWidth = 1;
-    for (let i = 0; i < mw + mh; i += 3) {
-      ctx.beginPath();
-      ctx.moveTo(mx + i, my);
-      ctx.lineTo(mx + i - mh, my + mh);
-      ctx.stroke();
-    }
-    ctx.restore();
+    this._fillMolding(ctx, 0, 0, canvasW, canvasH, rail, pal.frame[0], pal.frame[1], pal.frame[2]);
+    ctx.fillStyle = pal.fillet;
+    ctx.fillRect(rail, rail, canvasW - rail * 2, canvasH - rail * 2);
+    ctx.fillStyle = pal.mat;
+    ctx.fillRect(rail + fillet, rail + fillet, canvasW - (rail + fillet) * 2, canvasH - (rail + fillet) * 2);
 
     ctx.save();
     ctx.beginPath();
     ctx.rect(inset, inset, innerW, innerH);
     ctx.clip();
-
     const img = source.image as { width?: number; height?: number } | undefined;
     const iw = img?.width ?? 0;
     const ih = img?.height ?? 0;
@@ -893,33 +923,21 @@ export class NodePlane {
     }
     ctx.restore();
 
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(inset, inset, innerW, innerH);
-    ctx.clip();
-    ctx.strokeStyle = 'rgba(20,12,6,0.45)';
-    ctx.lineWidth = Math.max(3, Math.round(minSide * 0.012));
-    ctx.strokeRect(inset, inset, innerW, innerH);
-    ctx.restore();
-    ctx.strokeStyle = 'rgba(90,70,40,0.28)';
+    ctx.strokeStyle = 'rgba(20,16,12,0.28)';
     ctx.lineWidth = 1;
     ctx.strokeRect(inset + 0.5, inset + 0.5, innerW - 1, innerH - 1);
 
-    if (isVideo) {
-      const play = Math.round(Math.min(innerW, innerH) * 0.11);
-      this._drawPlayGlyph(ctx, inset + innerW - play - 12, inset + innerH - play - 12, play);
-    }
     const dateLabel = this._mediaDateLabel();
     if (dateLabel) {
-      const dateFont = Math.max(10, Math.round(minSide * 0.028));
-      ctx.font = `500 ${dateFont}px ${FONT_MONO}`;
+      const dateFont = Math.max(11, Math.round(minSide * 0.022));
+      ctx.font = `400 ${dateFont}px ${FONT_DISPLAY}`;
       ctx.textAlign = 'right';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#6a5738';
+      ctx.fillStyle = pal.caption;
       ctx.fillText(
-        dateLabel.toUpperCase(),
-        mx + mw - 10,
-        my + mh - mat / 2,
+        dateLabel,
+        canvasW - rail - fillet - 10,
+        canvasH - rail - fillet - mat / 2,
       );
     }
 
