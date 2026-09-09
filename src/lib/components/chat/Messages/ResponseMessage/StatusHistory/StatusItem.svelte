@@ -1,7 +1,6 @@
 <script>
 	import { getContext } from 'svelte';
 	const i18n = getContext('i18n');
-	import WebSearchResults from '../WebSearchResults.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
 	import { t } from 'i18next';
 
@@ -11,32 +10,7 @@
 
 {#if !status?.hidden}
 	<div class="status-description flex items-center gap-2 py-0.5 w-full text-left">
-		{#if status?.action === 'web_search' && (status?.urls || status?.items)}
-			<WebSearchResults {status}>
-				<div class="flex flex-col justify-center -space-y-0.5">
-					<div
-						class="{(done || status?.done) === false
-							? 'shimmer'
-							: ''} text-[0.9375rem] line-clamp-1 text-wrap"
-					>
-						<!-- $i18n.t("Generating search query") -->
-						<!-- $i18n.t("No search query generated") -->
-						<!-- $i18n.t('Searched {{count}} sites') -->
-						{#if status?.description?.includes('{{count}}')}
-							{$i18n.t(status?.description, {
-								count: (status?.urls || status?.items).length
-							})}
-						{:else if status?.description === 'No search query generated'}
-							{$i18n.t('No search query generated')}
-						{:else if status?.description === 'Generating search query'}
-							{$i18n.t('Generating search query')}
-						{:else}
-							{status?.description}
-						{/if}
-					</div>
-				</div>
-			</WebSearchResults>
-		{:else if status?.action === 'knowledge_search'}
+		{#if status?.action === 'knowledge_search'}
 			<div class="flex flex-col justify-center -space-y-0.5">
 				<div
 					class="{(done || status?.done) === false
@@ -130,9 +104,14 @@
 						: ''} text-gray-500 dark:text-gray-500 text-[0.9375rem] line-clamp-1 text-wrap"
 				>
 					<!-- $i18n.t(`Searching "{{searchQuery}}"`) -->
+					<!-- $i18n.t('Searched {{count}} sites') -->
 					{#if status?.description?.includes('{{searchQuery}}')}
 						{$i18n.t(status?.description, {
 							searchQuery: status?.query
+						})}
+					{:else if status?.description?.includes('{{count}}')}
+						{$i18n.t(status?.description, {
+							count: (status?.urls || status?.items)?.length ?? status?.count ?? 0
 						})}
 					{:else if status?.description === 'No search query generated'}
 						{$i18n.t('No search query generated')}

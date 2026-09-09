@@ -11,8 +11,6 @@
 
 	$: if (expand) {
 		showHistory = true;
-	} else {
-		showHistory = false;
 	}
 
 	let history = [];

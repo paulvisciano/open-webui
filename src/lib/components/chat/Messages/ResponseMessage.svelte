@@ -184,8 +184,21 @@
 	$: model = $models.find((m) => m.id === message.model);
 
 	$: statusEntries = message?.statusHistory ?? [...(message?.status ? [message?.status] : [])];
+	$: hasWebSearchSources = (message?.sources ?? message?.citations ?? []).some(
+		(source) =>
+			source?.source?.type === 'web_search' ||
+			(source?.metadata ?? []).some((meta) => /^https?:\/\//.test(meta?.source ?? meta?.link ?? ''))
+	);
+	$: hasWebSearchStatus = (message?.statusHistory ?? []).some(
+		(entry) => entry?.action === 'web_search' && (entry?.urls?.length || entry?.items?.length)
+	);
+	$: showWebSearchStatus =
+		(model?.info?.meta?.capabilities?.status_updates ?? true) || hasWebSearchStatus;
+	$: showSourceList =
+		Boolean(message?.sources || message?.citations) &&
+		((model?.info?.meta?.capabilities?.citations ?? true) || hasWebSearchSources);
 	$: hasVisibleStatus =
-		(model?.info?.meta?.capabilities?.status_updates ?? true) &&
+		showWebSearchStatus &&
 		statusEntries.length > 0 &&
 		!(statusEntries.at(-1)?.hidden ?? false);
 	$: visibleResponseContent =
@@ -705,7 +718,7 @@
 			<div>
 				<div class="chat-{message.role} w-full min-w-full">
 					<div>
-						{#if model?.info?.meta?.capabilities?.status_updates ?? true}
+						{#if showWebSearchStatus}
 							<StatusHistory statusHistory={message?.statusHistory} />
 						{/if}
 
@@ -916,7 +929,7 @@
 								<Error content={message?.error?.content ?? message.content} />
 							{/if}
 
-							{#if (message?.sources || message?.citations) && (model?.info?.meta?.capabilities?.citations ?? true)}
+							{#if showSourceList}
 								<Citations
 									bind:this={citationsElement}
 									id={message?.id}

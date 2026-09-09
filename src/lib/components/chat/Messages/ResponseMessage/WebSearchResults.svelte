@@ -3,9 +3,29 @@
 	import ChevronUp from '$lib/components/icons/ChevronUp.svelte';
 	import Search from '$lib/components/icons/Search.svelte';
 	import Collapsible from '$lib/components/common/Collapsible.svelte';
+	import Tooltip from '$lib/components/common/Tooltip.svelte';
 
 	export let status = { urls: [], query: '' };
 	let state = false;
+
+	const escapeHtml = (value: string) =>
+		value
+			.replace(/&/g, '&amp;')
+			.replace(/</g, '&lt;')
+			.replace(/>/g, '&gt;')
+			.replace(/"/g, '&quot;');
+
+	const itemHoverContent = (item) => {
+		const title = String(item?.title || '').trim();
+		const summary = String(item?.snippet || '')
+			.replace(/\s+/g, ' ')
+			.trim();
+		if (!title && !summary) return '';
+		const clipped = summary.length > 420 ? `${summary.slice(0, 420).trim()}…` : summary;
+		return `<div class="max-w-xs text-left text-xs leading-snug">${
+			title ? `<div class="font-medium mb-1">${escapeHtml(title)}</div>` : ''
+		}${clipped ? `<div class="opacity-90">${escapeHtml(clipped)}</div>` : ''}</div>`;
+	};
 </script>
 
 <Collapsible grow={true} className="w-full" buttonClassName="w-full" bind:open={state}>
@@ -58,6 +78,12 @@
 
 		{#if status?.items}
 			{#each status.items as item, itemIdx}
+				<Tooltip
+					className="w-full"
+					placement="top-start"
+					content={itemHoverContent(item)}
+					tippyOptions={{ duration: [200, 0], maxWidth: 360 }}
+				>
 				<a
 					href={item.link}
 					target="_blank"
@@ -95,6 +121,7 @@
 						</svg>
 					</div>
 				</a>
+				</Tooltip>
 			{/each}
 		{:else if status?.urls}
 			{#each status.urls as url, urlIdx}

@@ -3,6 +3,7 @@
 	import { embed, showControls, showEmbeds } from '$lib/stores';
 
 	import CitationModal from './Citations/CitationModal.svelte';
+	import Tooltip from '$lib/components/common/Tooltip.svelte';
 
 	const i18n = getContext('i18n');
 
@@ -19,6 +20,7 @@
 	let citationModal = null;
 
 	let showCitations = false;
+	let citationsToggleLocked = false;
 	let showCitationModal = false;
 
 	let selectedCitation: any = null;
@@ -140,6 +142,12 @@
 
 		showRelevance = calculateShowRelevance(citations);
 		showPercentage = shouldShowPercentage(citations);
+		if (
+			!citationsToggleLocked &&
+			citations.some((citation) => citation?.source?.name?.startsWith('http'))
+		) {
+			showCitations = true;
+		}
 	}
 
 	const decodeString = (str: string) => {
@@ -148,6 +156,26 @@
 		} catch (e) {
 			return str;
 		}
+	};
+
+	const escapeHtml = (value: string) =>
+		value
+			.replace(/&/g, '&amp;')
+			.replace(/</g, '&lt;')
+			.replace(/>/g, '&gt;')
+			.replace(/"/g, '&quot;');
+
+	const citationHoverContent = (citation) => {
+		const meta = citation?.metadata?.[0] ?? {};
+		const title = (meta.title || '').trim();
+		const summary = String(meta.snippet || citation?.document?.[0] || '')
+			.replace(/\s+/g, ' ')
+			.trim();
+		if (!title && !summary) return '';
+		const clipped = summary.length > 420 ? `${summary.slice(0, 420).trim()}…` : summary;
+		return `<div class="max-w-xs text-left text-xs leading-snug">${
+			title ? `<div class="font-medium mb-1">${escapeHtml(title)}</div>` : ''
+		}${clipped ? `<div class="opacity-90">${escapeHtml(clipped)}</div>` : ''}</div>`;
 	};
 </script>
 
@@ -168,6 +196,7 @@
 				: $i18n.t('Toggle {{COUNT}} sources', { COUNT: citations.length })}
 			aria-expanded={showCitations}
 			on:click={() => {
+				citationsToggleLocked = true;
 				showCitations = !showCitations;
 			}}
 		>
@@ -213,26 +242,33 @@
 	<div class="py-1.5">
 		<div class="text-xs gap-2 flex flex-col">
 			{#each citations as citation, idx}
-				<button
-					id={`source-${id}-${idx + 1}`}
-					aria-label={$i18n.t('View source: {{name}}', {
-						name: decodeString(citation.source.name)
-					})}
-					class="no-toggle outline-hidden flex dark:text-gray-300 bg-transparent text-gray-600 rounded-xl gap-1.5 items-center"
-					on:click={() => {
-						showCitationModal = true;
-						selectedCitation = citation;
-					}}
+				<Tooltip
+					className="w-full"
+					placement="top-start"
+					content={citationHoverContent(citation)}
+					tippyOptions={{ duration: [200, 0], maxWidth: 360 }}
 				>
-					<div class=" font-normal bg-gray-50 dark:bg-gray-850 rounded-md px-1">
-						{idx + 1}
-					</div>
-					<div
-						class="flex-1 truncate hover:text-black dark:text-white/60 dark:hover:text-white transition text-left"
+					<button
+						id={`source-${id}-${idx + 1}`}
+						aria-label={$i18n.t('View source: {{name}}', {
+							name: decodeString(citation.source.name)
+						})}
+						class="no-toggle outline-hidden flex w-full dark:text-gray-300 bg-transparent text-gray-600 rounded-xl gap-1.5 items-center"
+						on:click={() => {
+							showCitationModal = true;
+							selectedCitation = citation;
+						}}
 					>
-						{decodeString(citation.source.name)}
-					</div>
-				</button>
+						<div class=" font-normal bg-gray-50 dark:bg-gray-850 rounded-md px-1">
+							{idx + 1}
+						</div>
+						<div
+							class="flex-1 truncate hover:text-black dark:text-white/60 dark:hover:text-white transition text-left"
+						>
+							{decodeString(citation.source.name)}
+						</div>
+					</button>
+				</Tooltip>
 			{/each}
 		</div>
 	</div>
