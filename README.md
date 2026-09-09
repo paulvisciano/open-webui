@@ -1,5 +1,14 @@
 # Open WebUI 👋
 
+> **Custom fork** of [open-webui/open-webui](https://github.com/open-webui/open-webui) by [paulvisciano](https://github.com/paulvisciano). Upstream docs and install instructions still apply. This repo tracks upstream `main` plus the local features below.
+
+## What's custom in this fork
+
+- **Knowledge graph** — `/graph` canvas (LightRAG) with conversation/document nodes, time-travel scroll, processing dock, and KG JSONL chat import.
+- **Voice** — live Whisper captions, abortable transcription, full assistant text streamed into the overlay, and a mobile-centric graph voice stage (circular visualizer, iOS chat sheet, continue-in-thread).
+- **Typography** — Inter for UI/body, Fraunces for titles and nav, JetBrains Mono for code, editors, notebooks, and graph meta.
+- **Local HTTPS** — `start-all.sh` / `stop-all.sh` bring up llama-server, backend, Vite, and related services with local certs. Vite in dev talks to `https://<host>:8080`.
+
 ![GitHub stars](https://img.shields.io/github/stars/open-webui/open-webui?style=social)
 ![GitHub forks](https://img.shields.io/github/forks/open-webui/open-webui?style=social)
 ![GitHub watchers](https://img.shields.io/github/watchers/open-webui/open-webui?style=social)
