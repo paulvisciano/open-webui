@@ -105,6 +105,7 @@ export class VoiceCallService {
 
 	private audioAbortController = new AbortController();
 	private audioCache = new Map<string, any>();
+	private audioInflight = new Map<string, Promise<any>>();
 	private emojiCache = new Map<string, string>();
 	private messages: Record<string, string[]> = {};
 
@@ -538,53 +539,64 @@ export class VoiceCallService {
 	};
 
 	private fetchAudio = async (content: string) => {
-		if (!this.audioCache.has(content)) {
-			const ttsStarted = performance.now();
-			this.mark('tts_synth_start', `chars=${content.length}`);
-			try {
-				const s = get(settings);
-				if (s?.showEmojiInCall ?? false) {
-					const em = await generateEmoji(
-						localStorage.token,
-						this.opts.modelId,
-						content,
-						this.opts.chatId
-					);
-					if (em) this.emojiCache.set(content, em);
-				}
+		if (this.audioCache.has(content)) return this.audioCache.get(content);
+		const pending = this.audioInflight.get(content);
+		if (pending) return pending;
+		const job = (async () => {
+			await this.synthesizeAudio(content);
+			if (!this.audioCache.has(content)) await this.synthesizeAudio(content);
+			return this.audioCache.get(content);
+		})().finally(() => this.audioInflight.delete(content));
+		this.audioInflight.set(content, job);
+		return job;
+	};
 
-				if (s?.audio?.tts?.engine === 'browser-kokoro') {
-					const url = await get(TTSWorker)
-						?.generate({ text: content, voice: this.getVoiceId() })
-						.catch((e: any) => {
-							console.error(e);
-							toast.error(`${e}`);
-						});
-					if (url) {
-						this.audioCache.set(content, new Audio(url));
-					}
-				} else if (get(config)?.audio?.tts?.engine !== '') {
-					const res = await synthesizeOpenAISpeech(
-						localStorage.token,
-						this.getVoiceId(),
-						content
-					).catch((e) => {
-						console.error(e);
-						return null;
-					});
-					if (res) {
-						const blob = await res.blob();
-						this.audioCache.set(content, new Audio(URL.createObjectURL(blob)));
-					}
-				} else {
-					this.audioCache.set(content, true);
-				}
-			} catch (e) {
-				console.error('Error synthesizing speech:', e);
+	private synthesizeAudio = async (content: string) => {
+		if (this.audioCache.has(content)) return;
+		const ttsStarted = performance.now();
+		this.mark('tts_synth_start', `chars=${content.length}`);
+		try {
+			const s = get(settings);
+			if (s?.showEmojiInCall ?? false) {
+				const em = await generateEmoji(
+					localStorage.token,
+					this.opts.modelId,
+					content,
+					this.opts.chatId
+				);
+				if (em) this.emojiCache.set(content, em);
 			}
-			this.mark('tts_synth_done', `dur=${(performance.now() - ttsStarted).toFixed(0)}ms`);
+
+			if (s?.audio?.tts?.engine === 'browser-kokoro') {
+				const url = await get(TTSWorker)
+					?.generate({ text: content, voice: this.getVoiceId() })
+					.catch((e: any) => {
+						console.error(e);
+						toast.error(`${e}`);
+					});
+				if (url) {
+					this.audioCache.set(content, new Audio(url));
+				}
+			} else if (get(config)?.audio?.tts?.engine !== '') {
+				const res = await synthesizeOpenAISpeech(
+					localStorage.token,
+					this.getVoiceId(),
+					content
+				).catch((e) => {
+					console.error(e);
+					return null;
+				});
+				if (res) {
+					const blob = await res.blob();
+					this.audioCache.set(content, new Audio(URL.createObjectURL(blob)));
+				}
+			} else {
+				this.audioCache.set(content, true);
+			}
+		} catch (e) {
+			console.error('Error synthesizing speech:', e);
 		}
-		return this.audioCache.get(content);
+		this.mark('tts_synth_done', `dur=${(performance.now() - ttsStarted).toFixed(0)}ms`);
 	};
 
 	private monitorAndPlayAudio = async (id: string, signal: AbortSignal) => {
