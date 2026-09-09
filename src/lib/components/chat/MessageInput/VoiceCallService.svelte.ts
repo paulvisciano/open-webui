@@ -500,9 +500,16 @@ export class VoiceCallService {
 			}, 100);
 		});
 
+	private audioEl(): HTMLAudioElement | null {
+		return (
+			(document.getElementById('graph-voice-audio') as HTMLAudioElement | null) ??
+			(document.getElementById('audioElement') as HTMLAudioElement | null)
+		);
+	}
+
 	private playAudio = (audio: any) =>
 		new Promise<void>((resolve) => {
-			const el = document.getElementById('audioElement') as HTMLAudioElement | null;
+			const el = this.audioEl();
 			if (!el) return resolve();
 			this.mark('tts_play_start');
 			el.src = audio.src;
@@ -530,11 +537,40 @@ export class VoiceCallService {
 			speechSynthesis.cancel();
 			this.currentUtterance = null;
 		}
-		const el = document.getElementById('audioElement');
+		const el = this.audioEl();
 		if (el) {
-			(el as HTMLAudioElement).muted = true;
-			(el as HTMLAudioElement).pause();
-			(el as HTMLAudioElement).currentTime = 0;
+			el.muted = true;
+			el.pause();
+			el.currentTime = 0;
+		}
+	};
+
+	replayLastAssistant = async () => {
+		const last = [...this.messageLog].reverse().find((m) => m.role === 'assistant' && m.content.trim());
+		if (!last) return;
+		this.interrupted = true;
+		if (this.currentUtterance) {
+			speechSynthesis.cancel();
+			this.currentUtterance = null;
+		}
+		const el = this.audioEl();
+		if (el) {
+			el.pause();
+			el.currentTime = 0;
+		}
+		this.interrupted = false;
+		this.assistantSpeaking = true;
+		try {
+			await this.fetchAudio(last.content);
+			if (this.interrupted) return;
+			const cached = this.audioCache.get(last.content);
+			if (cached && cached !== true) {
+				await this.playAudio(cached);
+			} else if (!get(config)?.audio?.tts?.engine) {
+				await this.speakSpeechSynthesisHandler(last.content);
+			}
+		} finally {
+			this.assistantSpeaking = false;
 		}
 	};
 
