@@ -1091,7 +1091,7 @@
 						$config?.features?.enable_web_search &&
 						($user?.role === 'admin' || $user?.permissions?.features?.web_search)
 					) {
-						webSearchEnabled = model.info.meta.defaultFeatureIds.includes('web_search');
+						webSearchEnabled = false;
 					}
 
 					if (
