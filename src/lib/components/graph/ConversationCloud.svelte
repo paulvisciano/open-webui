@@ -115,8 +115,8 @@
 			const hits = kept.some((k) => {
 				const dx = Math.abs(c.cx - k.cx);
 				const dy = Math.abs(c.cy - k.cy);
-				const ox = (252 * c.scale + 252 * k.scale) / 2 - dx;
-				const oy = (132 * c.scale + 132 * k.scale) / 2 - dy;
+				const ox = (220 * c.scale + 220 * k.scale) / 2 - dx;
+				const oy = (118 * c.scale + 118 * k.scale) / 2 - dy;
 				return ox > 8 && oy > 8;
 			});
 			if (!hits) kept.push(c);
@@ -213,67 +213,59 @@
 	}
 
 	.month-card {
-		/* Scoped tokens from unused styles.css / vision deck — do not import styles.css (it would restyle OWUI). */
-		--cyber-cyan: #00d4ff;
-		--accent-cyan: #13dcf6;
-		--glass-bg: linear-gradient(180deg, rgba(0, 212, 255, 0.07), rgba(8, 14, 26, 0.58));
 		position: absolute;
 		transform-origin: center center;
 		pointer-events: auto;
 		touch-action: none;
 		box-sizing: border-box;
-		width: 252px;
-		min-height: 132px;
-		padding: 18px 20px 16px;
-		border: 1px solid rgba(0, 212, 255, 0.38);
-		border-radius: 14px;
+		width: 220px;
+		min-height: 118px;
+		padding: 14px 16px 12px;
+		border: 7px solid #3d2818;
+		border-radius: 2px;
 		display: flex;
 		flex-direction: column;
 		align-items: flex-start;
 		text-align: left;
 		cursor: pointer;
-		color: #e8eef6;
-		background: var(--glass-bg);
-		backdrop-filter: blur(18px) saturate(1.2);
-		-webkit-backdrop-filter: blur(18px) saturate(1.2);
+		color: #2a1c12;
+		background:
+			linear-gradient(180deg, rgba(255, 255, 255, 0.18), transparent 42%),
+			#f3ead6;
 		box-shadow:
-			0 0 0 1px rgba(0, 212, 255, 0.08),
-			0 0 15px rgba(0, 212, 255, 0.28),
-			0 24px 60px rgba(0, 0, 0, 0.45);
+			inset 0 0 0 1px #c4a056,
+			0 10px 28px rgba(0, 0, 0, 0.42);
 	}
 
 	.month-card:hover {
-		border-color: rgba(0, 212, 255, 0.7);
 		box-shadow:
-			0 0 0 1px rgba(0, 212, 255, 0.16),
-			0 0 18px rgba(19, 220, 246, 0.35),
-			0 24px 60px rgba(0, 0, 0, 0.5);
+			inset 0 0 0 1px #e0c878,
+			0 14px 32px rgba(0, 0, 0, 0.5);
 	}
 
 	.month-card.search-hit {
-		border-color: var(--accent-cyan);
 		box-shadow:
-			0 0 0 1px rgba(19, 220, 246, 0.28),
-			0 0 18px rgba(19, 220, 246, 0.5),
-			0 24px 60px rgba(0, 0, 0, 0.45);
+			inset 0 0 0 1px #e8d48a,
+			0 0 0 1px rgba(196, 160, 86, 0.45),
+			0 14px 32px rgba(0, 0, 0, 0.5);
 	}
 
 	.month-glyph {
-		font-family: 'JetBrains Mono', ui-monospace, monospace;
+		font-family: 'Fraunces', Georgia, serif;
 		font-size: 0.58rem;
-		letter-spacing: 0.18em;
+		letter-spacing: 0.2em;
 		text-transform: uppercase;
-		color: var(--cyber-cyan);
-		margin-bottom: 10px;
+		color: #8a6a3a;
+		margin-bottom: 8px;
 	}
 
 	.month-title {
 		font-family: 'Fraunces', Georgia, serif;
-		font-size: 1.15rem;
-		font-weight: 400;
-		line-height: 1.25;
+		font-size: 1.08rem;
+		font-weight: 500;
+		line-height: 1.28;
 		letter-spacing: -0.02em;
-		color: #f4fbff;
+		color: #24180f;
 		display: -webkit-box;
 		-webkit-line-clamp: 2;
 		line-clamp: 2;
@@ -284,11 +276,11 @@
 	.month-meta {
 		display: block;
 		margin-top: 8px;
-		font-family: 'JetBrains Mono', ui-monospace, monospace;
-		font-size: 0.62rem;
-		letter-spacing: 0.16em;
+		font-family: 'Fraunces', Georgia, serif;
+		font-size: 0.68rem;
+		letter-spacing: 0.08em;
 		text-transform: uppercase;
-		color: var(--cyber-cyan);
+		color: #8a6a3a;
 	}
 
 	.hover-tooltip {

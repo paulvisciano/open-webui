@@ -137,8 +137,8 @@
         const isConversation = cn?.kind === 'conversation'
           || kg?.properties?.entity_type === 'Conversation';
         if (isConversation) {
-          galleryFocus = false;
           sm.flyToNode(nodeId);
+          galleryFocus = true;
           lastUserNavAt = Date.now();
           onselectconversation(nodeId);
           return;
@@ -152,9 +152,8 @@
         let yawDelta = Math.abs(nodeYaw - sm.lookYaw);
         if (yawDelta > Math.PI) yawDelta = Math.abs(yawDelta - 2 * Math.PI);
         if (yawDelta > 0.4) {
-          galleryFocus = false;
-          sm.resetLook();
-          clearSelection();
+          sm.flyToNode(nodeId);
+          galleryFocus = true;
           return;
         }
         overlayOrigin = sm.getPlaneScreenRect(nodeId);
@@ -798,7 +797,7 @@
 
 
 
-<ConversationCloud {sceneManager} {onselectconversation} hidden={galleryFocus} />
+<ConversationCloud {sceneManager} {onselectconversation} hidden={true} />
 <NodeOverlay node={selectedCanvasNode} kgNode={selectedKgNode} originRect={overlayOrigin} onClose={clearSelection} onNavigate={navigateToNode} />
 
 {#if sceneManager}
