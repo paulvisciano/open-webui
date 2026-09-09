@@ -3,6 +3,7 @@
 Provides:
   * ``GET /``          — combined graph data (conversation nodes + LightRAG entity nodes + edges)
   * ``GET /conversations`` — user's chats as KGNode-compatible objects
+  * ``GET /search``    — FTS over online assets + conversation title ilike
   * ``POST /images/process`` — accept an image upload, enqueue a processing job
   * ``GET /images/photo/{filename}`` — serve a stored image (optionally a thumbnail)
   * ``GET /health``    — liveness probe
@@ -10,18 +11,26 @@ Provides:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import mimetypes
 import os
 import shutil
 import uuid
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from open_webui.constants import ERROR_MESSAGES
+from open_webui.graph.sources import (
+    is_online,
+    presence_monitor,
+    set_abs_path,
+    set_online,
+)
 from open_webui.internal.db import get_async_session
 from open_webui.models.chats import Chats
 from open_webui.services import lightrag_service
@@ -41,6 +50,190 @@ IMAGES_DIR = Path(
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 THUMBNAIL_MAX_DIM = 300
+
+_scan_tasks: dict[str, asyncio.Task] = {}
+
+
+def _scan_running(source_id: str) -> bool:
+    task = _scan_tasks.get(source_id)
+    return task is not None and not task.done()
+
+
+def _source_roots() -> list[str]:
+    raw = os.environ.get('GRAPH_SOURCE_ROOTS', '')
+    if raw.strip():
+        parts = [
+            p.strip()
+            for p in raw.replace(',', os.pathsep).split(os.pathsep)
+            if p.strip()
+        ]
+    else:
+        parts = [os.path.expanduser('~'), '/Volumes', '/tmp']
+    roots: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        try:
+            real = os.path.realpath(os.path.expanduser(part))
+        except OSError:
+            continue
+        if real in seen:
+            continue
+        seen.add(real)
+        roots.append(real)
+    return roots
+
+
+def _is_under_root(path: str, root: str) -> bool:
+    try:
+        real = os.path.realpath(path)
+        root_real = os.path.realpath(root)
+    except OSError:
+        return False
+    if real == root_real:
+        return True
+    prefix = root_real if root_real.endswith(os.sep) else root_real + os.sep
+    return real.startswith(prefix)
+
+
+def _path_allowed(path: str) -> bool:
+    return any(_is_under_root(path, root) for root in _source_roots())
+
+
+def _reject_unallowed(path: str) -> str:
+    if not path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='path is required',
+        )
+    try:
+        real = os.path.realpath(path)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='invalid path',
+        ) from exc
+    if not _path_allowed(real):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail='path is outside allowed roots',
+        )
+    return real
+
+
+def _bare_asset_id(raw: str) -> str:
+    if raw.startswith('asset:'):
+        return raw[6:]
+    return raw
+
+
+def _parse_asset_id(raw: str) -> str:
+    bare = _bare_asset_id(raw or '')
+    try:
+        return str(uuid.UUID(bare))
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        ) from exc
+
+
+def _resolved_relative_to(
+    path: str | Path,
+    root: str | Path,
+    *,
+    forbidden_status: int = status.HTTP_403_FORBIDDEN,
+) -> Path:
+    try:
+        real = Path(path).resolve()
+        root_real = Path(root).resolve()
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        ) from exc
+    try:
+        real.relative_to(root_real)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=forbidden_status,
+            detail='path is outside source root'
+            if forbidden_status == status.HTTP_403_FORBIDDEN
+            else ERROR_MESSAGES.NOT_FOUND,
+        ) from exc
+    return real
+
+
+def _source_payload(row: dict, *, asset_count: int | None = None) -> dict:
+    source_id = str(row.get('id') or '')
+    last = row.get('last_abs_path') or ''
+    if last and presence_monitor.last_abs_path(source_id) is None:
+        set_abs_path(source_id, last)
+    payload = {
+        'id': source_id,
+        'name': row.get('name') or '',
+        'last_abs_path': last,
+        'fingerprint': row.get('fingerprint') or '',
+        'online': is_online(source_id),
+        'scanning': _scan_running(source_id),
+    }
+    if asset_count is not None:
+        payload['asset_count'] = asset_count
+    return payload
+
+
+def _canvas_asset(row: dict) -> dict:
+    return {
+        'id': row.get('id') or '',
+        'source_id': row.get('source_id') or '',
+        'kind': row.get('kind') or '',
+        'title': row.get('title') or '',
+        'taken_at': row.get('taken_at'),
+        'rel_path': row.get('rel_path') or '',
+    }
+
+
+async def _ensure_graph_db() -> None:
+    from open_webui.graph._db import init_db
+
+    await init_db()
+
+
+async def _owned_source(source_id: str, user_id: str) -> dict:
+    await _ensure_graph_db()
+    from open_webui.graph._db import get_source
+
+    source = await get_source(source_id)
+    if source is None or source.get('user_id') != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    return source
+
+
+async def _run_scan(source_id: str) -> None:
+    from open_webui.graph.scanner import scan_source
+
+    try:
+        async for _progress in scan_source(source_id):
+            pass
+    except Exception:
+        log.exception('scan_source failed source_id=%s', source_id)
+
+
+def _enqueue_scan(source_id: str) -> None:
+    existing = _scan_tasks.get(source_id)
+    if existing is not None and not existing.done():
+        return
+    task = asyncio.create_task(_run_scan(source_id), name=f'graph-scan-{source_id}')
+    _scan_tasks[source_id] = task
+
+    def _clear(done: asyncio.Task, *, sid: str = source_id) -> None:
+        current = _scan_tasks.get(sid)
+        if current is done:
+            _scan_tasks.pop(sid, None)
+
+    task.add_done_callback(_clear)
 
 
 def _chat_to_kgnode(chat) -> dict:
@@ -304,6 +497,425 @@ async def get_graph_health(
     user=Depends(get_verified_user),
 ):
     return {'status': 'ok'}
+
+
+class AttachSourceBody(BaseModel):
+    abs_path: str
+    name: Optional[str] = None
+
+
+class PresenceBody(BaseModel):
+    online: bool
+
+
+@router.get('/sources/browse')
+async def browse_sources(
+    path: str = Query(''),
+    user=Depends(get_verified_user),
+):
+    if not path:
+        entries = []
+        for root in _source_roots():
+            if os.path.isdir(root):
+                entries.append(
+                    {
+                        'name': os.path.basename(root) or root,
+                        'path': root,
+                        'is_dir': True,
+                    }
+                )
+        return entries
+
+    real = _reject_unallowed(path)
+    if not os.path.exists(real):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    if not os.path.isdir(real):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='path is not a directory',
+        )
+
+    try:
+        names = os.listdir(real)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail='cannot list path',
+        ) from exc
+
+    entries = []
+    for name in names:
+        if name in ('.', '..'):
+            continue
+        child = os.path.join(real, name)
+        try:
+            child_real = os.path.realpath(child)
+            is_dir = os.path.isdir(child)
+        except OSError:
+            continue
+        if not _path_allowed(child_real):
+            continue
+        entries.append(
+            {
+                'name': name,
+                'path': child_real,
+                'is_dir': bool(is_dir),
+            }
+        )
+    entries.sort(key=lambda e: (not e['is_dir'], e['name'].lower()))
+    return entries
+
+
+@router.post('/sources')
+async def attach_source(
+    body: AttachSourceBody,
+    user=Depends(get_verified_user),
+):
+    from open_webui.graph._db import count_assets_by_source, insert_source
+    from open_webui.graph.sources import fingerprint_for
+
+    real = _reject_unallowed(body.abs_path)
+    if not os.path.exists(real):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    if not os.path.isdir(real):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='abs_path is not a directory',
+        )
+
+    await _ensure_graph_db()
+    fingerprint = fingerprint_for(Path(real))
+    name = body.name or os.path.basename(real) or real
+    row = await insert_source(
+        user_id=user.id,
+        fingerprint=fingerprint,
+        name=name,
+        last_abs_path=real,
+        kind='folder',
+    )
+    set_abs_path(row['id'], real)
+    n = await count_assets_by_source(row['id'])
+    return _source_payload(row, asset_count=n)
+
+
+@router.get('/sources')
+async def get_sources(
+    user=Depends(get_verified_user),
+):
+    from open_webui.graph._db import count_assets_by_source, list_sources
+
+    await _ensure_graph_db()
+    rows = await list_sources(user.id)
+    out = []
+    for row in rows:
+        n = await count_assets_by_source(row['id'])
+        out.append(_source_payload(row, asset_count=n))
+    return out
+
+
+@router.post('/sources/{source_id}/scan')
+async def start_source_scan(
+    source_id: str,
+    user=Depends(get_verified_user),
+):
+    await _owned_source(source_id, user.id)
+    _enqueue_scan(source_id)
+    return {'status': 'accepted', 'source_id': source_id}
+
+
+@router.post('/sources/{source_id}/presence')
+async def set_source_presence(
+    source_id: str,
+    body: PresenceBody,
+    user=Depends(get_verified_user),
+):
+    from open_webui.graph._db import count_assets_by_source
+
+    source = await _owned_source(source_id, user.id)
+    last = source.get('last_abs_path')
+    if last:
+        set_abs_path(source_id, last)
+    set_online(source_id, bool(body.online))
+    n = await count_assets_by_source(source_id)
+    return _source_payload(source, asset_count=n)
+
+
+@router.get('/canvas')
+async def get_canvas(
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    from open_webui.graph._db import list_assets_for_canvas, list_sources
+
+    await _ensure_graph_db()
+
+    source_rows = await list_sources(user.id)
+    sources = [_source_payload(row) for row in source_rows]
+    online_ids = {s['id'] for s in sources if s['online']}
+
+    asset_rows = await list_assets_for_canvas(user.id)
+    assets = [
+        _canvas_asset(row)
+        for row in asset_rows
+        if row.get('source_id') in online_ids
+    ]
+
+    conversations: list[dict] = []
+    try:
+        chats = await Chats.get_chat_list_by_user_id(
+            user.id,
+            include_archived=False,
+            skip=0,
+            limit=500,
+            db=db,
+        )
+        conversations = [_chat_to_kgnode(chat) for chat in chats]
+    except Exception as exc:
+        log.warning('Failed to load conversations for canvas: %s', exc)
+
+    return {
+        'sources': sources,
+        'assets': assets,
+        'conversations': conversations,
+    }
+
+
+@router.get('/search')
+async def search_graph(
+    q: str = Query(''),
+    user=Depends(get_verified_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    """FTS over online library assets plus conversation title ilike.
+
+    Hits are ``{id, title, kind}`` only — never ``search_text``. Offline
+    sources are omitted; FTS rows are not dropped on unplug.
+    """
+    from open_webui.graph._db import list_sources, search_assets_fts
+
+    query = (q or '').strip()
+    if not query:
+        return []
+
+    await _ensure_graph_db()
+
+    source_rows = await list_sources(user.id)
+    online_ids = [
+        payload['id']
+        for payload in (_source_payload(row) for row in source_rows)
+        if payload['online']
+    ]
+
+    hits: list[dict] = []
+    if online_ids:
+        try:
+            hits.extend(await search_assets_fts(user.id, query, online_ids))
+        except Exception as exc:
+            log.warning('asset FTS search failed: %s', exc)
+
+    try:
+        chats = await Chats.get_chat_list_by_user_id(
+            user.id,
+            include_archived=False,
+            filter={'query': query},
+            skip=0,
+            limit=20,
+            db=db,
+        )
+        for chat in chats:
+            hits.append(
+                {
+                    'id': chat.id,
+                    'title': getattr(chat, 'title', '') or '',
+                    'kind': 'conversation',
+                }
+            )
+    except Exception as exc:
+        log.warning('conversation search failed: %s', exc)
+
+    return hits
+
+
+def _asset_original_path(asset: dict, source: dict) -> str:
+    rel = asset.get('rel_path') or ''
+    root = source.get('last_abs_path') or ''
+    if os.path.isabs(rel):
+        return rel
+    return os.path.join(root, rel)
+
+
+def _jail_original(asset: dict, source: dict) -> str:
+    root = source.get('last_abs_path') or ''
+    if not root:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    original = _asset_original_path(asset, source)
+    real = _resolved_relative_to(original, root)
+    if not _path_allowed(str(real)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail='path is outside source root',
+        )
+    return str(real)
+
+
+async def _owned_asset(asset_id: str, user_id: str) -> tuple[dict, dict]:
+    from open_webui.graph._db import get_asset
+
+    await _ensure_graph_db()
+    asset = await get_asset(_parse_asset_id(asset_id))
+    if asset is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    source = await _owned_source(str(asset['source_id']), user_id)
+    return asset, source
+
+
+def _thumb_media_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == '.webp':
+        return 'image/webp'
+    if suffix == '.png':
+        return 'image/png'
+    if suffix in {'.jpg', '.jpeg'}:
+        return 'image/jpeg'
+    guessed, _ = mimetypes.guess_type(str(path))
+    return guessed or 'image/webp'
+
+
+@router.get('/assets/{asset_id}/thumb')
+async def get_asset_thumb(
+    asset_id: str,
+    user=Depends(get_verified_user),
+    w: int = Query(512),
+):
+    from open_webui.graph.thumbs import (
+        GRAPH_THUMBS_DIR,
+        ensure_thumb,
+        placeholder_thumb,
+    )
+
+    asset, source = await _owned_asset(asset_id, user.id)
+    if not is_online(str(source['id'])):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    original = _jail_original(asset, source)
+    if not os.path.isfile(original):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    payload = dict(asset)
+    payload['abs_path'] = original
+    size = 1024 if w >= 1024 else 512
+    thumb: Path | None = None
+    try:
+        generated = await asyncio.to_thread(ensure_thumb, payload, size)
+        if generated is not None:
+            thumb = Path(generated)
+    except Exception:
+        log.exception('ensure_thumb failed asset_id=%s', asset_id)
+        thumb = None
+    kind = str(asset.get('kind') or '').lower()
+    if thumb is None or not thumb.is_file():
+        if kind in ('photo', 'video'):
+            try:
+                thumb = placeholder_thumb()
+            except Exception:
+                log.exception('placeholder_thumb failed asset_id=%s', asset_id)
+                thumb = None
+        if thumb is None or not Path(thumb).is_file():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=ERROR_MESSAGES.NOT_FOUND,
+            )
+    served = _resolved_relative_to(
+        thumb,
+        GRAPH_THUMBS_DIR,
+        forbidden_status=status.HTTP_404_NOT_FOUND,
+    )
+    return FileResponse(str(served), media_type=_thumb_media_type(served))
+
+
+@router.get('/assets/{asset_id}/file')
+async def get_asset_file(
+    asset_id: str,
+    user=Depends(get_verified_user),
+):
+    asset, source = await _owned_asset(asset_id, user.id)
+    if not is_online(str(source['id'])):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    original = _jail_original(asset, source)
+    if not os.path.isfile(original):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    media_type = asset.get('mime') or mimetypes.guess_type(original)[0]
+    return FileResponse(original, media_type=media_type)
+
+
+@router.get('/assets/{asset_id}/exif')
+async def get_asset_exif(
+    asset_id: str,
+    user=Depends(get_verified_user),
+):
+    asset, source = await _owned_asset(asset_id, user.id)
+    if not is_online(str(source['id'])):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    kind = str(asset.get('kind') or '').lower()
+    if kind != 'photo':
+        return {}
+    original = _jail_original(asset, source)
+    if not os.path.isfile(original):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    from open_webui.graph._db import get_photo_exif, save_photo_exif
+    from open_webui.graph.exif_extractor import extract_exif_metadata
+
+    key = f'asset:{_parse_asset_id(asset_id)}'
+    cached = await get_photo_exif(key)
+    if cached:
+        return cached
+    data = await asyncio.to_thread(extract_exif_metadata, original)
+    if data and (len(data) > 1 or data.get('metadata_text')):
+        await save_photo_exif(key, data, data.get('metadata_text'))
+    return data or {}
+
+
+@router.post('/assets/{asset_id}/path')
+async def reveal_asset_path(
+    asset_id: str,
+    user=Depends(get_verified_user),
+):
+    asset, source = await _owned_asset(asset_id, user.id)
+    if not is_online(str(source['id'])):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+    original = _jail_original(asset, source)
+    return {'path': original}
 
 
 class QueryBody(BaseModel):

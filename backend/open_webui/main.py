@@ -391,8 +391,10 @@ async def lifespan(app: FastAPI):
     app.state.periodic_session_pool_cleanup = asyncio.create_task(periodic_session_pool_cleanup())
 
     from open_webui.utils.automations import scheduler_worker_loop
+    from open_webui.graph.sources import presence_monitor
 
     app.state.scheduler_worker_loop = asyncio.create_task(scheduler_worker_loop(app))
+    await presence_monitor.start()
 
     if await Config.get('models.base_models_cache'):
         try:
@@ -476,6 +478,7 @@ async def lifespan(app: FastAPI):
     app.state.periodic_usage_pool_cleanup.cancel()
     app.state.periodic_session_pool_cleanup.cancel()
     app.state.scheduler_worker_loop.cancel()
+    await presence_monitor.stop()
 
     await publish_event(app, EVENTS.SYSTEM_SHUTDOWN_COMPLETED, source='system')
 
