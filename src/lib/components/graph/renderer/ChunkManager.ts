@@ -129,7 +129,6 @@ export class ChunkManager {
     for (const chunk of this._mounted.values()) {
       for (const plane of chunk.planes) {
         if (!plane.mesh.visible) continue;
-        if (plane.node.kind === 'conversation') continue;
         meshes.push(plane.mesh);
       }
     }

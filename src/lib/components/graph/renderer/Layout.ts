@@ -777,8 +777,8 @@ export function buildCanvasLayout(
     if (monthArr) monthArr.push(...extra);
     else photosByBucket.set(monthZ, [...extra]);
   }
-  // Conversations pack in a depth helix down the aisle. Library assets
-  // split even/odd onto left/right walls; gridPosOf stores (col along Z, row along Y).
+  // Photos and conversations pack onto left/right walls by time.
+  // gridPosOf stores (col along Z, row along Y).
   // Nodes can appear in multiple buckets, so keys include cellZ.
   const gridPosOf = new Map<string, { x: number; y: number; worldZ: number }>();
   const wallMetaOf = new Map<string, { cols: number; rows: number }>();
@@ -792,8 +792,7 @@ export function buildCanvasLayout(
     for (const n of bucketNodes) {
       if (seenPack.has(n.id)) continue;
       seenPack.add(n.id);
-      if (isLibraryWallNode(n, classifyKind(n))) wallNodes.push(n);
-      else convNodes.push(n);
+      wallNodes.push(n);
     }
   }
   wallNodes.sort((a, b) => (parseNodeDate(a)?.getTime() ?? 0) - (parseNodeDate(b)?.getTime() ?? 0));
@@ -870,8 +869,8 @@ export function buildCanvasLayout(
     const provider = getProvider(kind);
     if (!provider || !provider.shouldRender(node, ctx)) continue;
     const cellZ = timePlan.cellZOf.get(node.id) ?? i;
-    const onWall = isLibraryWallNode(node, kind);
-    const side = onWall ? (wallSideOf.get(`${node.id}@${cellZ}`) ?? 'L') : undefined;
+    const onWall = wallSideOf.has(node.id);
+    const side = onWall ? (wallSideOf.get(node.id) ?? 'L') : undefined;
     const cellX = onWall
       ? (side === 'R' ? WALL_CELL_X_RIGHT : WALL_CELL_X_LEFT)
       : 0;
@@ -915,11 +914,15 @@ export function buildCanvasLayout(
 
   for (let i = 0; i < provisional.length; i++) {
     const p = provisional[i];
-    const { node, kind, cellY, yaw } = p;
+    const { node, kind, cellY } = p;
     let cellX = p.cellX;
     const cellZ0 = p.cellZ;
-    const onWall = isLibraryWallNode(node, kind);
+    const onWall = wallSideOf.has(node.id);
     const seed = hashStr(node.id);
+    const side = onWall ? (wallSideOf.get(node.id) ?? 'L') : undefined;
+    const yaw = onWall
+      ? (side === 'R' ? WALL_YAW_RIGHT : WALL_YAW_LEFT)
+      : p.yaw;
 
     let localX: number;
     let localY: number;
@@ -927,8 +930,7 @@ export function buildCanvasLayout(
     let cellZ = cellZ0;
     if (onWall) {
       const grid = gridPosOf.get(node.id) ?? { x: 0, y: 0, worldZ: 0 };
-      const side = wallSideOf.get(node.id) ?? 'L';
-      const meta = wallMetaOf.get(side) ?? { cols: 1, rows: 1 };
+      const meta = wallMetaOf.get(side ?? 'L') ?? { cols: 1, rows: 1 };
       const row = grid.y;
       cellX = side === 'R' ? WALL_CELL_X_RIGHT : WALL_CELL_X_LEFT;
       localX = CHUNK_SIZE / 2;
@@ -953,7 +955,10 @@ export function buildCanvasLayout(
     let width: number;
     let height: number;
     if (onWall) {
-      if (typeof pw === 'number' && typeof ph === 'number' && pw > 0 && ph > 0) {
+      if (kind === 'conversation') {
+        width = WALL_TILE_W * 1.12;
+        height = WALL_TILE_W * 0.7;
+      } else if (typeof pw === 'number' && typeof ph === 'number' && pw > 0 && ph > 0) {
         const aspect = pw / ph;
         if (aspect >= 1) {
           width = WALL_TILE_W;
