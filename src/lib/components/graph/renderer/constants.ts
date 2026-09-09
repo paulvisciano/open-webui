@@ -17,7 +17,7 @@ export const RENDER_DISTANCE = 4;
 export const CHUNK_FADE_MARGIN = 1;
 
 /** Maximum camera velocity magnitude (world units / frame at 60fps reference). */
-export const MAX_VELOCITY = 3.2;
+export const MAX_VELOCITY = 1.45;
 
 /**
  * Absolute depth (world units) at which the far depth-fade ramp begins.
@@ -133,13 +133,13 @@ export const SCROLL_MOMENTUM_DECAY = 0.65;
 export const SCROLL_MOMENTUM_WINDOW_MS = 200;
 
 /** Per-frame camera translation when a movement key is held. */
-export const KEYBOARD_SPEED = 0.18;
+export const KEYBOARD_SPEED = 0.12;
 
 /** Lerp factor for smoothing camera position toward velocity target. */
-export const VELOCITY_LERP = 0.16;
+export const VELOCITY_LERP = 0.08;
 
 /** Per-frame decay applied to velocity when no input is active (inertia). */
-export const VELOCITY_DECAY = 0.9;
+export const VELOCITY_DECAY = 0.94;
 
 /**
  * Initial camera Z (distance from the z=0 plane of the canvas).

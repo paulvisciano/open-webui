@@ -197,6 +197,8 @@ export class SceneManager {
   /** Fired when a trackpad (two-finger) scroll is detected; carries accumulated pixel delta. */
   onTimelineScroll?: (delta: number) => void;
 
+  private _playingVideoId: string | null = null;
+
   /**
    * Creates the renderer, camera, scene, shared geometry, and chunk manager,
    * appends the renderer's DOM element to `container`, and attaches input +
@@ -253,7 +255,7 @@ export class SceneManager {
   get basePosY(): number { return this._basePos.y; }
   get basePosZ(): number { return this._basePos.z; }
   get lookYaw(): number { return this._lookYaw; }
-  get facingWall(): boolean { return Math.abs(this._lookYaw) > 0.4; }
+  get facingWall(): boolean { return Math.abs(Math.sin(this._lookYaw)) > 0.5; }
   get minCameraZ(): number { return this._minCameraZ; }
   get maxCameraZ(): number { return this._maxCameraZ; }
   get domElement(): HTMLCanvasElement { return this._renderer.domElement; }
@@ -549,23 +551,40 @@ export class SceneManager {
     let targetY = worldY;
     let targetZ = Math.max(this._minCameraZ, worldZ + INITIAL_CAMERA_Z * 0.5);
     let yawTo = 0;
-    if (node.kind === 'conversation') {
-      targetX = 0;
-      targetY = 0;
-      targetZ = Math.max(this._minCameraZ, Math.min(this._maxCameraZ, worldZ + 160));
-    } else if (node.yaw != null && node.yaw !== 0) {
+    if (node.yaw != null && node.yaw !== 0) {
       targetX = worldX + Math.sign(node.yaw) * viewDist;
       targetY = worldY;
       targetZ = worldZ;
       yawTo = node.yaw;
     }
-    this.beginFly(targetX, targetY, targetZ, 1200, yawTo, 0);
+    this.beginFly(targetX, targetY, targetZ, 1600, yawTo, 0);
+  }
+
+  toggleInlineVideo(nodeId: string, url: string): void {
+    if (this._disposed) return;
+    const plane = this._chunkManager.findPlaneByNodeId(nodeId);
+    if (!plane) return;
+    if (this._playingVideoId === nodeId && plane.isPlayingInline) {
+      plane.stopInline();
+      this._playingVideoId = null;
+      return;
+    }
+    this.stopInlineVideo();
+    plane.playInline(url);
+    this._playingVideoId = nodeId;
+  }
+
+  stopInlineVideo(): void {
+    if (!this._playingVideoId) return;
+    this._chunkManager.findPlaneByNodeId(this._playingVideoId)?.stopInline();
+    this._playingVideoId = null;
   }
 
   /** Return to corridor view: look down −Z, x back to 0, keep current z. */
   resetLook(): void {
     if (this._disposed) return;
-    this.beginFly(0, 0, this._basePos.z, 1200, 0, 0);
+    this.stopInlineVideo();
+    this.beginFly(0, 0, this._basePos.z, 1600, 0, 0);
   }
 
   dashAlongLook(): void {
@@ -576,8 +595,8 @@ export class SceneManager {
     if (dir.lengthSq() < 1e-8) dir.set(0, 0, -1);
     dir.normalize();
     const dist = 560;
-    const aisle = CHUNK_SIZE * 1.15;
-    const x = Math.max(-aisle, Math.min(aisle, this._basePos.x + dir.x * dist));
+    const limit = this.hallInsideX();
+    const x = Math.max(-limit, Math.min(limit, this._basePos.x + dir.x * dist));
     const z = Math.max(this._minCameraZ, Math.min(this._maxCameraZ, this._basePos.z + dir.z * dist));
     this.beginFly(x, this._basePos.y, z, 360, this._lookYaw, this._lookPitch);
   }
@@ -608,12 +627,13 @@ export class SceneManager {
     if (this._flyTo === null) return false;
     this._flyElapsed += deltaMs;
     const t = Math.min(1, this._flyElapsed / this._flyDuration);
-    const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    const eased = t * t * t * (t * (t * 6 - 15) + 10);
     this._basePos.x = this._flyFrom.x + (this._flyTo.x - this._flyFrom.x) * eased;
     this._basePos.y = this._flyFrom.y + (this._flyTo.y - this._flyFrom.y) * eased;
     this._basePos.z = this._flyFrom.z + (this._flyTo.z - this._flyFrom.z) * eased;
     this._lookYaw = this._yawFrom + (this._yawTo - this._yawFrom) * eased;
     this._lookPitch = this._pitchFrom + (this._pitchTo - this._pitchFrom) * eased;
+    this.clampInsideHall();
     if (t >= 1) {
       this._flyTo = null;
       this._lookYaw = this._yawTo;
@@ -712,7 +732,7 @@ export class SceneManager {
     right.rotation.y = -Math.PI / 2;
 
     const floorMat = new THREE.MeshBasicMaterial({
-      color: 0x0d0c0a,
+      color: 0x1c1610,
       side: THREE.DoubleSide,
       fog: true,
     });
@@ -725,19 +745,6 @@ export class SceneManager {
     this._hall.add(left, right, floor);
 
     const floorY = -hallH / 2 + 8;
-    const spine = new THREE.Mesh(
-      new THREE.PlaneGeometry(2.2, len),
-      new THREE.MeshBasicMaterial({
-        color: 0x00d4ff,
-        transparent: true,
-        opacity: 0.16,
-        fog: true,
-        side: THREE.DoubleSide,
-      }),
-    );
-    spine.rotation.x = -Math.PI / 2;
-    spine.position.set(0, floorY + 0.25, mid);
-    this._hall.add(spine);
 
     const days = new Map<string, { z: number; count: number; date: Date }>();
     for (const n of nodes) {
@@ -776,7 +783,7 @@ export class SceneManager {
     return `${months[d.getMonth()]} ${d.getDate()}  ·  ${d.getFullYear()}`;
   }
 
-  private _makeFloorDateMarker(d: Date, z: number, floorY: number, wallX: number): THREE.Group {
+  private _makeFloorDateMarker(d: Date, z: number, floorY: number, _wallX: number): THREE.Group {
     const text = this._floorDateText(d);
     const canvas = document.createElement('canvas');
     canvas.width = 768;
@@ -785,8 +792,8 @@ export class SceneManager {
     const group = new THREE.Group();
     if (ctx) {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.fillStyle = 'rgba(0,212,255,0.85)';
-      ctx.font = '600 48px "JetBrains Mono", ui-monospace, monospace';
+      ctx.fillStyle = 'rgba(196,168,112,0.55)';
+      ctx.font = '500 44px "Fraunces", Georgia, serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       if ('letterSpacing' in ctx) {
@@ -806,18 +813,6 @@ export class SceneManager {
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(42, 7), mat);
     mesh.position.set(0, floorY + 6, z);
     group.add(mesh);
-
-    const lineMat = new THREE.MeshBasicMaterial({
-      color: 0x00d4ff,
-      transparent: true,
-      opacity: 0.18,
-      fog: true,
-      side: THREE.DoubleSide,
-    });
-    const line = new THREE.Mesh(new THREE.PlaneGeometry(wallX * 1.55, 0.9), lineMat);
-    line.rotation.x = -Math.PI / 2;
-    line.position.set(0, floorY + 0.35, z);
-    group.add(line);
     return group;
   }
 
@@ -960,8 +955,10 @@ export class SceneManager {
   }
 
   private applyLookDelta(dx: number, dy: number): void {
-    this._lookYaw -= dx * 0.0045;
-    this._lookPitch -= dy * 0.0035;
+    this._lookYaw -= dx * 0.0026;
+    if (this._lookYaw > Math.PI) this._lookYaw -= Math.PI * 2;
+    if (this._lookYaw < -Math.PI) this._lookYaw += Math.PI * 2;
+    this._lookPitch -= dy * 0.002;
     if (this._lookPitch > 0.7) this._lookPitch = 0.7;
     if (this._lookPitch < -0.7) this._lookPitch = -0.7;
     this._userMoved = true;
@@ -984,14 +981,20 @@ export class SceneManager {
     this._userMoved = true;
   }
 
-  private clampWallDistance(): void {
-    const wallX = this._lookYaw > 0 ? -CHUNK_SIZE * 1.5 : CHUNK_SIZE * 1.5;
-    const minDist = 50;
-    const maxDist = 900;
-    if (this._lookYaw > 0) {
-      this._basePos.x = Math.min(wallX + maxDist, Math.max(wallX + minDist, this._basePos.x));
-    } else {
-      this._basePos.x = Math.max(wallX - maxDist, Math.min(wallX - minDist, this._basePos.x));
+  private hallInsideX(): number {
+    return CHUNK_SIZE * 1.5 + 6 - 18;
+  }
+
+  private clampInsideHall(): void {
+    const limit = this.hallInsideX();
+    if (this._basePos.x > limit) {
+      this._basePos.x += (limit - this._basePos.x) * 0.28;
+      this._velocity.x *= 0.45;
+      if (this._targetVel.x > 0) this._targetVel.x = 0;
+    } else if (this._basePos.x < -limit) {
+      this._basePos.x += (-limit - this._basePos.x) * 0.28;
+      this._velocity.x *= 0.45;
+      if (this._targetVel.x < 0) this._targetVel.x = 0;
     }
   }
 
@@ -999,7 +1002,7 @@ export class SceneManager {
   private applyKeyboard(): void {
     const k = this._keys;
     let moved = false;
-    const walk = KEYBOARD_SPEED * 4.5;
+    const walk = KEYBOARD_SPEED * 2.4;
     const yaw = this._lookYaw;
     const fx = -Math.sin(yaw);
     const fz = -Math.cos(yaw);
@@ -1048,17 +1051,13 @@ export class SceneManager {
     this._basePos.y += this._velocity.y;
     this._basePos.z += this._velocity.z;
 
-    const aisle = CHUNK_SIZE * 1.15;
-    if (this._basePos.x > aisle) this._basePos.x = aisle;
-    if (this._basePos.x < -aisle) this._basePos.x = -aisle;
+    this.clampInsideHall();
     if (this._basePos.y > 80) this._basePos.y = 80;
     if (this._basePos.y < -80) this._basePos.y = -80;
 
     if (this._basePos.z < this._minCameraZ) this._basePos.z = this._minCameraZ;
     if (this._basePos.z > this._maxCameraZ) this._basePos.z = this._maxCameraZ;
-    if (this.facingWall) {
-      this.clampWallDistance();
-    } else if (this._pinchActive && this._pinchMinZ !== null && this._pinchMaxZ !== null) {
+    if (this._pinchActive && this._pinchMinZ !== null && this._pinchMaxZ !== null) {
       if (this._basePos.z < this._pinchMinZ) this._basePos.z = this._pinchMinZ;
       if (this._basePos.z > this._pinchMaxZ) this._basePos.z = this._pinchMaxZ;
     }
