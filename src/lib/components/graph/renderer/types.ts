@@ -31,9 +31,10 @@ export interface PlaneConfig {
 }
 
 /** Async-resolved content maps passed to `buildCanvasFields`. Mirrors
- *  the `$state` maps in `graph.svelte.ts` (photoImages). */
+ *  the `$state` maps in `graph.svelte.ts` (photoImages, sourceOnline). */
 export interface BuildCtx {
   readonly photoImages: Record<string, string>;
+  readonly sourceOnline: Record<string, boolean>;
 }
 
 /**
@@ -76,6 +77,8 @@ export interface CanvasNode {
   readonly width: number;
   /** Plane height in world units. */
   readonly height: number;
+  /** Y-rotation in radians. Wall tiles: +π/2 (left, faces +X), −π/2 (right, faces −X). */
+  readonly yaw?: number;
 }
 
 /** String key uniquely identifying a chunk: `${cellX},${cellY},${cellZ}`. */

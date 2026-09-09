@@ -4,12 +4,18 @@
 	import type { Writable } from 'svelte/store';
 	import type { i18n as i18nType } from 'i18next';
 
-	import { showSidebar, mobile } from '$lib/stores';
+	import { showSidebar, mobile, showSearch } from '$lib/stores';
 	import { createNewChat, getChatList, deleteChatById } from '$lib/apis/chats';
-	import { processImage } from '$lib/apis/graph';
+	import {
+		browsePath,
+		attachSource,
+		startScan
+	} from '$lib/apis/graph';
+	import type { GraphBrowseEntry } from '$lib/apis/graph';
 	import { toast } from 'svelte-sonner';
 
 	import CanvasView from './CanvasView.svelte';
+	import GraphSearch from './GraphSearch.svelte';
 	import Chat from '$lib/components/chat/Chat.svelte';
 	import GraphVoiceOverlay from './GraphVoiceOverlay.svelte';
 	import VoiceWaveform from './VoiceWaveform.svelte';
@@ -17,6 +23,7 @@
 	import { VoiceCallService } from '$lib/components/chat/MessageInput/VoiceCallService.svelte';
 
 	import { graphStore } from './stores/graph.svelte';
+	import { scanProgressStore, countsFromScanResponse } from './stores/scan-progress.svelte';
 	import type { KGNode } from './constants';
 	import { createSheetDrag, type SheetSnap } from './composables/use-sheet-drag';
 
@@ -37,7 +44,16 @@
 	let sheetSnap: SheetSnap = $state('peek');
 	let chatLoading = $state(false);
 	let orbOptionsOpen = $state(false);
+	let graphSearchOpen = $state(false);
+	let corridorDate = $state<string | null>(null);
+	let corridorTimelineOpen = $state(false);
 	let orbCloseTimer: ReturnType<typeof setTimeout> | null = null;
+
+	$effect(() => {
+		if (!$showSearch) return;
+		showSearch.set(false);
+		graphSearchOpen = !graphSearchOpen;
+	});
 
 	const orbScheduleClose = () => {
 		if (orbCloseTimer) clearTimeout(orbCloseTimer);
@@ -62,43 +78,104 @@
 	} | null = null;
 	let voiceReadyResolve: (() => void) | null = null;
 
-	// ── File upload (graph ingestion) ────────────────────────────────
-	let fileInput: HTMLInputElement | undefined = $state();
-	let uploading = $state(false);
+	// ── Folder attach (index in place; not the copy+VLM pipeline) ──
+	const DEFAULT_FOLDER_PATH = '/Users/paulvisciano/Desktop/Takeout';
+	let folderSheetOpen = $state(false);
+	let folderPath = $state(DEFAULT_FOLDER_PATH);
+	let folderPathInput: HTMLInputElement | undefined = $state();
+	let browseEntries = $state<GraphBrowseEntry[]>([]);
+	let browseLoading = $state(false);
+	let browseError = $state('');
+	let attaching = $state(false);
+	const displayedSources = $derived.by(() =>
+		graphStore.sources.map((s) => ({
+			...s,
+			online: graphStore.sourceOnline[s.id] ?? s.online
+		}))
+	);
 
-	const openFilePicker = () => {
-		fileInput?.click();
+	const graphToken = () =>
+		typeof localStorage !== 'undefined' ? (localStorage.token ?? '') : '';
+
+	const folderErrText = (err: unknown, fallback: string) => {
+		if (typeof err === 'string' && err) return err;
+		if (err instanceof Error && err.message) return err.message;
+		return fallback;
 	};
 
-	const handleFileChange = async (e: Event) => {
-		const input = e.target as HTMLInputElement;
-		const files = Array.from(input.files ?? []);
-		if (files.length === 0) return;
-		uploading = true;
+	const runBrowse = async (path: string) => {
+		browseLoading = true;
+		browseError = '';
 		try {
-			const token = localStorage.token;
-			for (const file of files) {
-				await processImage(token, file);
-			}
-			toast.success(
-				$i18n ? $i18n.t('Uploaded {{count}} image(s) to the graph', { count: files.length }) : ''
-			);
-			if (graphStore.nodes.length === 0) {
-				await graphStore.loadGraph(token);
-				await graphStore.loadConversations(token);
-			}
+			browseEntries = await browsePath(graphToken(), path);
 		} catch (err) {
-			console.error('[graph] image upload failed', err);
-			toast.error(err instanceof Error ? err.message : 'Image upload failed');
+			browseEntries = [];
+			browseError = folderErrText(err, 'Cannot browse path');
 		} finally {
-			uploading = false;
-			input.value = '';
+			browseLoading = false;
+		}
+	};
+
+	const closeFolderSheet = () => {
+		folderSheetOpen = false;
+		browseError = '';
+	};
+
+	const openFolderSheet = async () => {
+		folderSheetOpen = true;
+		if (!folderPath.trim()) folderPath = DEFAULT_FOLDER_PATH;
+		await runBrowse(folderPath.trim());
+		await tick();
+		folderPathInput?.focus();
+		folderPathInput?.select();
+	};
+
+	const parentOf = (path: string) => {
+		const trimmed = path.replace(/\/+$/, '');
+		if (!trimmed || trimmed === '/') return '';
+		const idx = trimmed.lastIndexOf('/');
+		if (idx <= 0) return '/';
+		return trimmed.slice(0, idx);
+	};
+
+	const enterBrowsePath = async (path: string) => {
+		folderPath = path;
+		await runBrowse(path);
+	};
+
+	const confirmAttachFolder = async () => {
+		const absPath = folderPath.trim();
+		if (!absPath || attaching) return;
+		attaching = true;
+		browseError = '';
+		let startedId = '';
+		try {
+			const source = await attachSource(graphToken(), absPath);
+			if (!source?.id) throw new Error('Attach failed');
+			startedId = source.id;
+			scanProgressStore.start(source.id, source.name || absPath);
+			const scanRes = await startScan(graphToken(), source.id);
+			scanProgressStore.applyCounts(source.id, countsFromScanResponse(scanRes));
+			graphStore.sources = [source, ...graphStore.sources.filter((s) => s.id !== source.id)];
+			graphStore.sourceOnline = { ...graphStore.sourceOnline, [source.id]: source.online };
+			graphStore.startScanPoll(graphToken, source.id);
+			toast.success(`Indexing ${source.name || absPath}`);
+			closeFolderSheet();
+		} catch (err) {
+			console.error('[graph] attach folder failed', err);
+			const msg = folderErrText(err, 'Attach failed');
+			if (startedId) scanProgressStore.fail(startedId, msg);
+			browseError = msg;
+			toast.error(msg);
+		} finally {
+			attaching = false;
 		}
 	};
 
 	// ── Conversation selection ───────────────────────────────────────
 	const openChat = async (chatId: string) => {
 		if (!chatId) return;
+		showSidebar.set(false);
 		chatLoading = true;
 		selectedChatId = chatId;
 		chatDraftKey = '';
@@ -112,6 +189,7 @@
 	};
 
 	const startNewChat = async () => {
+		showSidebar.set(false);
 		selectedChatId = '';
 		chatDraftKey = `${Date.now()}`;
 		sheetSnap = 'peek';
@@ -197,6 +275,21 @@
 		sheetSnap = 'peek';
 		graphStore.setActiveConversation('');
 	};
+
+	$effect(() => {
+		if ($showSidebar && showChatPanel) {
+			showChatPanel = false;
+		}
+	});
+
+	$effect(() => {
+		const id = graphStore.pendingOpenChatId;
+		if (!id) return;
+		queueMicrotask(() => {
+			if (graphStore.pendingOpenChatId === id) graphStore.pendingOpenChatId = null;
+		});
+		void openChat(id);
+	});
 
 	$effect(() => {
 		if (!showChatPanel || !chatSheetEl || !$mobile || voiceActive) return;
@@ -287,7 +380,13 @@
 	let panelClickStart: { x: number; y: number } | null = null;
 
 	const handleCanvasPointerDown = (e: PointerEvent) => {
-		if (!showChatPanel || e.target.closest('.chat-side-panel')) return;
+		const target = e.target as HTMLElement;
+		if (
+			target.closest(
+				'.graph-folder-hud, .graph-search-host, .graph-search-scrim, .graph-folder-sheet, .graph-folder-backdrop, .graph-menu-btn, .chat-collapsed-orb-host, .chat-side-panel'
+			)
+		)
+			return;
 		panelClickStart = { x: e.clientX, y: e.clientY };
 	};
 
@@ -296,12 +395,26 @@
 		const dx = Math.abs(e.clientX - panelClickStart.x);
 		const dy = Math.abs(e.clientY - panelClickStart.y);
 		panelClickStart = null;
-		if (dx < 6 && dy < 6) {
-			closeChatPanel();
-		}
+		if (dx >= 6 || dy >= 6) return;
+		if ($showSidebar) showSidebar.set(false);
+		if (showChatPanel) closeChatPanel();
 	};
 
 	const handleKeydown = (e: KeyboardEvent) => {
+		if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 'f' || e.key === 'F')) {
+			e.preventDefault();
+			e.stopPropagation();
+			graphSearchOpen = true;
+			return;
+		}
+		if (e.key === 'Escape' && graphSearchOpen) {
+			graphSearchOpen = false;
+			return;
+		}
+		if (e.key === 'Escape' && folderSheetOpen) {
+			closeFolderSheet();
+			return;
+		}
 		if (e.key === 'Escape' && showChatPanel) {
 			if (voiceActive) {
 				endVoiceChat();
@@ -311,6 +424,7 @@
 		}
 		if (e.key === ' ') {
 			const target = e.target as HTMLElement;
+			if (folderSheetOpen || graphSearchOpen) return;
 			if (
 				target.tagName !== 'INPUT' &&
 				target.tagName !== 'TEXTAREA' &&
@@ -330,33 +444,41 @@
 	onMount(async () => {
 		window.addEventListener('keydown', handleKeydown);
 		await refreshRecentChats();
+		graphStore.startPresencePoll(graphToken);
 	});
 
 	onDestroy(() => {
 		window.removeEventListener('keydown', handleKeydown);
+		graphStore.stopPresencePoll();
+		graphStore.stopScanPoll();
 	});
 </script>
 
 <div
-	class="graph-page relative flex w-full h-screen max-h-[100dvh] overflow-hidden max-w-full"
+	class="graph-page absolute inset-0 flex w-full h-screen max-h-[100dvh] overflow-hidden max-w-full"
 >
 	<div
-		class="relative flex-1 min-w-0 h-full"
+		class="absolute inset-0"
 		onpointerdown={handleCanvasPointerDown}
 		onpointerup={handleCanvasPointerUp}
 	>
 		<CanvasView
 			onselectconversation={openChat}
 			onqueryAbout={queryAbout}
+			bind:dateLabel={corridorDate}
+			bind:timelineOpen={corridorTimelineOpen}
 		/>
 
-		{#if !$showSidebar && !(voiceStarting || (voiceActive && voiceService))}
+		{#if !$showSidebar && !showChatPanel && !(voiceStarting || (voiceActive && voiceService))}
 			<button
 				type="button"
 				id="sidebar-toggle-button"
 				class="graph-menu-btn"
 				aria-label="Open menu"
-				onclick={() => showSidebar.set(true)}
+				onclick={() => {
+					showChatPanel = false;
+					showSidebar.set(true);
+				}}
 			>
 				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
 					<line x1="4" y1="7" x2="20" y2="7" />
@@ -366,97 +488,225 @@
 			</button>
 		{/if}
 
+		{#if displayedSources.length > 0}
+		<div class="graph-folder-hud" data-testid="graph-source-list">
+			<ul class="graph-source-list">
+				{#each displayedSources as source (source.id)}
+					<li
+						class="graph-source-row"
+						class:is-offline={!source.online}
+						class:is-indexing={graphStore.scanningSourceIds.has(source.id)}
+						data-testid="graph-source-pill"
+						title={source.lastAbsPath || source.name}
+					>
+						<span
+							class="graph-source-status {source.online ? 'is-online' : 'is-offline'}"
+							aria-label={graphStore.scanningSourceIds.has(source.id) ? 'indexing' : source.online ? 'online' : 'offline'}
+						></span>
+						<span class="graph-source-name">{source.name || source.lastAbsPath || source.id}</span>
+						{#if graphStore.scanningSourceIds.has(source.id)}
+							<span class="graph-source-label">Indexing</span>
+						{/if}
+					</li>
+				{/each}
+			</ul>
+		</div>
+		{/if}
+
+		{#if folderSheetOpen}
+			<button
+				type="button"
+				class="graph-folder-backdrop"
+				aria-label="Close attach folder"
+				onclick={closeFolderSheet}
+			></button>
+			<div
+				class="graph-folder-sheet"
+				data-testid="graph-folder-sheet"
+				role="dialog"
+				aria-modal="true"
+				aria-labelledby="graph-folder-title"
+				transition:fly={{ y: 10, duration: 220 }}
+			>
+				<header class="graph-folder-head">
+					<div>
+						<p class="graph-folder-kicker">Index in place</p>
+						<h2 id="graph-folder-title">Attach folder</h2>
+					</div>
+					<button type="button" class="graph-folder-x" aria-label="Close" onclick={closeFolderSheet}>
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+							<path stroke-linecap="round" d="M6 6l12 12M18 6L6 18" />
+						</svg>
+					</button>
+				</header>
+				<p class="graph-folder-hint">Walk the disk from the server. Files stay on disk — nothing is copied.</p>
+				<form
+					class="graph-folder-pathrow"
+					onsubmit={(e) => {
+						e.preventDefault();
+						runBrowse(folderPath.trim());
+					}}
+				>
+					<input
+						bind:this={folderPathInput}
+						bind:value={folderPath}
+						class="graph-folder-path"
+						data-testid="graph-folder-path"
+						type="text"
+						placeholder="/Users/paulvisciano/Desktop/Takeout"
+						spellcheck="false"
+						autocomplete="off"
+						aria-label="Folder path"
+					/>
+					<button type="submit" class="graph-folder-browse" data-testid="graph-folder-browse" disabled={browseLoading}>
+						{browseLoading ? '…' : 'Browse'}
+					</button>
+				</form>
+				<div class="graph-folder-crumb">
+					<button
+						type="button"
+						class="graph-folder-up"
+						disabled={!folderPath.trim()}
+						onclick={() => enterBrowsePath(parentOf(folderPath.trim()))}
+					>
+						Up
+					</button>
+					<code>{folderPath.trim() || 'roots'}</code>
+				</div>
+				<div class="graph-folder-list" data-testid="graph-folder-list">
+					{#if browseLoading}
+						<div class="graph-folder-empty">Listing…</div>
+					{:else if browseEntries.length === 0}
+						<div class="graph-folder-empty">{browseError ? '' : 'No entries'}</div>
+					{:else}
+						{#each browseEntries as entry (entry.path)}
+							<button
+								type="button"
+								class="graph-folder-entry {entry.isDir ? 'is-dir' : 'is-file'}"
+								disabled={!entry.isDir}
+								onclick={() => entry.isDir && enterBrowsePath(entry.path)}
+							>
+								<span class="graph-folder-entry-icon" aria-hidden="true">{entry.isDir ? '▸' : '·'}</span>
+								<span class="graph-folder-entry-name">{entry.name}</span>
+							</button>
+						{/each}
+					{/if}
+				</div>
+				{#if browseError}
+					<p class="graph-folder-error" data-testid="graph-folder-error">{browseError}</p>
+				{/if}
+				<footer class="graph-folder-foot">
+					<button type="button" class="graph-folder-cancel" onclick={closeFolderSheet}>Cancel</button>
+					<button
+						type="button"
+						class="graph-folder-confirm"
+						data-testid="graph-folder-confirm"
+						disabled={attaching || !folderPath.trim()}
+						onclick={confirmAttachFolder}
+					>
+						{attaching ? 'Attaching…' : 'Attach & scan'}
+					</button>
+				</footer>
+			</div>
+		{/if}
+
 		{#if voiceStarting || (voiceActive && voiceService)}
 			<div class="voice-stage">
 				<div class="voice-vignette" aria-hidden="true"></div>
 				<div class="voice-hero">
-					<button
-						type="button"
-						class="voice-circle {voiceService?.loading || voiceService?.transcribing ? 'thinking' : ''} {voiceService?.speaking ? 'recording' : ''} {voiceService?.assistantSpeaking ? 'speaking' : ''}"
-						aria-label={voiceService?.statusText ?? 'Starting microphone'}
-						onclick={() => {
-							if (voiceService?.assistantSpeaking) voiceService.stopAllAudio();
-						}}
-					>
-						<VoiceWaveform
-							rms={voiceService?.speaking ? voiceService.visualRms : 0}
-							mode={voiceService?.speaking ? 'user' : voiceService?.assistantSpeaking ? 'assistant' : 'idle'}
-						/>
-					</button>
 					<p class="voice-status">{voiceStarting && !voiceService ? 'Starting microphone…' : voiceService?.statusText}</p>
 					{#if voiceService}
 						<GraphVoiceOverlay service={voiceService} />
 					{/if}
 				</div>
-				<div class="voice-dock">
-					{#if voiceService}
-						<button
-							class="voice-ctrl {voiceService.muted ? 'muted' : ''}"
-							onclick={() => voiceService.toggleMute()}
-							aria-label={voiceService.muted ? 'Unmute' : 'Mute'}
-						>
-							{#if voiceService.muted}
-								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="size-5">
-									<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z"/>
-									<line x1="3" y1="3" x2="21" y2="21" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-								</svg>
-							{:else}
-								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="size-5">
-									<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z"/>
-								</svg>
-							{/if}
-						</button>
-						<button
-							class="voice-mic {voiceService.speaking ? 'recording' : ''} {voiceService.micReady ? 'live' : ''}"
-							onclick={() => {
-								if (voiceService.assistantSpeaking) voiceService.stopAllAudio();
-							}}
-							aria-label={voiceService.statusText}
-						>
-							{#if voiceService.loading || voiceService.transcribing}
-								<svg class="voice-spinner" viewBox="0 0 24 24" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
-									<circle class="spq" cx="4" cy="12" r="3" />
-									<circle class="spq spo" cx="12" cy="12" r="3" />
-									<circle class="spq spz" cx="20" cy="12" r="3" />
-								</svg>
-							{:else}
-								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
-							{/if}
-						</button>
-						<button class="voice-stop" onclick={endVoiceChat} aria-label="Stop">Stop</button>
-					{:else}
-						<button class="voice-mic" disabled aria-label="Starting microphone">
-							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
-						</button>
-					{/if}
-				</div>
 			</div>
 		{/if}
 
-		{#if !(voiceStarting || (voiceActive && voiceService))}
+		<GraphSearch bind:open={graphSearchOpen} onselect={openChat} />
+		<div class="graph-toolbar">
+			{#if corridorDate}
+				<button
+					type="button"
+					class="graph-toolbar-date"
+					class:open={corridorTimelineOpen}
+					aria-label="Navigate to date"
+					aria-expanded={corridorTimelineOpen}
+					data-testid="timeline-bar"
+					onclick={() => (corridorTimelineOpen = !corridorTimelineOpen)}
+				>
+					<span>{corridorDate}</span>
+					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+						<path d="M6 15l6-6 6 6" />
+					</svg>
+				</button>
+			{/if}
+			<button
+				type="button"
+				class="graph-toolbar-search"
+				data-testid="graph-search"
+				aria-label="Search"
+				onclick={() => (graphSearchOpen = true)}
+			>
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<circle cx="11" cy="11" r="7" />
+					<path d="M20 20l-3-3" />
+				</svg>
+			</button>
+		{#if voiceStarting || (voiceActive && voiceService)}
+			<div class="voice-dock">
+				{#if voiceService}
+					<button
+						class="voice-ctrl {voiceService.muted ? 'muted' : ''}"
+						onclick={() => voiceService.toggleMute()}
+						aria-label={voiceService.muted ? 'Unmute' : 'Mute'}
+					>
+						{#if voiceService.muted}
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="size-5">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z"/>
+								<line x1="3" y1="3" x2="21" y2="21" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+							</svg>
+						{:else}
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" class="size-5">
+								<path stroke-linecap="round" stroke-linejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3Z"/>
+							</svg>
+						{/if}
+					</button>
+					<div class="voice-pulse {voiceService.speaking ? 'recording' : ''} {voiceService.assistantSpeaking ? 'speaking' : ''}">
+						<VoiceWaveform
+							rms={voiceService?.speaking ? voiceService.visualRms : 0}
+							mode={voiceService?.speaking ? 'user' : voiceService?.assistantSpeaking ? 'assistant' : 'idle'}
+						/>
+					</div>
+					<button class="voice-stop" onclick={endVoiceChat} aria-label="Stop">Stop</button>
+				{:else}
+					<div class="voice-pulse" aria-hidden="true"></div>
+					<button class="voice-stop" disabled>…</button>
+				{/if}
+			</div>
+		{:else}
 		<div class="chat-collapsed-orb-host">
 				<div class="chat-collapsed-orb">
 					<div
 						class="chat-orb-add"
+						data-testid="graph-add-folder"
 						style:opacity={orbOptionsOpen ? '1' : '0'}
 						style:transform={orbOptionsOpen ? 'translateY(0) scale(1)' : 'translateY(20px) scale(0.9)'}
 						style:pointer-events={orbOptionsOpen ? 'auto' : 'none'}
 						role="button"
 						tabindex="0"
-						aria-label="Add images"
-						onclick={(e) => { e.stopPropagation(); orbOptionsOpen = false; openFilePicker(); }}
-						onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); orbOptionsOpen = false; openFilePicker(); } }}
+						aria-label="Add folder"
+						onclick={(e) => { e.stopPropagation(); orbOptionsOpen = false; openFolderSheet(); }}
+						onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); orbOptionsOpen = false; openFolderSheet(); } }}
 						onmouseenter={orbCancelClose}
 						onmouseleave={orbScheduleClose}
 					>
 						<div class="coa-icon">
-							{#if uploading}
-								<Spinner className="size-4" />
-							{:else}
-								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
-							{/if}
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+								<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+								<path d="M12 11v6M9 14h6" />
+							</svg>
 						</div>
-						<span>Add images</span>
+						<span>Add folder</span>
 					</div>
 
 					<div
@@ -492,15 +742,7 @@
 				</div>
 		</div>
 		{/if}
-
-		<input
-			bind:this={fileInput}
-			type="file"
-			accept="image/*"
-			multiple
-			class="hidden"
-			onchange={handleFileChange}
-		/>
+		</div>
 	</div>
 
 	{#if showChatPanel && $mobile && !voiceActive}
@@ -510,7 +752,7 @@
 	{#if showChatPanel}
 		<div
 			bind:this={chatSheetEl}
-			class="chat-side-panel flex flex-col bg-white dark:bg-gray-900 border-gray-100 dark:border-gray-800/50 z-30 {voiceActive ? 'voice-hide' : ''} {$mobile ? 'chat-sheet' : ''} {sheetSnap === 'full' ? 'sheet-expanded' : ''}"
+			class="chat-side-panel graph-chat-panel flex flex-col z-30 {voiceActive ? 'voice-hide' : ''} {$mobile ? 'chat-sheet' : ''} {sheetSnap === 'full' ? 'sheet-expanded' : ''}"
 			style={voiceActive
 				? 'display: none;'
 				: $mobile
@@ -561,21 +803,23 @@
 <style>
 	.graph-menu-btn {
 		position: absolute;
-		top: calc(0.7rem + env(safe-area-inset-top, 0px));
-		left: 0.7rem;
+		top: calc(20px + env(safe-area-inset-top, 0px));
+		right: 0.7rem;
 		z-index: 50;
-		width: 44px;
-		height: 44px;
+		width: 40px;
+		height: 40px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		border: 0;
-		border-radius: 12px;
-		background: oklch(16% 0.02 255 / 70%);
-		backdrop-filter: blur(16px) saturate(1.3);
-		-webkit-backdrop-filter: blur(16px) saturate(1.3);
+		border: 1px solid oklch(82% 0.14 210 / 28%);
+		border-radius: 100px;
+		background: oklch(10% 0.02 255 / 82%);
+		backdrop-filter: blur(24px) saturate(1.5);
+		-webkit-backdrop-filter: blur(24px) saturate(1.5);
 		color: oklch(92% 0.01 210);
-		box-shadow: 0 8px 24px oklch(0% 0 0 / 35%);
+		box-shadow:
+			0 8px 28px oklch(0% 0 0 / 45%),
+			0 0 0 1px oklch(50% 0.03 255 / 10%);
 		cursor: pointer;
 	}
 	.graph-menu-btn svg {
@@ -583,12 +827,418 @@
 		height: 22px;
 	}
 
-	.chat-collapsed-orb-host {
+	.graph-folder-hud,
+	.graph-folder-sheet,
+	.graph-folder-backdrop {
+		--folder-bg: var(--color-cyber-bg, #0a0e17);
+		--folder-surface: var(--color-cyber-surface, #111827);
+		--folder-surface-2: var(--color-cyber-surface-2, #1a2235);
+		--folder-border: var(--color-cyber-border, #1e2d45);
+		--folder-text: var(--color-cyber-text, #c8d6e5);
+		--folder-dim: var(--color-cyber-text-dim, #5a6b80);
+		--folder-cyan: var(--color-cyber-cyan, #00d4ff);
+		--folder-cyan-dim: var(--color-cyber-cyan-dim, #007a99);
+		--folder-green: var(--color-cyber-green, #00ff88);
+		--folder-red: var(--color-cyber-red, #ff3366);
+		font-family: var(--font-sans);
+	}
+
+	.graph-folder-hud {
 		position: absolute;
-		left: 50%;
+		left: 16px;
+		bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+		top: auto;
+		z-index: 40;
+		display: flex;
+		flex-direction: column;
+		align-items: stretch;
+		max-width: min(240px, calc(100% - 8rem));
+		pointer-events: auto;
+		padding: 8px 10px;
+		border-radius: 16px;
+		background: oklch(10% 0.02 255 / 72%);
+		backdrop-filter: blur(24px) saturate(1.4);
+		-webkit-backdrop-filter: blur(24px) saturate(1.4);
+		box-shadow:
+			0 8px 28px oklch(0% 0 0 / 40%),
+			0 0 0 1px oklch(50% 0.03 255 / 10%);
+	}
+
+	@media (max-width: 768px) {
+		.graph-folder-hud {
+			bottom: calc(88px + env(safe-area-inset-bottom, 0px));
+			max-width: calc(100% - 7rem);
+		}
+	}
+
+	.graph-source-list {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+	.graph-source-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-width: 0;
+		padding: 4px 2px;
+		color: oklch(88% 0.01 210);
+		font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
+		font-size: 11px;
+		line-height: 1.2;
+		letter-spacing: 0.02em;
+	}
+	.graph-source-row.is-offline {
+		opacity: 0.45;
+	}
+	.graph-source-status {
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		flex-shrink: 0;
+	}
+	.graph-source-status.is-online {
+		background: var(--folder-green);
+		box-shadow: 0 0 8px color-mix(in srgb, var(--folder-green) 70%, transparent);
+	}
+	.graph-source-row.is-indexing .graph-source-status {
+		animation: source-pulse 1.2s ease-in-out infinite;
+	}
+	.graph-source-status.is-offline {
+		background: var(--folder-dim);
+		box-shadow: none;
+	}
+	.graph-source-name {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-weight: 500;
+	}
+	.graph-source-label {
+		margin-left: auto;
+		color: oklch(82% 0.14 210 / 80%);
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		font-size: 9px;
+		flex-shrink: 0;
+	}
+	@keyframes source-pulse {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0.35; }
+	}
+
+	.graph-folder-backdrop {
+		position: absolute;
+		inset: 0;
+		z-index: 41;
+		border: 0;
+		background: color-mix(in srgb, var(--folder-bg) 45%, transparent);
+		cursor: pointer;
+	}
+
+	.graph-folder-sheet {
+		position: absolute;
+		top: calc(4.2rem + env(safe-area-inset-top, 0px));
+		left: 0.7rem;
+		z-index: 42;
+		display: flex;
+		flex-direction: column;
+		width: min(420px, calc(100% - 1.4rem));
+		max-height: calc(100% - 8.5rem);
+		padding: 16px;
+		border-radius: 16px;
+		border: 1px solid color-mix(in srgb, var(--folder-cyan) 22%, var(--folder-border));
+		background: color-mix(in srgb, var(--folder-bg) 92%, var(--folder-surface));
+		box-shadow:
+			0 0 0 1px color-mix(in srgb, var(--folder-cyan) 8%, transparent),
+			0 24px 48px color-mix(in srgb, var(--folder-bg) 70%, transparent);
+		color: var(--folder-text);
+		pointer-events: auto;
+	}
+
+	.graph-folder-head {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 12px;
+		margin-bottom: 8px;
+	}
+	.graph-folder-kicker {
+		margin: 0 0 2px;
+		font-size: 10px;
+		font-weight: 600;
+		letter-spacing: 0.14em;
+		text-transform: uppercase;
+		color: var(--folder-cyan);
+	}
+	.graph-folder-head h2 {
+		margin: 0;
+		font-family: var(--font-sans);
+		font-size: 16px;
+		font-weight: 600;
+		color: var(--folder-text);
+	}
+	.graph-folder-x {
+		width: 32px;
+		height: 32px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		border: 0;
+		border-radius: 8px;
+		background: transparent;
+		color: var(--folder-dim);
+		cursor: pointer;
+	}
+	.graph-folder-x svg {
+		width: 16px;
+		height: 16px;
+	}
+	.graph-folder-x:hover {
+		color: var(--folder-text);
+		background: var(--folder-surface-2);
+	}
+	.graph-folder-hint {
+		margin: 0 0 12px;
+		font-size: 12px;
+		line-height: 1.4;
+		color: var(--folder-dim);
+	}
+
+	.graph-folder-pathrow {
+		display: flex;
+		gap: 8px;
+		margin-bottom: 8px;
+	}
+	.graph-folder-path {
+		flex: 1;
+		min-width: 0;
+		height: 40px;
+		padding: 0 12px;
+		border-radius: 10px;
+		border: 1px solid var(--folder-border);
+		background: var(--folder-surface);
+		color: var(--folder-text);
+		font-family: var(--font-mono);
+		font-size: 12px;
+		outline: none;
+	}
+	.graph-folder-path::placeholder {
+		color: var(--folder-dim);
+	}
+	.graph-folder-path:focus {
+		border-color: var(--folder-cyan);
+		box-shadow: 0 0 0 1px color-mix(in srgb, var(--folder-cyan) 40%, transparent);
+	}
+	.graph-folder-browse,
+	.graph-folder-up,
+	.graph-folder-cancel,
+	.graph-folder-confirm {
+		height: 40px;
+		padding: 0 12px;
+		border-radius: 10px;
+		font-size: 12px;
+		font-weight: 600;
+		cursor: pointer;
+		font-family: var(--font-sans);
+	}
+	.graph-folder-browse {
+		border: 1px solid color-mix(in srgb, var(--folder-cyan) 35%, transparent);
+		background: color-mix(in srgb, var(--folder-cyan) 12%, transparent);
+		color: var(--folder-cyan);
+	}
+	.graph-folder-browse:disabled,
+	.graph-folder-confirm:disabled,
+	.graph-folder-up:disabled {
+		opacity: 0.45;
+		cursor: default;
+	}
+
+	.graph-folder-crumb {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-bottom: 8px;
+		min-width: 0;
+	}
+	.graph-folder-up {
+		height: 28px;
+		padding: 0 10px;
+		border: 1px solid var(--folder-border);
+		background: var(--folder-surface-2);
+		color: var(--folder-text);
+	}
+	.graph-folder-crumb code {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-family: var(--font-mono);
+		font-size: 11px;
+		color: var(--folder-dim);
+	}
+
+	.graph-folder-list {
+		flex: 1;
+		min-height: 120px;
+		max-height: 240px;
+		overflow: auto;
+		border-radius: 10px;
+		border: 1px solid var(--folder-border);
+		background: var(--folder-surface);
+	}
+	.graph-folder-empty {
+		padding: 24px 12px;
+		text-align: center;
+		font-size: 12px;
+		color: var(--folder-dim);
+	}
+	.graph-folder-entry {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		width: 100%;
+		padding: 8px 12px;
+		border: 0;
+		border-bottom: 1px solid var(--folder-border);
+		background: transparent;
+		color: var(--folder-text);
+		font-family: var(--font-sans);
+		font-size: 13px;
+		text-align: left;
+		cursor: pointer;
+	}
+	.graph-folder-entry:last-child {
+		border-bottom: 0;
+	}
+	.graph-folder-entry.is-dir:hover {
+		background: color-mix(in srgb, var(--folder-cyan) 8%, transparent);
+		color: var(--folder-cyan);
+	}
+	.graph-folder-entry.is-file {
+		color: var(--folder-dim);
+		cursor: default;
+	}
+	.graph-folder-entry-icon {
+		width: 12px;
+		color: var(--folder-cyan-dim);
+		flex-shrink: 0;
+	}
+	.graph-folder-entry-name {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+
+	.graph-folder-error {
+		margin: 8px 0 0;
+		font-size: 12px;
+		color: var(--folder-red);
+	}
+
+	.graph-folder-foot {
+		display: flex;
+		justify-content: flex-end;
+		gap: 8px;
+		margin-top: 12px;
+	}
+	.graph-folder-cancel {
+		border: 1px solid var(--folder-border);
+		background: transparent;
+		color: var(--folder-dim);
+	}
+	.graph-folder-confirm {
+		border: 0;
+		background: var(--folder-cyan);
+		color: var(--folder-bg);
+	}
+	.graph-folder-confirm:hover:not(:disabled) {
+		box-shadow: 0 0 16px color-mix(in srgb, var(--folder-cyan) 40%, transparent);
+	}
+
+	.graph-toolbar {
+		position: absolute;
+		right: calc(16px + env(safe-area-inset-right, 0px));
 		bottom: calc(0.95rem + env(safe-area-inset-bottom, 0px));
-		transform: translateX(-50%);
-		z-index: 15;
+		z-index: 41;
+		display: flex;
+		flex-direction: row;
+		align-items: center;
+		gap: 6px;
+		padding: 6px;
+		border-radius: 100px;
+		background: oklch(10% 0.02 255 / 82%);
+		backdrop-filter: blur(24px) saturate(1.5);
+		-webkit-backdrop-filter: blur(24px) saturate(1.5);
+		border: 1px solid oklch(82% 0.14 210 / 28%);
+		box-shadow:
+			0 8px 28px oklch(0% 0 0 / 45%),
+			0 0 0 1px oklch(50% 0.03 255 / 10%);
+		pointer-events: auto;
+	}
+
+	.graph-toolbar-date {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		height: 44px;
+		padding: 0 12px 0 14px;
+		border: 0;
+		border-radius: 100px;
+		background: transparent;
+		color: oklch(92% 0.02 210);
+		font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
+		font-size: 12px;
+		font-weight: 500;
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		cursor: pointer;
+		white-space: nowrap;
+	}
+	.graph-toolbar-date svg {
+		width: 14px;
+		height: 14px;
+		color: oklch(82% 0.14 210);
+		flex-shrink: 0;
+		transition: transform 0.2s ease;
+	}
+	.graph-toolbar-date.open svg {
+		transform: rotate(180deg);
+	}
+	.graph-toolbar-date:hover {
+		background: oklch(82% 0.14 210 / 12%);
+	}
+
+	.graph-toolbar-search {
+		width: 44px;
+		height: 44px;
+		padding: 0;
+		border: 1px solid transparent;
+		border-radius: 50%;
+		background: transparent;
+		color: oklch(82% 0.14 210);
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		cursor: pointer;
+	}
+	.graph-toolbar-search svg {
+		width: 20px;
+		height: 20px;
+	}
+	.graph-toolbar-search:hover {
+		background: oklch(82% 0.14 210 / 12%);
+	}
+
+	.chat-collapsed-orb-host {
+		position: relative;
+		left: auto;
+		right: auto;
+		bottom: auto;
+		transform: none;
+		z-index: 1;
 		pointer-events: auto;
 		display: flex;
 		flex-direction: column;
@@ -596,7 +1246,21 @@
 		justify-content: flex-end;
 	}
 
+	.graph-toolbar .chat-orb {
+		background: transparent;
+		border-color: transparent;
+		box-shadow: none;
+	}
+	.graph-toolbar .chat-orb:hover,
+	.graph-toolbar .chat-collapsed-orb:hover .chat-orb {
+		transform: none;
+		background: oklch(82% 0.14 210 / 12%);
+		border-color: transparent;
+		box-shadow: none;
+	}
+
 	.chat-collapsed-orb {
+		position: relative;
 		display: flex;
 		flex-direction: column;
 		align-items: center;
@@ -606,8 +1270,8 @@
 	}
 
 	.chat-orb {
-		width: 64px;
-		height: 64px;
+		width: 48px;
+		height: 48px;
 		border-radius: 50%;
 		background: oklch(18% 0.02 255 / 85%);
 		backdrop-filter: blur(24px) saturate(1.5);
@@ -630,8 +1294,8 @@
 		flex-shrink: 0;
 	}
 	.chat-orb svg {
-		width: 26px;
-		height: 26px;
+		width: 20px;
+		height: 20px;
 		transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 	}
 	.chat-orb::after {
@@ -671,6 +1335,9 @@
 	}
 
 	.chat-orb-expand {
+		position: absolute;
+		right: 0;
+		bottom: calc(100% + 10px);
 		display: flex;
 		align-items: center;
 		gap: 10px;
@@ -686,7 +1353,7 @@
 		font-size: 14px;
 		font-weight: 500;
 		white-space: nowrap;
-		margin-bottom: 10px;
+		margin-bottom: 0;
 		transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1) 0.05s;
 	}
 	.chat-orb-expand .coe-icon {
@@ -706,12 +1373,15 @@
 	}
 
 	.chat-orb-add {
+		position: absolute;
+		right: 0;
+		bottom: calc(100% + 62px);
 		display: flex;
 		align-items: center;
 		gap: 10px;
 		padding: 8px 16px 8px 8px;
 		border-radius: 100px;
-		background: oklch(16% 0.02 150 / 80%);
+		background: oklch(16% 0.015 255 / 80%);
 		backdrop-filter: blur(24px) saturate(1.5);
 		-webkit-backdrop-filter: blur(24px) saturate(1.5);
 		border: 1px solid oklch(50% 0.03 255 / 12%);
@@ -721,34 +1391,47 @@
 		font-size: 14px;
 		font-weight: 500;
 		white-space: nowrap;
-		margin-bottom: 10px;
+		margin-bottom: 0;
 		transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1) 0.1s;
 	}
 	.chat-orb-add .coa-icon {
 		width: 32px;
 		height: 32px;
 		border-radius: 50%;
-		background: oklch(72% 0.15 150 / 12%);
+		background: oklch(82% 0.14 210 / 12%);
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		color: oklch(72% 0.15 150);
+		color: oklch(82% 0.14 210);
 		flex-shrink: 0;
 	}
 	.chat-orb-add .coa-icon svg { width: 16px; height: 16px; }
 	.chat-orb-add:hover {
-		border-color: oklch(72% 0.15 150 / 25%);
+		border-color: oklch(82% 0.14 210 / 25%);
 	}
 
 	.chat-side-panel {
-		position: absolute;
+		position: fixed;
 		top: 0;
 		right: 0;
 		bottom: 0;
-		border-left: 1px solid;
-		border-color: inherit;
-		box-shadow: -8px 0 24px -8px oklch(0% 0 0 / 20%);
-		z-index: 30;
+		z-index: 45;
+		background: oklch(7% 0.02 260 / 94%);
+		border-left: 1px solid oklch(82% 0.14 210 / 16%);
+		box-shadow: -18px 0 48px oklch(0% 0 0 / 45%);
+		backdrop-filter: blur(28px) saturate(1.25);
+		-webkit-backdrop-filter: blur(28px) saturate(1.25);
+		color: oklch(90% 0.005 250);
+	}
+	.graph-chat-panel :global(#note-chat-container) {
+		background: transparent;
+	}
+	.graph-chat-panel :global(.h-10.shrink-0) {
+		position: relative;
+		z-index: 2;
+		border-color: oklch(82% 0.14 210 / 14%) !important;
+		background: oklch(8% 0.02 260);
+		color: oklch(90% 0.005 250);
 	}
 	.chat-sheet-backdrop {
 		position: absolute;
@@ -908,20 +1591,18 @@
 	.voice-stage {
 		position: absolute;
 		inset: 0;
-		z-index: 45;
+		z-index: 42;
 		display: flex;
 		flex-direction: column;
-		align-items: center;
-		justify-content: space-between;
-		padding: calc(4.5rem + env(safe-area-inset-top, 0px)) 24px calc(6.5rem + env(safe-area-inset-bottom, 0px));
+		align-items: flex-end;
+		justify-content: flex-end;
+		padding: 0 calc(16px + env(safe-area-inset-right, 0px)) calc(5.4rem + env(safe-area-inset-bottom, 0px));
 		pointer-events: none;
 	}
 	.voice-vignette {
 		position: absolute;
 		inset: 0;
-		background:
-			radial-gradient(ellipse 80% 55% at 50% 38%, oklch(12% 0.03 200 / 55%) 0%, transparent 62%),
-			linear-gradient(to bottom, oklch(6% 0.02 260 / 52%) 0%, oklch(6% 0.02 260 / 78%) 100%);
+		background: linear-gradient(to top, oklch(6% 0.02 260 / 40%) 0%, transparent 36%);
 		pointer-events: none;
 	}
 	.voice-hero {
@@ -929,103 +1610,79 @@
 		z-index: 1;
 		display: flex;
 		flex-direction: column;
-		align-items: center;
-		gap: 1.15rem;
-		flex: 1;
-		justify-content: center;
+		align-items: flex-end;
+		gap: 0.5rem;
 		pointer-events: none;
-		width: 100%;
+		width: min(28rem, calc(100vw - 2rem));
+		margin-bottom: 0;
 	}
-	.voice-circle {
-		width: min(58vw, 240px);
-		height: min(58vw, 240px);
-		border: 0;
-		padding: 0;
-		border-radius: 50%;
-		background: oklch(16% 0.03 200 / 40%);
-		box-shadow:
-			0 0 0 1px oklch(82% 0.14 210 / 16%),
-			0 0 48px oklch(82% 0.14 210 / 18%),
-			0 20px 60px oklch(0% 0 0 / 35%);
-		overflow: hidden;
-		pointer-events: auto;
-		cursor: pointer;
-	}
-	.voice-circle.thinking {
-		box-shadow:
-			0 0 0 1px oklch(82% 0.14 210 / 22%),
-			0 0 56px oklch(82% 0.14 210 / 22%);
-	}
-	.voice-circle.recording {
-		box-shadow:
-			0 0 0 1px oklch(62% 0.2 18 / 40%),
-			0 0 48px oklch(82% 0.14 210 / 28%);
+	.voice-hero :global(.voice-caption) {
+		text-align: right;
+		margin-left: auto;
 	}
 	.voice-status {
 		margin: 0;
-		font-size: 0.95rem;
-		letter-spacing: 0.01em;
-		color: oklch(82% 0.04 210 / 80%);
-		text-align: center;
-		font-family: var(--font-display);
+		font-size: 11px;
+		letter-spacing: 0.18em;
+		text-transform: uppercase;
+		color: oklch(82% 0.14 210 / 75%);
+		text-align: right;
+		font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
 	}
 	.voice-dock {
-		position: absolute;
-		left: 0;
-		right: 0;
-		bottom: max(4px, env(safe-area-inset-bottom, 0px));
+		position: relative;
 		z-index: 2;
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		gap: 22px;
+		gap: 4px;
+		padding: 0;
+		border-radius: 0;
+		background: transparent;
+		border: 0;
+		box-shadow: none;
 		pointer-events: auto;
 	}
 	.voice-dock .voice-ctrl {
-		width: 48px;
-		height: 48px;
+		width: 44px;
+		height: 44px;
+		background: transparent;
+		border-color: transparent;
+		box-shadow: none;
 	}
-	.voice-mic {
-		width: 76px;
-		height: 76px;
+	.voice-pulse {
+		width: 44px;
+		height: 44px;
 		border-radius: 50%;
-		border: 0;
-		background: oklch(72% 0.14 175);
-		color: oklch(16% 0.02 200);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		box-shadow:
-			0 0 0 6px oklch(72% 0.14 175 / 18%),
-			0 16px 40px oklch(0% 0 0 / 40%);
-		cursor: pointer;
+		overflow: hidden;
+		background: oklch(82% 0.14 210 / 12%);
+		box-shadow: 0 0 16px oklch(82% 0.14 210 / 20%);
+		flex-shrink: 0;
 	}
-	.voice-mic svg {
-		width: 28px;
-		height: 28px;
+	.voice-pulse.recording {
+		background: oklch(62% 0.2 18 / 22%);
+		box-shadow: 0 0 18px oklch(62% 0.2 18 / 28%);
 	}
-	.voice-mic.recording {
-		background: oklch(62% 0.2 18);
-		color: white;
-		box-shadow:
-			0 0 0 6px oklch(62% 0.2 18 / 22%),
-			0 16px 40px oklch(0% 0 0 / 40%);
-	}
-	.voice-mic.live:not(.recording) {
-		background: oklch(82% 0.14 210);
+	.voice-pulse.speaking {
+		box-shadow: 0 0 20px oklch(82% 0.14 210 / 35%);
 	}
 	.voice-stop {
-		min-width: 48px;
-		height: 48px;
-		padding: 0 16px;
+		min-width: 44px;
+		height: 44px;
+		padding: 0 14px;
 		border-radius: 999px;
-		border: 0;
-		background: oklch(96% 0.01 210);
-		color: oklch(18% 0.02 260);
-		font-size: 14px;
+		border: 1px solid oklch(82% 0.14 210 / 30%);
+		background: transparent;
+		color: oklch(90% 0.02 210);
+		font-size: 11px;
 		font-weight: 600;
+		letter-spacing: 0.14em;
+		text-transform: uppercase;
+		font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
 		cursor: pointer;
-		box-shadow: 0 8px 24px oklch(0% 0 0 / 35%);
+	}
+	.voice-stop:hover {
+		background: oklch(82% 0.14 210 / 12%);
 	}
 	.voice-spinner .spq {
 		animation: sp8 1.05s infinite;

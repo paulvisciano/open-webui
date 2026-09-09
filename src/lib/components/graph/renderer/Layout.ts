@@ -9,10 +9,13 @@
  *
  *   cellZ = time bucket  (primary axis — newest at z=0, older at -1,-2,… so
  *           zooming in (camera z decreasing) reveals progressively older
- *           photos)
- *   cellY = cluster band (hubMap grouping → dense band index)
- *   cellX = relationship depth (0 = focused + 1-hop, 1 = 2-hop, 2 = far; 0
- *           when nothing focused) — minor parallax axis
+ *           photos). Conversations and the library walls share this axis.
+ *   cellY = 0 (corridor centered on camera Y; wall rows live in localY)
+ *   cellX = conversations helix in the aisle (|X| < 90; cellX = 0 or
+ *           −1 when localX would be negative). Library assets
+ *           (`photo|document|video|audio`) split even/odd onto left and right
+ *           corridor walls (cellX=-2 / +1), yawed inward, so looking along Z
+ *           is a photo tunnel with chats floating in the middle.
  *
  * No Three.js / DOM access here — this module is pure data and must be
  * deterministic: two calls with the same input produce identical coords.
@@ -188,6 +191,68 @@ export function isEventNode(node: {
   return !!node.labels?.some((l) => /^Event$/i.test(l));
 }
 
+/** True if the node is an in-place library asset (`asset:{uuid}` or `properties.library`). */
+export function isLocalAssetNode(node: {
+  id?: string;
+  properties?: Record<string, unknown>;
+}): boolean {
+  if ((node.id ?? '').startsWith('asset:')) return true;
+  return node.properties?.library === true;
+}
+
+const WALL_CELL_X_LEFT = -2;
+const WALL_CELL_X_RIGHT = 1;
+const WALL_YAW_LEFT = Math.PI / 2;
+const WALL_YAW_RIGHT = -Math.PI / 2;
+const WALL_PITCH_Y = 88;
+const WALL_PITCH_Z = 260;
+const WALL_TILE_W = 64;
+const WALL_ROWS = 2;
+
+/** World |X| of aisle helix. Must stay < 140 so cards stay off walls at ±240. */
+const CONV_AISLE_X = 90;
+const CONV_HELIX_Y = 120;
+const CONV_PITCH_Z = 220;
+const CONV_GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+
+const WALL_KINDS = new Set(['photo', 'pdf', 'document', 'video', 'audio']);
+
+/** True if the node belongs on the library wall, not the conversation cluster. */
+export function isLibraryWallNode(
+  node: { id?: string; properties?: Record<string, unknown> },
+  kind: NodeKind,
+): boolean {
+  if (kind === 'conversation') return false;
+  if (isLocalAssetNode(node)) return true;
+  return WALL_KINDS.has(kind);
+}
+
+/**
+ * Kinds that carry their own timestamp and occupy a Z time-bucket.
+ * Library assets (`photo|pdf|document|video|audio`) must be assigned even
+ * when no plane provider exists yet — only conversation+photo survive
+ * `shouldRender` today.
+ */
+function isTimePlanKind(kind: string): boolean {
+  return (
+    kind === 'photo' ||
+    kind === 'note' ||
+    kind === 'conversation' ||
+    kind === 'pdf' ||
+    kind === 'document' ||
+    kind === 'video' ||
+    kind === 'audio'
+  );
+}
+
+/** True if this node should seed the time plan from its own date (`taken_at` / `createdAt`). */
+function isTimePlanNode(node: KGNode, kind: NodeKind): boolean {
+  if (isTimePlanKind(kind)) return true;
+  if (isLocalAssetNode(node)) return true;
+  const assetKind = node.properties?.kind;
+  return typeof assetKind === 'string' && isTimePlanKind(assetKind);
+}
+
 /**
  * Classify a `KGNode` into one of the renderer's visual categories.
  * Delegates to the provider registry (`renderer/NodeKindProvider.ts`),
@@ -220,7 +285,8 @@ function seededRandom(seed: number): number {
 }
 
 /**
- * Parse a date from any of the known photo-timestamp properties.
+ * Parse a date from any of the known timestamp properties, including
+ * library-asset `taken_at` (unix seconds or ms) and conversation `createdAt`.
  * Returns `null` when no usable timestamp is present.
  */
 export function parseNodeDate(node: KGNode): Date | null {
@@ -230,6 +296,7 @@ export function parseNodeDate(node: KGNode): Date | null {
     p.datetime_original ??
     p.date_taken ??
     p.datetime ??
+    p.taken_at ??
     p.created_at ??
     p.createdAt ??
     p.timestamp;
@@ -390,26 +457,27 @@ interface TimePlan {
 }
 
 /**
- * Assign each photo a time-bucket index along cellZ, oldest→newest ascending.
- * Newest photos land at the highest cellZ (closest to the camera at +Z);
- * older photos at lower cellZ. Zooming in (camera z decreasing) travels
- * toward older photos. Non-photo nodes inherit the bucket of their most-recent
- * connected photo. Nodes with no photo connection fall back to ingestion order.
+ * Assign each timestamped node a time-bucket index along cellZ, oldest→newest
+ * ascending. Newest land at the highest cellZ (closest to the camera at +Z);
+ * older at lower cellZ. Zooming in (camera z decreasing) travels toward older
+ * nodes. Library assets use `properties.taken_at` (unix seconds or ms).
+ * Non-timestamped nodes inherit the bucket of their most-recent connected
+ * timestamped node. Nodes with no date connection fall back to ingestion order.
  *
- * Buckets are days by default; if the photo-date span exceeds ~180 days we
+ * Buckets are days by default; if the date span exceeds ~180 days we
  * switch to month buckets so the Z axis stays bounded.
  */
 function buildTimePlan(nodes: KGNode[], edges: KGEdge[]): TimePlan {
-  // Dates for renderable nodes that carry their own timestamp — photos,
-  // notes, and conversations. All have `date_taken_friendly`/`created_at`/
-  // `createdAt` (read by `parseNodeDate`) and must be bucketed by month/day
-  // like photos so a month containing only conversations still produces its
-  // own bucket. The map is keyed by nodeId so the granularity decision and
-  // bucket-key collection cover conversations too.
+  // Dates for nodes that carry their own timestamp — photos, notes,
+  // conversations, and library assets (photo|pdf|document|video|audio).
+  // `parseNodeDate` reads `taken_at` the same way conversations use
+  // `createdAt`, so a month containing only assets still produces its own
+  // Z bucket. The map is keyed by nodeId so the granularity decision and
+  // bucket-key collection cover conversations + assets together.
   const renderableDate = new Map<string, Date>();
   for (const n of nodes) {
     const kind = classifyKind(n);
-    if (kind !== 'photo' && kind !== 'note' && kind !== 'conversation') continue;
+    if (!isTimePlanNode(n, kind)) continue;
     if (kind === 'photo' && isStalePhotoNode(n)) continue;
     const d = parseNodeDate(n);
     if (d) renderableDate.set(n.id, d);
@@ -477,14 +545,13 @@ function buildTimePlan(nodes: KGNode[], edges: KGEdge[]): TimePlan {
 
   const cellZOf = new Map<string, number>();
 
-  // Renderable nodes with their own date (photos, notes, and conversations):
-  // direct bucket assignment. Notes/conversations must be assigned to their
-  // own month/day bucket so a month containing only notes/conversations still
-  // clusters them together on the Z axis instead of being pushed to a
-  // far-away fallback cellZ (which would pull the camera away from the photos).
+  // Timestamped nodes with their own date (photos, notes, conversations,
+  // library assets): direct bucket assignment. A month containing only
+  // assets/chats still clusters them on Z instead of a far-away fallback
+  // cellZ (which would pull the camera away from the photos).
   for (const n of nodes) {
     const kind = classifyKind(n);
-    if (kind !== 'photo' && kind !== 'note' && kind !== 'conversation') continue;
+    if (!isTimePlanNode(n, kind)) continue;
     if (kind === 'photo' && isStalePhotoNode(n)) continue;
     const d = renderableDate.get(n.id);
     if (!d) continue;
@@ -493,12 +560,12 @@ function buildTimePlan(nodes: KGNode[], edges: KGEdge[]): TimePlan {
     if (idx !== undefined) cellZOf.set(n.id, idx * TIME_BUCKET_SPACING);
   }
 
-  // Non-renderable entities (person/location/event/concept): inherit the
-  // most-recent connected renderable node's bucket so they sit alongside
-  // the photos/notes/conversations they relate to.
+  // Non-timestamped entities (person/location/event/concept): inherit the
+  // most-recent connected timestamped node's bucket so they sit alongside
+  // the photos/notes/conversations/assets they relate to.
   for (const n of nodes) {
     const kind = classifyKind(n);
-    if (kind === 'photo' || kind === 'note' || kind === 'conversation') continue;
+    if (isTimePlanNode(n, kind)) continue;
     if (cellZOf.has(n.id)) continue;
     const neighbors = adjacency.get(n.id) ?? [];
     let best: { idx: number; t: number } | null = null;
@@ -643,55 +710,47 @@ export function buildTimeIndex(nodes: KGNode[], edges: KGEdge[]): TimeIndex {
  *  - cellZ = time bucket index (newest = 0, older = 1, 2, …). The camera
  *    starts facing the newest photos; zooming in (decreasing camera z) moves
  *    toward older photos. This is the primary browsing axis.
- *  - cellY = cluster band: each hub's cluster occupies a stable, dense
- *    horizontal band derived from `buildClusterAssignment` (degree-based
- *    hubMap). Non-hub nodes inherit their hub's band so a cluster reads as a
- *    contiguous row.
- *  - cellX = relationship depth from the focused node (0 = neighbors of the
- *    focused node, 1 = 2-hop, 2 = far; 0 when nothing is focused). Minor
- *    horizontal parallax axis.
+ *  - cellY = 0 (corridor is centered on the camera's Y). Wall rows are
+ *    packed in localY, not extra Y cells.
+ *  - cellX = conversations helix in the aisle (|X| < 90; cellX = 0 or
+ *    −1). Library walls: even index → left (`WALL_CELL_X_LEFT`, yaw=+π/2),
+ *    odd → right (`WALL_CELL_X_RIGHT`, yaw=-π/2). Dense YZ grid on each wall,
+ *    no scatter. Time stays on Z — the corridor recedes with the chats.
  *
- * Within a chunk cell, nodes are spread on a square grid sized to the cell's
- * node count so they never overlap. Only `photo`/`image` and `conversation`
- * nodes are rendered to the canvas; other entities
- * (person/location/event/concept) still participate in the cluster-band and
- * depth computation (via their edges) but do not get planes — they inform the
- * layout, not the render set.
+ * Conversations pack in a depth helix down the aisle. Wall tiles
+ * sit coplanar on each wall so they read as perspective photo walls. Only
+ * `photo`/`image` and `conversation` nodes are rendered to the canvas; other
+ * entities (person/location/event/concept) still participate in the
+ * time plan (via their edges) but do not get planes.
  *
  * @param nodes        all `KGNode`s in the graph (used for clustering + depth).
  * @param edges        all `KGEdge`s in the graph.
  * @param photoImages  `nodeId → thumbnail URL` for photo nodes.
  * @param personImages `nodeId → face-crop URL` for person nodes (reserved for
  *                     later phases; person nodes are not rendered on the canvas).
- * @param selectedNodeId optional focused node id — when set, its 1-hop
- *                     neighbors sit at `cellX=0`, 2-hop at `cellX=1`, and
- *                     everything else at `cellX=2`. When unset, all nodes use
- *                     `cellX=0`. Minor horizontal parallax axis.
+ * @param selectedNodeId unused (kept for call-site compatibility).
+ * @param sourceOnline `sourceId → mounted/online`. Defaults to `{}` so
+ *                     conversation+photo layout is unchanged with no sources.
  */
 export function buildCanvasLayout(
   nodes: KGNode[],
   edges: KGEdge[],
   photoImages: Record<string, string>,
   _personImages: Record<string, string>,
-  selectedNodeId?: string | null,
+  _selectedNodeId?: string | null,
+  sourceOnline: Record<string, boolean> = {},
 ): CanvasNode[] {
-  const ctx: BuildCtx = { photoImages };
+  const ctx: BuildCtx = { photoImages, sourceOnline };
   const timePlan = buildTimePlan(nodes, edges);
-  const clusters = buildClusterAssignment(nodes, edges);
-  const depthPlan = buildDepthPlan(nodes, edges, selectedNodeId);
-
-  const bandCount = Math.max(1, clusters.bandOfHub.size);
-  // Y-bands per chunk: cluster bands are dense (0..bandCount-1) and wrapped
-  // into a compact vertical stack. Each band occupies one chunk-Y row.
-  const yBandsPerChunk = Math.max(1, Math.min(bandCount, 4));
 
   // Group renderable nodes (photos and conversations) by their time
   // bucket (cellZ) so we can spread each layer across the screen. Without
   // this, all nodes in a bucket share cellX=0 (when nothing is focused) and
   // collapse into a narrow column. Conversations share the photo timeline
-  // (`createdAt` is read by `parseNodeDate`). Renderability is delegated to
-  // each provider's `shouldRender` — e.g. the photo provider hides stale
-  // `manual_creation` photos.
+  // (`createdAt` / library `taken_at` are read by `parseNodeDate`).
+  // Renderability is delegated to each provider's `shouldRender` — e.g. the
+  // photo provider hides stale `manual_creation` photos. pdf/document/video/
+  // audio still receive cellZ in the time plan for later providers.
   const photosByBucket = new Map<number, KGNode[]>();
   for (let i = 0; i < nodes.length; i++) {
     const node = nodes[i];
@@ -703,8 +762,7 @@ export function buildCanvasLayout(
     if (arr) arr.push(node);
     else photosByBucket.set(z, [node]);
   }
-  // Also add today/yesterday nodes to their parent month bucket so "This Month"
-  // includes all month content.
+  // Conversations join the parent month cluster; wall tiles do not (avoids double meshes).
   for (const [key, bucketIdx] of timePlan.bucketIndex) {
     if (key !== 'today' && key !== 'yesterday') continue;
     const dayNodes = photosByBucket.get(bucketIdx * TIME_BUCKET_SPACING);
@@ -712,30 +770,88 @@ export function buildCanvasLayout(
     const mk = key === 'today' ? timePlan.todayMonthKey : timePlan.yesterdayMonthKey;
     const monthBucketIdx = timePlan.bucketIndex.get(mk);
     if (monthBucketIdx === undefined) continue;
+    const extra = dayNodes.filter((n) => !isLibraryWallNode(n, classifyKind(n)));
+    if (extra.length === 0) continue;
     const monthZ = monthBucketIdx * TIME_BUCKET_SPACING;
     const monthArr = photosByBucket.get(monthZ);
-    if (monthArr) monthArr.push(...dayNodes);
-    else photosByBucket.set(monthZ, [...dayNodes]);
+    if (monthArr) monthArr.push(...extra);
+    else photosByBucket.set(monthZ, [...extra]);
   }
-  // Assign each node a 2D grid cell (gridX, gridY) within its time bucket,
-  // centered on (0, 0) so each layer fills the viewport width AND height
-  // without exceeding RENDER_DISTANCE. A 1D line would push most nodes
-  // thousands of chunks outside the visible window. Nodes can appear in
-  // multiple buckets (e.g. today + this month), so the key includes cellZ.
-  const gridPosOf = new Map<string, { x: number; y: number }>();
-  for (const [cellZ, bucketNodes] of photosByBucket) {
-    bucketNodes.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-    const count = bucketNodes.length;
-    const side = Math.max(1, Math.ceil(Math.sqrt(count)));
-    const half = (side - 1) / 2;
-    for (let i = 0; i < count; i++) {
-      const gx = i % side;
-      const gy = Math.floor(i / side);
-      gridPosOf.set(`${bucketNodes[i].id}@${cellZ}`, {
-        x: Math.round(gx - half),
-        y: Math.round(gy - half),
-      });
+  // Conversations pack in a depth helix down the aisle. Library assets
+  // split even/odd onto left/right walls; gridPosOf stores (col along Z, row along Y).
+  // Nodes can appear in multiple buckets, so keys include cellZ.
+  const gridPosOf = new Map<string, { x: number; y: number; worldZ: number }>();
+  const wallMetaOf = new Map<string, { cols: number; rows: number }>();
+  const wallSideOf = new Map<string, 'L' | 'R'>();
+  const convPosOf = new Map<string, { x: number; y: number; worldZ: number }>();
+
+  const wallNodes: KGNode[] = [];
+  const convNodes: KGNode[] = [];
+  const seenPack = new Set<string>();
+  for (const bucketNodes of photosByBucket.values()) {
+    for (const n of bucketNodes) {
+      if (seenPack.has(n.id)) continue;
+      seenPack.add(n.id);
+      if (isLibraryWallNode(n, classifyKind(n))) wallNodes.push(n);
+      else convNodes.push(n);
     }
+  }
+  wallNodes.sort((a, b) => (parseNodeDate(a)?.getTime() ?? 0) - (parseNodeDate(b)?.getTime() ?? 0));
+  const left: KGNode[] = [];
+  const right: KGNode[] = [];
+  for (let i = 0; i < wallNodes.length; i++) {
+    if (i % 2 === 0) left.push(wallNodes[i]);
+    else right.push(wallNodes[i]);
+  }
+  const packWallSide = (group: KGNode[], side: 'L' | 'R') => {
+    const count = group.length;
+    if (count === 0) return;
+    const rows = Math.min(WALL_ROWS, Math.max(1, count));
+    const cols = Math.ceil(count / rows);
+    wallMetaOf.set(side, { cols, rows });
+    for (let i = 0; i < count; i++) {
+      const row = i % rows;
+      const col = Math.floor(i / rows);
+      gridPosOf.set(group[i].id, { x: col, y: row, worldZ: col * WALL_PITCH_Z });
+      wallSideOf.set(group[i].id, side);
+    }
+  };
+  packWallSide(left, 'L');
+  packWallSide(right, 'R');
+
+  const timeline: { t: number; z: number }[] = [];
+  for (const n of wallNodes) {
+    const t = parseNodeDate(n)?.getTime();
+    const g = gridPosOf.get(n.id);
+    if (t == null || !g) continue;
+    timeline.push({ t, z: g.worldZ });
+  }
+  timeline.sort((a, b) => a.t - b.t);
+  const zForTime = (t: number): number => {
+    if (timeline.length === 0) return 0;
+    if (t <= timeline[0].t) return timeline[0].z;
+    const last = timeline[timeline.length - 1];
+    if (t >= last.t) return last.z;
+    for (let i = 1; i < timeline.length; i++) {
+      if (t <= timeline[i].t) {
+        const a = timeline[i - 1];
+        const b = timeline[i];
+        const span = b.t - a.t;
+        const u = span > 0 ? (t - a.t) / span : 0;
+        return a.z + u * (b.z - a.z);
+      }
+    }
+    return last.z;
+  };
+  convNodes.sort((a, b) => (parseNodeDate(a)?.getTime() ?? 0) - (parseNodeDate(b)?.getTime() ?? 0));
+  for (let i = 0; i < convNodes.length; i++) {
+    const t = parseNodeDate(convNodes[i])?.getTime() ?? 0;
+    const angle = i * CONV_GOLDEN_ANGLE;
+    convPosOf.set(convNodes[i].id, {
+      x: Math.cos(angle) * CONV_AISLE_X * 0.55,
+      y: Math.sin(angle) * 28,
+      worldZ: zForTime(t),
+    });
   }
 
   const provisional: {
@@ -745,6 +861,7 @@ export function buildCanvasLayout(
     cellY: number;
     cellZ: number;
     cellKey: string;
+    yaw?: number;
   }[] = [];
 
   for (let i = 0; i < nodes.length; i++) {
@@ -752,34 +869,43 @@ export function buildCanvasLayout(
     const kind = classifyKind(node);
     const provider = getProvider(kind);
     if (!provider || !provider.shouldRender(node, ctx)) continue;
-    const depth = depthPlan.depthOf.get(node.id) ?? 0;
     const cellZ = timePlan.cellZOf.get(node.id) ?? i;
-    const grid = gridPosOf.get(`${node.id}@${cellZ}`) ?? { x: 0, y: 0 };
-    const cellX = grid.x + depth * 3;
-    const cellY = grid.y;
+    const onWall = isLibraryWallNode(node, kind);
+    const side = onWall ? (wallSideOf.get(`${node.id}@${cellZ}`) ?? 'L') : undefined;
+    const cellX = onWall
+      ? (side === 'R' ? WALL_CELL_X_RIGHT : WALL_CELL_X_LEFT)
+      : 0;
+    const cellY = 0;
+    const yaw = onWall
+      ? (side === 'R' ? WALL_YAW_RIGHT : WALL_YAW_LEFT)
+      : undefined;
     const cellKey = `${cellX},${cellY},${cellZ}`;
-    provisional.push({ node, kind, cellX, cellY, cellZ, cellKey });
+    provisional.push({ node, kind, cellX, cellY, cellZ, cellKey, yaw });
 
-    // If this node is in a today/yesterday bucket, also place it in the
-    // parent month bucket so "This Month" contains all month content.
-    const nodeBucketZ = timePlan.cellZOf.get(node.id);
-    if (nodeBucketZ !== undefined && (timePlan.todayKey || timePlan.yesterdayKey)) {
-      const todayIdx = timePlan.todayKey ? timePlan.bucketIndex.get(timePlan.todayKey) : undefined;
-      const yesterdayIdx = timePlan.yesterdayKey ? timePlan.bucketIndex.get(timePlan.yesterdayKey) : undefined;
-      const todayZ = todayIdx !== undefined ? todayIdx * TIME_BUCKET_SPACING : -1;
-      const yesterdayZ = yesterdayIdx !== undefined ? yesterdayIdx * TIME_BUCKET_SPACING : -1;
-      let parentMonthKey: string | null = null;
-      if (nodeBucketZ === todayZ) parentMonthKey = timePlan.todayMonthKey;
-      else if (nodeBucketZ === yesterdayZ) parentMonthKey = timePlan.yesterdayMonthKey;
-      if (parentMonthKey) {
-        const monthIdx = timePlan.bucketIndex.get(parentMonthKey);
-        if (monthIdx !== undefined) {
-          const monthZ = monthIdx * TIME_BUCKET_SPACING;
-          const monthGrid = gridPosOf.get(`${node.id}@${monthZ}`) ?? { x: 0, y: 0 };
-          const monthCellX = monthGrid.x + depth * 3;
-          const monthCellY = monthGrid.y;
-          const monthCellKey = `${monthCellX},${monthCellY},${monthZ}`;
-          provisional.push({ node, kind, cellX: monthCellX, cellY: monthCellY, cellZ: monthZ, cellKey: monthCellKey });
+    if (!onWall) {
+      const nodeBucketZ = timePlan.cellZOf.get(node.id);
+      if (nodeBucketZ !== undefined && (timePlan.todayKey || timePlan.yesterdayKey)) {
+        const todayIdx = timePlan.todayKey ? timePlan.bucketIndex.get(timePlan.todayKey) : undefined;
+        const yesterdayIdx = timePlan.yesterdayKey ? timePlan.bucketIndex.get(timePlan.yesterdayKey) : undefined;
+        const todayZ = todayIdx !== undefined ? todayIdx * TIME_BUCKET_SPACING : -1;
+        const yesterdayZ = yesterdayIdx !== undefined ? yesterdayIdx * TIME_BUCKET_SPACING : -1;
+        let parentMonthKey: string | null = null;
+        if (nodeBucketZ === todayZ) parentMonthKey = timePlan.todayMonthKey;
+        else if (nodeBucketZ === yesterdayZ) parentMonthKey = timePlan.yesterdayMonthKey;
+        if (parentMonthKey) {
+          const monthIdx = timePlan.bucketIndex.get(parentMonthKey);
+          if (monthIdx !== undefined) {
+            const monthZ = monthIdx * TIME_BUCKET_SPACING;
+            const monthCellKey = `0,0,${monthZ}`;
+            provisional.push({
+              node,
+              kind,
+              cellX: 0,
+              cellY: 0,
+              cellZ: monthZ,
+              cellKey: monthCellKey,
+            });
+          }
         }
       }
     }
@@ -789,37 +915,73 @@ export function buildCanvasLayout(
 
   for (let i = 0; i < provisional.length; i++) {
     const p = provisional[i];
-    const { node, kind, cellX, cellY, cellZ } = p;
-
-    // Seeded random scatter within the chunk cube — mirrors the reference
-    // repo's generateChunkPlanes, where each plane's position is
-    // cellOrigin + seededRandom() * CHUNK_SIZE on each axis. The seed is
-    // derived from the node id so positions are stable across re-layouts.
+    const { node, kind, cellY, yaw } = p;
+    let cellX = p.cellX;
+    const cellZ0 = p.cellZ;
+    const onWall = isLibraryWallNode(node, kind);
     const seed = hashStr(node.id);
-    const r0 = seededRandom(seed);
-    const r1 = seededRandom(seed + 1);
-    const r2 = seededRandom(seed + 2);
-    const localX = r0 * CHUNK_SIZE;
-    const localY = r1 * CHUNK_SIZE;
-    const localZ = r2 * CHUNK_SIZE;
+
+    let localX: number;
+    let localY: number;
+    let localZ: number;
+    let cellZ = cellZ0;
+    if (onWall) {
+      const grid = gridPosOf.get(node.id) ?? { x: 0, y: 0, worldZ: 0 };
+      const side = wallSideOf.get(node.id) ?? 'L';
+      const meta = wallMetaOf.get(side) ?? { cols: 1, rows: 1 };
+      const row = grid.y;
+      cellX = side === 'R' ? WALL_CELL_X_RIGHT : WALL_CELL_X_LEFT;
+      localX = CHUNK_SIZE / 2;
+      localY = (row - (meta.rows - 1) / 2) * WALL_PITCH_Y;
+      const worldZ = grid.worldZ;
+      cellZ = Math.floor(worldZ / CHUNK_SIZE);
+      localZ = worldZ - cellZ * CHUNK_SIZE;
+    } else {
+      const grid = convPosOf.get(node.id) ?? { x: 0, y: 0, worldZ: 0 };
+      const worldX = grid.x;
+      cellX = worldX < 0 ? -1 : 0;
+      localX = worldX - cellX * CHUNK_SIZE;
+      localY = grid.y;
+      const worldZ = grid.worldZ;
+      cellZ = Math.floor(worldZ / CHUNK_SIZE);
+      localZ = worldZ - cellZ * CHUNK_SIZE;
+    }
 
     const pw = node.properties?.image_width ?? node.properties?.width;
     const ph = node.properties?.image_height ?? node.properties?.height;
-    // Random base size in [60, 120) world units, then preserve the native
-    // image aspect ratio (height = base, width = base * aspect) — same
-    // approach as the reference's displayScale. Notes rarely carry
-    // image_width/height, so they fall back to a text-friendly portrait
-    // aspect (~1 : 1.4) that reads well for wrapped prose.
     const base = 60 + seededRandom(seed + 4) * 60;
     let width: number;
     let height: number;
-    if (typeof pw === 'number' && typeof ph === 'number' && pw > 0 && ph > 0) {
+    if (onWall) {
+      if (typeof pw === 'number' && typeof ph === 'number' && pw > 0 && ph > 0) {
+        const aspect = pw / ph;
+        if (aspect >= 1) {
+          width = WALL_TILE_W;
+          height = WALL_TILE_W / aspect;
+        } else {
+          height = WALL_TILE_W;
+          width = WALL_TILE_W * aspect;
+        }
+      } else {
+        width = WALL_TILE_W;
+        height = WALL_TILE_W;
+      }
+    } else if (typeof pw === 'number' && typeof ph === 'number' && pw > 0 && ph > 0) {
       const aspect = pw / ph;
       height = base;
       width = Math.round(base * aspect);
     } else if (kind === 'conversation') {
-      height = 180;
-      width = 130;
+      width = 210;
+      height = 124;
+    } else if (kind === 'document') {
+      width = 156;
+      height = 172;
+    } else if (kind === 'audio') {
+      width = 196;
+      height = 118;
+    } else if (kind === 'video') {
+      width = Math.round(base * 1.15);
+      height = Math.round(base * 1.15);
     } else if (kind === 'note') {
       height = base;
       width = Math.round(base / 1.4);
@@ -852,6 +1014,7 @@ export function buildCanvasLayout(
       localZ,
       width,
       height,
+      ...(yaw != null ? { yaw } : {}),
     };
   }
 

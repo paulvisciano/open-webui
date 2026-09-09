@@ -1,8 +1,8 @@
 import type { KGNode } from '../../constants';
-import { isPhotoNode } from '../Layout';
+import { isLocalAssetNode, isPhotoNode } from '../Layout';
 import type { BuildCtx, CanvasNode } from '../types';
 import type { NodeKindProvider } from '../NodeKindProvider';
-import { getImageUrl } from '$lib/apis/graph';
+import { getAssetThumbUrl, getImageUrl } from '$lib/apis/graph';
 
 function photoFilename(node: KGNode): string | null {
 	const p = node.properties ?? {};
@@ -20,16 +20,39 @@ function isStalePhoto(node: KGNode): boolean {
 	return !sourceId || sourceId === 'manual_creation';
 }
 
+function isLibraryPhoto(node: KGNode): boolean {
+	return isLocalAssetNode(node) && node.properties?.kind === 'photo';
+}
+
+function sourceIdOf(node: KGNode): string {
+	const sid = node.properties?.source_id;
+	return typeof sid === 'string' ? sid : '';
+}
+
 export const photoProvider: NodeKindProvider = {
 	kind: 'photo',
-	classify: isPhotoNode,
-	shouldRender(node: KGNode): boolean {
+	classify(node: KGNode): boolean {
+		return isPhotoNode(node) || isLibraryPhoto(node);
+	},
+	shouldRender(node: KGNode, ctx: BuildCtx): boolean {
+		if (isLocalAssetNode(node)) {
+			return ctx.sourceOnline[sourceIdOf(node)] !== false;
+		}
 		return !isStalePhoto(node);
 	},
 	buildCanvasFields(node: KGNode, ctx: BuildCtx): Partial<CanvasNode> {
+		if (isLocalAssetNode(node)) {
+			const cached = ctx.photoImages[node.id];
+			const fullUrl = getAssetThumbUrl(node.id, 1024);
+			if (cached) return { imageUrl: cached, fullUrl };
+			return {
+				imageUrl: getAssetThumbUrl(node.id, 512),
+				fullUrl
+			};
+		}
 		const cached = ctx.photoImages[node.id];
 		const fname = photoFilename(node);
-		const fullUrl = fname ? getImageUrl(fname, 'full') : undefined;
+		const fullUrl = fname ? getImageUrl(fname, 1024) : undefined;
 		if (cached) return { imageUrl: cached, fullUrl };
 		if (!fname) return {};
 		return {

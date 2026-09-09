@@ -31,6 +31,18 @@ export const DEPTH_FADE_START = 650;
 /** Absolute depth (world units) at which planes are fully hidden by depth fade. */
 export const DEPTH_FADE_END = 900;
 
+/**
+ * Exponential fog density for `THREE.FogExp2`.
+ * Shader: fogFactor = 1 - exp(-(density * distance)²).
+ *
+ * Tuned so fog complements NodePlane depth-fade instead of double-hiding:
+ * - INITIAL_CAMERA_Z=600 (newest bucket): fogFactor ≈ 0.10 — still readable
+ * - DEPTH_FADE_START=650: fogFactor ≈ 0.12 — fade ramp has not started
+ * - DEPTH_FADE_END=900: fogFactor ≈ 0.22 while opacity is already 0
+ * Distant older buckets recede into the navy background.
+ */
+export const FOG_DENSITY = 0.00055;
+
 /** Mouse-parallax drift amplitude base; multiplied by zoom factor each frame. */
 export const DRIFT_AMOUNT = 8.0;
 
@@ -56,17 +68,28 @@ export const ZOOM_FACTOR_DIVISOR = 50;
 export const INVIS_THRESHOLD = 0.01;
 
 /**
+ * Opacity multiplier for nodes that miss the active canvas search.
+ * Matches keep their depth/grid fade; empty query leaves this unused.
+ */
+export const SEARCH_DIM = 0.18;
+
+/**
+ * Source-offline vanish duration (ms). Ease-out cubic on mesh opacity.
+ * Band is 400–700ms; 550 sits in the middle and stays frame-rate stable
+ * unlike the per-frame `OPACITY_LERP` used for camera/chunk fade-in.
+ */
+export const VANISH_DURATION_MS = 550;
+
+/**
  * Mouse-drag pan factor: each pixel of pointer delta adds this much to
- * `targetVel.x/y`, then scaled by `basePos.z / ZOOM_FACTOR_DIVISOR` so
- * panning stays proportional on-screen regardless of zoom level.
- * Ported from the reference's `0.025` multiplier.
+ * camera-right / camera-up velocity, then scaled by viewing distance so
+ * panning stays proportional on-screen. Not scaled by camera Z (time).
  */
 export const MOUSE_PAN_FACTOR = 0.05;
 
 /**
  * Single-touch pan factor: each pixel of touch delta adds this much to
- * `targetVel.x/y`, then z-scaled like MOUSE_PAN_FACTOR.
- * Matched to MOUSE_PAN_FACTOR so touch and mouse panning feel equally responsive.
+ * camera-right / camera-up velocity, then distance-scaled like MOUSE_PAN_FACTOR.
  */
 export const TOUCH_PAN_FACTOR = 0.20;
 
@@ -180,13 +203,13 @@ export const CHUNK_OFFSETS: readonly ChunkOffset[] = (() => {
 /** Chebyshev chunk distance at/below which a photo node promotes to full-res. */
 export const LOD_FULL_CHEBY = 1;
 /** Absolute depth (world units) at/below which a photo node promotes to full-res. */
-export const LOD_FULL_DEPTH = 120;
+export const LOD_FULL_DEPTH = 240;
 /** Extra Chebyshev distance beyond LOD_FULL_CHEBY where a node stays full-res before demoting (hysteresis band). */
 export const LOD_HYSTERESIS = 1;
 /** Absolute depth hysteresis band (world units) beyond LOD_FULL_DEPTH before demoting. */
 export const LOD_FULL_DEPTH_HYSTERESIS = 60;
 /** Maximum simultaneous full-res textures held in GPU memory (LRU eviction above this). */
-export const LOD_FULL_MAX = 12;
+export const LOD_FULL_MAX = 10;
 
 /**
  * Returns the chunk-update throttle delay in milliseconds based on the

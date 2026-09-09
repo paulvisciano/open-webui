@@ -14,7 +14,7 @@
  *
  * NOTE: This is a faithful port. The full-res LRU and in-flight abort logic
  * are preserved so the image pipeline (ported by another task) can drop in
- * without changes.
+ * without changes. Thumbnail LRU (cap 64) and prefix/URL abort are additive.
  */
 import * as THREE from 'three';
 import { LOD_FULL_MAX } from '../renderer/constants';
@@ -24,6 +24,8 @@ class TextureCache {
   private loaders = new Map<string, Set<(t: THREE.Texture) => void>>();
   private textureLoader = new THREE.TextureLoader();
   private fullResLru = new Map<string, Set<() => void>>();
+  /** Thumbnail LRU (insertion order). Distinct from `fullResLru`. */
+  private thumbLru = new Map<string, true>();
   /**
    * In-flight HTMLImageElements keyed by URL. Three's `ImageLoader` creates
    * an `<img>` per URL and assigns `image.src = url`, which is what actually
@@ -34,12 +36,22 @@ class TextureCache {
 
   private static readonly MAX_RETRIES = 4;
   private static readonly BASE_RETRY_MS = 500;
+  /** Max simultaneous thumbnail GPU textures (distinct from `LOD_FULL_MAX`). */
+  private static readonly THUMB_MAX = 64;
+  /** Max simultaneous image fetches. Extra `load()` calls wait in `_loadQueue`. */
+  private static readonly MAX_IN_FLIGHT = 6;
   private retries = new Map<string, number>();
   private _loadTimers?: Map<string, ReturnType<typeof setTimeout>>;
+  private _loadQueue: string[] = [];
+  private _inFlightCount = 0;
 
   /** Returns the cached texture for `url`, or `undefined` if not yet loaded. */
   get(url: string): THREE.Texture | undefined {
-    return this.cache.get(url);
+    const tex = this.cache.get(url);
+    if (tex && this.thumbLru.has(url)) {
+      this._touchThumb(url);
+    }
+    return tex;
   }
 
   /**
@@ -52,6 +64,9 @@ class TextureCache {
   load(url: string, onLoad?: (t: THREE.Texture) => void): THREE.Texture | undefined {
     const cached = this.cache.get(url);
     if (cached) {
+      if (!this.fullResLru.has(url)) {
+        this._touchThumb(url);
+      }
       onLoad?.(cached);
       return cached;
     }
@@ -60,6 +75,9 @@ class TextureCache {
     const queued = this.loaders.get(url);
     if (queued) {
       if (onLoad) queued.add(onLoad);
+      if (!this.fullResLru.has(url)) {
+        this._touchThumb(url);
+      }
       return undefined;
     }
 
@@ -69,8 +87,37 @@ class TextureCache {
     if (onLoad) callbacks.add(onLoad);
     this.loaders.set(url, callbacks);
 
-    this._loadInternal(url, callbacks);
+    if (!this.fullResLru.has(url)) {
+      this._touchThumb(url);
+    }
+
+    if (this._inFlightCount >= TextureCache.MAX_IN_FLIGHT) {
+      this._loadQueue.push(url);
+      return undefined;
+    }
+
+    this._beginLoad(url, callbacks);
     return undefined;
+  }
+
+  private _beginLoad(url: string, callbacks: Set<(t: THREE.Texture) => void>): void {
+    this._inFlightCount++;
+    this._loadInternal(url, callbacks);
+  }
+
+  private _releaseSlot(): void {
+    this._inFlightCount = Math.max(0, this._inFlightCount - 1);
+    this._pumpQueue();
+  }
+
+  private _pumpQueue(): void {
+    while (this._inFlightCount < TextureCache.MAX_IN_FLIGHT && this._loadQueue.length > 0) {
+      const url = this._loadQueue.shift();
+      if (url === undefined) break;
+      const callbacks = this.loaders.get(url);
+      if (!callbacks) continue;
+      this._beginLoad(url, callbacks);
+    }
   }
 
   private _loadInternal(url: string, callbacks: Set<(t: THREE.Texture) => void>): void {
@@ -89,6 +136,8 @@ class TextureCache {
 
   private onLoadError(url: string, callbacks: Set<(t: THREE.Texture) => void>, err: unknown): void {
     this.inFlightImages.delete(url);
+    if (!this.loaders.has(url)) return;
+
     const attempt = (this.retries.get(url) ?? 0) + 1;
     this.retries.set(url, attempt);
 
@@ -107,6 +156,7 @@ class TextureCache {
     this.retries.delete(url);
     const tex = this.cache.get(url);
     this.flush(url, tex);
+    this._releaseSlot();
   }
 
   private onDone(url: string, texture: THREE.Texture): void {
@@ -119,6 +169,12 @@ class TextureCache {
         this._loadTimers.delete(url);
       }
     }
+
+    if (!this.loaders.has(url)) {
+      texture.dispose();
+      return;
+    }
+
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.generateMipmaps = true;
     texture.minFilter = THREE.LinearMipmapLinearFilter;
@@ -126,7 +182,11 @@ class TextureCache {
     texture.anisotropy = 8;
     texture.needsUpdate = true;
     this.cache.set(url, texture);
+    if (!this.fullResLru.has(url)) {
+      this._touchThumb(url);
+    }
     this.flush(url, texture);
+    this._releaseSlot();
   }
 
   private flush(url: string, texture: THREE.Texture | undefined): void {
@@ -155,6 +215,8 @@ class TextureCache {
     onLoaded: (t: THREE.Texture) => void,
     onEvicted: () => void,
   ): void {
+    this.thumbLru.delete(url);
+
     const existing = this.cache.get(url);
     if (existing) {
       const prevCbs = this.fullResLru.get(url);
@@ -200,10 +262,116 @@ class TextureCache {
       for (const cb of cbs) cb();
       this.fullResLru.delete(url);
     }
+    this.thumbLru.delete(url);
     const tex = this.cache.get(url);
     if (tex) {
       tex.dispose();
       this.cache.delete(url);
+    }
+  }
+
+  private _touchThumb(url: string): void {
+    if (this.fullResLru.has(url)) return;
+    this.thumbLru.delete(url);
+    this.thumbLru.set(url, true);
+    while (this.thumbLru.size > TextureCache.THUMB_MAX) {
+      const oldestUrl = this.thumbLru.keys().next().value;
+      if (oldestUrl === undefined || oldestUrl === url) break;
+      this._evictThumb(oldestUrl);
+    }
+  }
+
+  private _evictThumb(url: string): void {
+    if (this.fullResLru.has(url)) {
+      this.thumbLru.delete(url);
+      return;
+    }
+    this._disposeUrl(url);
+  }
+
+  private _disposeUrl(url: string): void {
+    const queuedIdx = this._loadQueue.indexOf(url);
+    if (queuedIdx >= 0) {
+      this._loadQueue.splice(queuedIdx, 1);
+    }
+    const wasInFlightSlot =
+      queuedIdx < 0 &&
+      (this.inFlightImages.has(url) ||
+        this._loadTimers?.has(url) === true ||
+        this.loaders.has(url));
+
+    const img = this.inFlightImages.get(url);
+    if (img) {
+      img.src = '';
+      this.inFlightImages.delete(url);
+    }
+    if (this._loadTimers) {
+      const t = this._loadTimers.get(url);
+      if (t) {
+        clearTimeout(t);
+        this._loadTimers.delete(url);
+      }
+    }
+    this.retries.delete(url);
+    this.loaders.delete(url);
+
+    const cbs = this.fullResLru.get(url);
+    if (cbs) {
+      for (const cb of cbs) cb();
+      this.fullResLru.delete(url);
+    }
+    this.thumbLru.delete(url);
+
+    const tex = this.cache.get(url);
+    if (tex) {
+      tex.dispose();
+      this.cache.delete(url);
+    }
+
+    if (wasInFlightSlot) {
+      this._releaseSlot();
+    }
+  }
+
+  private _urlsMatching(pred: (url: string) => boolean): string[] {
+    const found = new Set<string>();
+    for (const url of this.cache.keys()) {
+      if (pred(url)) found.add(url);
+    }
+    for (const url of this.loaders.keys()) {
+      if (pred(url)) found.add(url);
+    }
+    for (const url of this.inFlightImages.keys()) {
+      if (pred(url)) found.add(url);
+    }
+    for (const url of this.fullResLru.keys()) {
+      if (pred(url)) found.add(url);
+    }
+    for (const url of this.thumbLru.keys()) {
+      if (pred(url)) found.add(url);
+    }
+    return [...found];
+  }
+
+  /**
+   * Dispose cached/in-flight URLs containing `prefix` (asset id or source id).
+   * CONTRACT: caller fades mounted planes first, then abort. Prefix-less
+   * content-addressed URLs are left intact so duplicate hashes keep sharing.
+   */
+  abortAndDisposeByPrefix(prefix: string): void {
+    if (!prefix) return;
+    for (const url of this._urlsMatching((u) => u.includes(prefix))) {
+      this._disposeUrl(url);
+    }
+  }
+
+  /**
+   * Dispose the given URLs (source vanish of visible planes).
+   * CONTRACT: caller fades those planes first, then abort.
+   */
+  abortAndDisposeUrls(urls: string[]): void {
+    for (const url of urls) {
+      this._disposeUrl(url);
     }
   }
 
@@ -219,7 +387,10 @@ class TextureCache {
     this.cache.clear();
     this.loaders.clear();
     this.fullResLru.clear();
+    this.thumbLru.clear();
     this.inFlightImages.clear();
+    this._loadQueue.length = 0;
+    this._inFlightCount = 0;
   }
 
   /**
@@ -238,10 +409,20 @@ class TextureCache {
       this._loadTimers.clear();
     }
     this.retries.clear();
+    this._loadQueue.length = 0;
+    this._inFlightCount = 0;
   }
 
   size(): number {
     return this.cache.size;
+  }
+
+  thumbSize(): number {
+    return this.thumbLru.size;
+  }
+
+  isInFlight(url: string): boolean {
+    return this.inFlightImages.has(url);
   }
 }
 

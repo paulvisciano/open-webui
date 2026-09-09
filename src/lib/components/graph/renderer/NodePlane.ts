@@ -14,15 +14,19 @@ import {
   DEPTH_FADE_END,
   DEPTH_FADE_START,
   INVIS_THRESHOLD,
+  SEARCH_DIM,
   LOD_FULL_CHEBY,
   LOD_FULL_DEPTH,
   LOD_FULL_DEPTH_HYSTERESIS,
   LOD_HYSTERESIS,
   RENDER_DISTANCE,
+  VANISH_DURATION_MS,
 } from './constants';
 import { getProvider } from './NodeKindProvider';
 import './providers'; // side-effect: registers all providers so getProvider works
 import type { CanvasNode } from './types';
+import { searchHighlight } from './search-highlight-flag';
+import { isSearchMatch } from '../search-match';
 
 /** Lerp factor for smoothing current opacity toward the per-frame target. */
 const OPACITY_LERP = 0.18;
@@ -34,6 +38,13 @@ const OPACITY_LERP = 0.18;
 const FONT_DISPLAY = '"Fraunces", "Iowan Old Style", Georgia, serif';
 const FONT_BODY = '"Inter", -apple-system, BlinkMacSystemFont, system-ui, sans-serif';
 const FONT_MONO = '"JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace';
+
+const CYAN_ACCENT = '#13dcf6';
+const CYAN_CYBER = '#00d4ff';
+const GLASS_BG = '#0b1220';
+const GLASS_BORDER = 'rgba(0,212,255,0.55)';
+const GLASS_RING = 'rgba(19,220,246,0.22)';
+const GLASS_GLOW = 'rgba(0,212,255,0.28)';
 
 /**
  * Renders one `CanvasNode` as a textured/colored plane on the canvas.
@@ -47,14 +58,19 @@ export class NodePlane {
   private readonly _node: CanvasNode;
   private readonly _mesh: THREE.Mesh;
   private readonly _material: THREE.MeshBasicMaterial;
-  private _currentOpacity = 1;
+  /** Start at 0 so remount / first spawn lerps in via `OPACITY_LERP`. */
+  private _currentOpacity = 0;
   private _disposed = false;
+  private _vanishing = false;
+  private _vanishStartMs = 0;
+  private _vanishFrom = 0;
   private _currentLod: 'thumb' | 'full' = 'thumb';
   private _fullUrl?: string;
   private _thumbUrl?: string;
   private _fullEvictCb?: () => void;
   /** Whether LOD thumb→full promotion is enabled (from planeConfig). */
   private _lodEnabled = false;
+  private _thumbRequested = false;
   /** Locally-baked text texture for text-source nodes (NOT routed through `textureCache`). */
   private _noteTexture?: THREE.CanvasTexture;
   private _hoverTexture?: THREE.CanvasTexture;
@@ -77,7 +93,14 @@ export class NodePlane {
     this._mesh = new THREE.Mesh(sharedGeometry, this._material);
     this._mesh.scale.set(node.width, node.height, 1);
     this._mesh.position.set(node.localX, node.localY, node.localZ);
+    this._mesh.rotation.y = node.yaw ?? 0;
+    const yaw = node.yaw ?? 0;
+    if (yaw > 0.2) this._mesh.position.x += 2.4;
+    else if (yaw < -0.2) this._mesh.position.x -= 2.4;
     this._mesh.userData.nodeId = node.id;
+    this._material.opacity = 0;
+    this._mesh.visible = false;
+    this._material.depthWrite = false;
 
     this._lodEnabled = planeConfig?.lodEnabled ?? false;
 
@@ -85,10 +108,6 @@ export class NodePlane {
     if (textureSource === 'url' && node.imageUrl) {
       this._thumbUrl = node.imageUrl;
       this._fullUrl = node.fullUrl;
-      const cached = textureCache.load(node.imageUrl, (t) => this.applyTexture(t));
-      if (cached) {
-        this.applyTexture(cached);
-      }
     } else if (textureSource === 'text' && node.textContent) {
       const isConv = this._node.kind === 'conversation';
       const isActive = isConv && this._node.properties?.isActive === true;
@@ -118,6 +137,38 @@ export class NodePlane {
     return this._node;
   }
 
+  get disposed(): boolean {
+    return this._disposed;
+  }
+
+  get vanishing(): boolean {
+    return this._vanishing;
+  }
+
+  /** True once a vanish lerp has reached `INVIS_THRESHOLD` (or the plane was disposed). */
+  get isVanished(): boolean {
+    return this._vanishing && (this._disposed || this._currentOpacity < INVIS_THRESHOLD);
+  }
+
+  /** Thumb + full URLs this plane loaded through `textureCache` (empty for text/flat). */
+  get textureUrls(): string[] {
+    const urls: string[] = [];
+    if (this._thumbUrl) urls.push(this._thumbUrl);
+    if (this._fullUrl) urls.push(this._fullUrl);
+    return urls;
+  }
+
+  /**
+   * Start a source-offline fade. `updateFade` then drives mesh opacity to 0
+   * over `VANISH_DURATION_MS` with ease-out cubic (not CSS).
+   */
+  beginVanish(): void {
+    if (this._disposed || this._vanishing) return;
+    this._vanishing = true;
+    this._vanishStartMs = performance.now();
+    this._vanishFrom = this._currentOpacity;
+  }
+
   setHovered(hovered: boolean): void {
     if (this._hovered === hovered) return;
     this._hovered = hovered;
@@ -140,10 +191,44 @@ export class NodePlane {
   updateFade(cameraPos: THREE.Vector3, chunkOrigin: THREE.Vector3): void {
     if (this._disposed) return;
 
+    if (this._node.kind === 'conversation') {
+      this._mesh.visible = false;
+      this._material.opacity = 0;
+      this._material.depthWrite = false;
+      return;
+    }
+
+    if (this._vanishing) {
+      const t = Math.min(1, (performance.now() - this._vanishStartMs) / VANISH_DURATION_MS);
+      const eased = 1 - (1 - t) ** 3;
+      this._currentOpacity = this._vanishFrom * (1 - eased);
+      if (this._currentOpacity < INVIS_THRESHOLD) {
+        this._currentOpacity = 0;
+        this._mesh.visible = false;
+        this._material.depthWrite = false;
+      } else {
+        this._mesh.visible = true;
+        this._material.depthWrite = false;
+      }
+      this._material.opacity = this._currentOpacity;
+      this._material.needsUpdate = true;
+      return;
+    }
+
     const worldPos = this._mesh.position;
     const nodeWorldX = chunkOrigin.x + worldPos.x;
     const nodeWorldY = chunkOrigin.y + worldPos.y;
     const nodeWorldZ = chunkOrigin.z + worldPos.z;
+
+    // Facing one wall puts the other behind the camera. DoubleSide planes plus
+    // a far clip of thousands of units let those back-facing tiles ghost on
+    // top of the wall you are looking at.
+    if (Math.abs(cameraPos.x) > 40 && Math.abs(nodeWorldX) > 150
+      && Math.sign(cameraPos.x) !== Math.sign(nodeWorldX)) {
+      this._mesh.visible = false;
+      this._material.depthWrite = false;
+      return;
+    }
 
     const camChunkX = Math.floor(cameraPos.x / CHUNK_SIZE);
     const camChunkY = Math.floor(cameraPos.y / CHUNK_SIZE);
@@ -172,7 +257,11 @@ export class NodePlane {
 
     // Reference repo formula: opacity = min(gridFade, depthFade²). The squared
     // depth term makes far planes fall off faster than grid distance alone.
-    const targetOpacity = Math.min(gridFade, depthFade * depthFade);
+    let targetOpacity = Math.min(gridFade, depthFade * depthFade);
+    const matchIds = searchHighlight.matchIds;
+    if (matchIds !== null && !isSearchMatch(matchIds, this._node.id)) {
+      targetOpacity *= SEARCH_DIM;
+    }
 
     this._currentOpacity += (targetOpacity - this._currentOpacity) * OPACITY_LERP;
 
@@ -185,6 +274,16 @@ export class NodePlane {
     }
     this._material.opacity = this._currentOpacity;
     this._material.needsUpdate = true;
+
+    if (this._mesh.visible && targetOpacity > 0.05) {
+      this._requestThumbIfNeeded();
+    }
+  }
+
+  private _requestThumbIfNeeded(): void {
+    if (this._thumbRequested || this._disposed || !this._thumbUrl) return;
+    this._thumbRequested = true;
+    textureCache.load(this._thumbUrl, (t) => this.applyTexture(t));
   }
 
   /**
@@ -195,13 +294,30 @@ export class NodePlane {
    */
   applyTexture(texture: THREE.Texture): void {
     if (this._disposed) return;
-    this._material.map = texture;
+    const imgSize = this._imageSize(texture);
+    if (imgSize && (this._node.kind === 'photo' || this._node.kind === 'video')) {
+      this._fitNaturalAspect(imgSize.w, imgSize.h);
+    }
+    if (this._node.kind === 'video' || this._node.kind === 'photo') {
+      try {
+        const baked = this._createMediaCaptionTexture(texture, this._node.kind === 'video');
+        if (this._noteTexture && this._noteTexture !== baked) {
+          this._noteTexture.dispose();
+        }
+        this._noteTexture = baked;
+        this._material.map = baked;
+      } catch {
+        this._material.map = texture;
+      }
+    } else {
+      this._material.map = texture;
+    }
     this._material.color.setHex(0xffffff);
     this._material.needsUpdate = true;
   }
 
   updateLod(cameraPos: THREE.Vector3, chunkOrigin: THREE.Vector3): void {
-    if (this._disposed) return;
+    if (this._disposed || this._vanishing || !this._mesh.visible) return;
     if (!this._lodEnabled || !this._thumbUrl) return;
     if (!this._fullUrl) return;
 
@@ -223,7 +339,11 @@ export class NodePlane {
       Math.abs(nodeChunkY - camChunkY),
       Math.abs(nodeChunkZ - camChunkZ),
     );
-    const absDepth = Math.abs(cameraPos.z - nodeWorldZ);
+    const absDepth = Math.hypot(
+      cameraPos.x - nodeWorldX,
+      cameraPos.y - nodeWorldY,
+      cameraPos.z - nodeWorldZ,
+    );
 
     const demoteThreshold = LOD_FULL_CHEBY + LOD_HYSTERESIS;
     const demoteDepth = LOD_FULL_DEPTH + LOD_FULL_DEPTH_HYSTERESIS;
@@ -283,7 +403,7 @@ export class NodePlane {
   private _createConversationTexture(hovered: boolean, isActive = false, isStreaming = false): THREE.CanvasTexture {
     const aspect = this._node.width > 0 && this._node.height > 0
       ? this._node.width / this._node.height
-      : 1 / 1.4;
+      : 210 / 124;
     const canvasH = 768;
     const canvasW = Math.max(192, Math.round(canvasH * aspect));
     const canvas = document.createElement('canvas');
@@ -302,41 +422,16 @@ export class NodePlane {
         ? p.created_at
         : null;
     const dateLabel = createdAt !== null
-      ? new Date(createdAt > 1e12 ? createdAt : createdAt * 1000).toLocaleDateString(undefined, {
-          year: 'numeric', month: 'short', day: 'numeric',
-        })
+      ? this._formatCardDate(createdAt)
       : '';
 
-    // Prototype CSS vars (oklch → sRGB hex).
-    const accent = '#13dcf6';     // --accent oklch(82% 0.14 210)
-    const fg = '#dbdee1';         // --fg oklch(90% 0.005 250)
-    const muted = '#87909c';       // --muted oklch(65% 0.02 255)
-    const faint = '#6a727d';       // --faint oklch(55% 0.02 255)
-    // --bg oklch(6% 0.02 260) ≈ #000103; card bg oklch(12% 0.02 250 / 78%)
-    const cardBg = '#161616';
-    // Normal border: 1px oklch(50% 0.03 210 / 14%) — neutral blue-gray, NOT accent
-    const borderNormal = 'rgba(91,124,170,0.14)';
-    // Outer 1px ring: oklch(82% 0.14 210 / 8%) — accent at 8%
-    const ringNormal = 'rgba(19,220,246,0.08)';
-
-    const padX = 22;
+    const accent = CYAN_ACCENT;
+    const padX = 28;
     const maxTextWidth = canvasW - padX * 2;
     const radius = 18;
     const scale = canvasH / 420;
 
-    ctx.fillStyle = cardBg;
-    this._roundRect(ctx, 0, 0, canvasW, canvasH, radius);
-    ctx.fill();
-
-    ctx.strokeStyle = ringNormal;
-    ctx.lineWidth = 1;
-    this._roundRect(ctx, 0.5, 0.5, canvasW - 1, canvasH - 1, radius - 0.5);
-    ctx.stroke();
-
-    ctx.strokeStyle = borderNormal;
-    ctx.lineWidth = 1;
-    this._roundRect(ctx, 1, 1, canvasW - 2, canvasH - 2, radius - 1);
-    ctx.stroke();
+    this._fillGlassCard(ctx, canvasW, canvasH, radius, scale);
 
     if (isActive) {
       ctx.save();
@@ -379,89 +474,476 @@ export class NodePlane {
       ctx.restore();
     }
 
-    const topGrad = ctx.createLinearGradient(0, 0, canvasW, 0);
-    topGrad.addColorStop(0, isStreaming ? 'rgba(167,139,250,0)' : 'rgba(19,220,246,0)');
-    topGrad.addColorStop(0.5, isStreaming ? '#a78bfa' : accent);
-    topGrad.addColorStop(1, isStreaming ? 'rgba(167,139,250,0)' : 'rgba(19,220,246,0)');
-    ctx.fillStyle = topGrad;
-    ctx.globalAlpha = isActive ? 1 : 0.7;
-    ctx.fillRect(0, 0, canvasW, isActive ? 5 : 3);
-    ctx.globalAlpha = 1;
-
-    const titleFont = Math.max(30, Math.round(30 * scale));
-    const titleY = Math.round(24 * scale);
-    const displayFamily = FONT_DISPLAY;
-    const bodyFamily = FONT_BODY;
-    ctx.font = `600 ${titleFont}px ${displayFamily}`;
-    ctx.fillStyle = fg;
+    const glyphFont = Math.max(13, Math.round(14 * scale));
+    const glyphY = Math.round(22 * scale);
+    ctx.font = `500 ${glyphFont}px ${FONT_MONO}`;
+    ctx.fillStyle = CYAN_CYBER;
     ctx.textBaseline = 'top';
     ctx.textAlign = 'left';
-    this._setLetterSpacing(ctx, `${Math.round(-0.012 * titleFont)}px`);
+    this._setLetterSpacing(ctx, `${Math.round(0.18 * glyphFont)}px`);
+    ctx.fillText(isStreaming ? 'THINKING' : isActive ? 'ACTIVE' : 'CONVERSATION', padX, glyphY);
+    this._setLetterSpacing(ctx, '0px');
+
+    const titleFont = Math.max(28, Math.round(32 * scale));
+    const titleY = glyphY + glyphFont + Math.round(14 * scale);
+    ctx.font = `500 ${titleFont}px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#f4fbff';
+    this._setLetterSpacing(ctx, `${Math.round(-0.02 * titleFont)}px`);
     const titleLineH = Math.round(titleFont * 1.22);
-    this._drawWrapped(ctx, title, padX, titleY, maxTextWidth, titleLineH, 3);
+    this._drawWrapped(ctx, title, padX, titleY, maxTextWidth, titleLineH, 2);
     this._setLetterSpacing(ctx, '0px');
 
-    const titleBottomY = titleY + titleLineH * Math.min(3, Math.ceil(title.length / 28)) + Math.round(6 * scale);
-
-    const preview = (p.preview as string) ?? '';
-    const bodyFont = Math.max(15, Math.round(15 * scale));
-    const bodyLineH = Math.round(bodyFont * 1.4);
-    const bodyY = titleBottomY + Math.round(12 * scale);
-    const footFont = Math.max(13, Math.round(13 * scale));
-    const footH = Math.round((10 + 13 + 16) * scale);
-    const footY = canvasH - footH;
-    const bodyMaxY = footY - Math.round(10 * scale);
-    const maxBodyLines = Math.max(0, Math.floor((bodyMaxY - bodyY) / bodyLineH));
-    if (isActive && preview && maxBodyLines > 0) {
-      ctx.font = `400 ${bodyFont}px ${bodyFamily}`;
-      ctx.fillStyle = muted;
-      ctx.textBaseline = 'top';
-      ctx.textAlign = 'left';
-      this._setLetterSpacing(ctx, '0px');
-      this._drawWrapped(ctx, preview, padX, bodyY, maxTextWidth, bodyLineH, maxBodyLines);
-    }
-
-    ctx.strokeStyle = 'rgba(106,114,125,0.08)';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(padX, footY);
-    ctx.lineTo(canvasW - padX, footY);
-    ctx.stroke();
-
-    const monoFamily = FONT_MONO;
-    const footTextY = footY + Math.round(8 * scale);
-    if (isStreaming) {
-      const streamColor = '#a78bfa';
-      const dotR = Math.round(footFont * 0.45);
-      const dotY = footTextY + footFont * 0.35;
-      ctx.fillStyle = streamColor;
-      ctx.beginPath();
-      ctx.arc(padX + dotR, dotY, dotR, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.font = `700 ${footFont}px ${monoFamily}`;
-      ctx.fillStyle = streamColor;
-      this._setLetterSpacing(ctx, `${Math.round(0.16 * footFont)}px`);
-      ctx.fillText('THINKING…', padX + dotR * 2 + Math.round(6 * scale), footTextY);
-    } else {
-      ctx.font = `700 ${footFont}px ${monoFamily}`;
-      ctx.fillStyle = accent;
-      this._setLetterSpacing(ctx, `${Math.round(0.16 * footFont)}px`);
-      ctx.fillText(isActive ? 'ACTIVE CHAT' : 'CHAT', padX, footTextY);
-    }
-    // Date — right, faint, regular
     if (dateLabel) {
-      ctx.font = `${footFont}px ${monoFamily}`;
-      ctx.fillStyle = faint;
-      const rightText = dateLabel.toUpperCase();
-      const rightWidth = ctx.measureText(rightText).width;
-      ctx.fillText(rightText, canvasW - padX - rightWidth, footTextY);
+      const dateFont = Math.max(13, Math.round(14 * scale));
+      const dateY = titleY + titleLineH * 2 + Math.round(10 * scale);
+      ctx.font = `500 ${dateFont}px ${FONT_MONO}`;
+      ctx.fillStyle = CYAN_CYBER;
+      this._setLetterSpacing(ctx, `${Math.round(0.16 * dateFont)}px`);
+      ctx.fillText(dateLabel.toUpperCase(), padX, Math.min(dateY, canvasH - dateFont - Math.round(22 * scale)));
+      this._setLetterSpacing(ctx, '0px');
     }
-    this._setLetterSpacing(ctx, '0px');
 
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.needsUpdate = true;
     return texture;
+  }
+
+  private _fillGlassCard(
+    ctx: CanvasRenderingContext2D,
+    w: number,
+    h: number,
+    radius: number,
+    scale: number,
+  ): void {
+    ctx.fillStyle = GLASS_BG;
+    this._roundRect(ctx, 0, 0, w, h, radius);
+    ctx.fill();
+
+    ctx.strokeStyle = GLASS_RING;
+    ctx.lineWidth = 1;
+    this._roundRect(ctx, 0.5, 0.5, w - 1, h - 1, radius - 0.5);
+    ctx.stroke();
+
+    ctx.save();
+    ctx.shadowColor = GLASS_GLOW;
+    ctx.shadowBlur = Math.round(16 * scale);
+    ctx.strokeStyle = GLASS_BORDER;
+    ctx.lineWidth = 1;
+    this._roundRect(ctx, 1, 1, w - 2, h - 2, radius - 1);
+    ctx.stroke();
+    ctx.restore();
+
+    const topGrad = ctx.createLinearGradient(0, 0, w, 0);
+    topGrad.addColorStop(0, 'rgba(19,220,246,0)');
+    topGrad.addColorStop(0.5, CYAN_ACCENT);
+    topGrad.addColorStop(1, 'rgba(19,220,246,0)');
+    ctx.fillStyle = topGrad;
+    ctx.globalAlpha = 0.7;
+    ctx.fillRect(0, 0, w, 3);
+    ctx.globalAlpha = 1;
+  }
+
+  private _formatCardDate(raw: number): string {
+    const d = new Date(raw > 1e12 ? raw : raw * 1000);
+    if (isNaN(d.getTime())) return '';
+    const day = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    return `${day} · ${d.getFullYear()}`;
+  }
+
+  private _hashSeed(s: string): number {
+    let h = 2166136261;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
+  }
+
+  private _drawWaveformBars(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    seed: number,
+  ): void {
+    const barW = 3;
+    const gap = 3;
+    const n = Math.max(8, Math.floor((w + gap) / (barW + gap)));
+    let s = seed || 1;
+    ctx.save();
+    ctx.fillStyle = CYAN_CYBER;
+    for (let i = 0; i < n; i++) {
+      s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+      const t = (s & 0xffff) / 0xffff;
+      const bh = Math.max(4, h * (0.18 + 0.82 * t));
+      ctx.globalAlpha = 0.85;
+      const bx = x + i * (barW + gap);
+      const by = y + (h - bh) / 2;
+      ctx.beginPath();
+      this._roundRect(ctx, bx, by, barW, bh, 1.5);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  private _drawDocLines(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    w: number,
+    scale: number,
+  ): void {
+    const h = Math.max(3, Math.round(4 * scale));
+    const gap = Math.round(8 * scale);
+    const widths = [0.88, 0.72, 0.8];
+    ctx.fillStyle = 'rgba(232,238,246,0.18)';
+    for (let i = 0; i < widths.length; i++) {
+      const lw = w * widths[i];
+      const yy = y + i * (h + gap);
+      ctx.beginPath();
+      this._roundRect(ctx, x, yy, lw, h, h / 2);
+      ctx.fill();
+    }
+  }
+
+  private _hashNoise(n: number): number {
+    n = Math.imul(n ^ 0x9e3779b9, 0x85ebca6b);
+    return ((n ^ (n >>> 13)) >>> 0) / 4294967296;
+  }
+
+  private _fillMolding(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    t: number,
+    hi: string,
+    lo: string,
+    mid: string,
+  ): void {
+    const x2 = x + w;
+    const y2 = y + h;
+    ctx.fillStyle = mid;
+    ctx.fillRect(x, y, w, h);
+    const top = ctx.createLinearGradient(x, y, x, y + t);
+    top.addColorStop(0, hi);
+    top.addColorStop(0.45, mid);
+    top.addColorStop(1, lo);
+    ctx.fillStyle = top;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x2, y);
+    ctx.lineTo(x2 - t, y + t);
+    ctx.lineTo(x + t, y + t);
+    ctx.closePath();
+    ctx.fill();
+    const left = ctx.createLinearGradient(x, y, x + t, y);
+    left.addColorStop(0, hi);
+    left.addColorStop(0.55, mid);
+    left.addColorStop(1, lo);
+    ctx.fillStyle = left;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + t, y + t);
+    ctx.lineTo(x + t, y2 - t);
+    ctx.lineTo(x, y2);
+    ctx.closePath();
+    ctx.fill();
+    const right = ctx.createLinearGradient(x2, y, x2 - t, y);
+    right.addColorStop(0, lo);
+    right.addColorStop(0.4, mid);
+    right.addColorStop(1, '#0c0704');
+    ctx.fillStyle = right;
+    ctx.beginPath();
+    ctx.moveTo(x2, y);
+    ctx.lineTo(x2, y2);
+    ctx.lineTo(x2 - t, y2 - t);
+    ctx.lineTo(x2 - t, y + t);
+    ctx.closePath();
+    ctx.fill();
+    const bot = ctx.createLinearGradient(x, y2, x, y2 - t);
+    bot.addColorStop(0, '#0a0604');
+    bot.addColorStop(0.35, lo);
+    bot.addColorStop(1, mid);
+    ctx.fillStyle = bot;
+    ctx.beginPath();
+    ctx.moveTo(x, y2);
+    ctx.lineTo(x2, y2);
+    ctx.lineTo(x2 - t, y2 - t);
+    ctx.lineTo(x + t, y2 - t);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  private _grainWoodRing(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    t: number,
+  ): void {
+    if (t < 2) return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x, y, w, h);
+    ctx.rect(x + t, y + t, Math.max(0, w - t * 2), Math.max(0, h - t * 2));
+    ctx.clip('evenodd');
+    const step = Math.max(1.4, t * 0.22);
+    ctx.lineWidth = 0.8;
+    ctx.lineCap = 'butt';
+    for (let i = 0; i < w; i += step) {
+      const n = this._hashNoise((x + i) * 17 + y * 31);
+      ctx.strokeStyle = n > 0.55 ? 'rgba(92,58,28,0.28)' : 'rgba(18,8,4,0.22)';
+      ctx.globalAlpha = 0.35 + n * 0.45;
+      const wobble = (n - 0.5) * t * 0.4;
+      ctx.beginPath();
+      ctx.moveTo(x + i, y + wobble);
+      ctx.lineTo(x + i + (n - 0.5) * 1.4, y + h);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 0.18;
+    ctx.strokeStyle = 'rgba(210,160,90,0.22)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, t);
+    ctx.strokeRect(x + 0.5, y + 0.5, t, h - 1);
+    ctx.restore();
+  }
+
+  private _drawPlayGlyph(
+    ctx: CanvasRenderingContext2D,
+    cx: number,
+    cy: number,
+    size: number,
+  ): void {
+    const r = size / 2;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(212,175,55,0.7)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = '#d4af37';
+    ctx.beginPath();
+    const ox = cx + r * 0.08;
+    ctx.moveTo(ox - r * 0.22, cy - r * 0.32);
+    ctx.lineTo(ox + r * 0.38, cy);
+    ctx.lineTo(ox - r * 0.22, cy + r * 0.32);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  private _imageSize(texture: THREE.Texture): { w: number; h: number } | null {
+    const img = texture.image as {
+      width?: number;
+      height?: number;
+      naturalWidth?: number;
+      naturalHeight?: number;
+      videoWidth?: number;
+      videoHeight?: number;
+    } | undefined;
+    if (!img) return null;
+    const w = img.naturalWidth ?? img.videoWidth ?? img.width ?? 0;
+    const h = img.naturalHeight ?? img.videoHeight ?? img.height ?? 0;
+    if (w <= 0 || h <= 0) return null;
+    return { w, h };
+  }
+
+  private _fitNaturalAspect(iw: number, ih: number): void {
+    const aspect = iw / ih;
+    if (!Number.isFinite(aspect) || aspect <= 0) return;
+    const span = Math.max(this._node.width, this._node.height, 72);
+    if (aspect >= 1) {
+      this._mesh.scale.set(span, span / aspect, 1);
+    } else {
+      this._mesh.scale.set(span * aspect, span, 1);
+    }
+  }
+
+  private _mediaDateLabel(): string {
+    const p = this._node.properties ?? {};
+    const raw =
+      p.date_taken_friendly ??
+      p.datetime_original ??
+      p.date_taken ??
+      p.taken_at ??
+      p.createdAt ??
+      p.created_at;
+    if (raw == null || raw === '') return '';
+    let d: Date | null = null;
+    if (typeof raw === 'number' && Number.isFinite(raw)) {
+      d = new Date(raw > 1e12 ? raw : raw * 1000);
+    } else if (typeof raw === 'string') {
+      const m = raw.match(/^(\d{4})[:\-](\d{2})[:\-](\d{2})/);
+      d = m ? new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00`) : new Date(raw);
+    }
+    if (!d || isNaN(d.getTime())) return '';
+    const day = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    return `${day} · ${d.getFullYear()}`;
+  }
+
+  private _createMediaCaptionTexture(source: THREE.Texture, isVideo: boolean): THREE.CanvasTexture {
+    const imgSize = this._imageSize(source);
+    const aspect = imgSize
+      ? imgSize.w / imgSize.h
+      : this._mesh.scale.x > 0 && this._mesh.scale.y > 0
+        ? this._mesh.scale.x / this._mesh.scale.y
+        : 16 / 9;
+    const long = 1024;
+    const canvasW = aspect >= 1 ? long : Math.max(192, Math.round(long * aspect));
+    const canvasH = aspect >= 1 ? Math.max(192, Math.round(long / aspect)) : long;
+    const canvas = document.createElement('canvas');
+    canvas.width = canvasW;
+    canvas.height = canvasH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return new THREE.CanvasTexture(canvas);
+
+    const minSide = Math.min(canvasW, canvasH);
+    const outer = Math.max(10, Math.round(minSide * 0.055));
+    const bead = Math.max(5, Math.round(minSide * 0.028));
+    const scoop = Math.max(4, Math.round(minSide * 0.02));
+    const gilt = Math.max(2, Math.round(minSide * 0.012));
+    const rebate = Math.max(2, Math.round(minSide * 0.008));
+    const mat = Math.max(16, Math.round(minSide * 0.072));
+    const inset = outer + bead + scoop + gilt + rebate + mat;
+    const innerW = canvasW - inset * 2;
+    const innerH = canvasH - inset * 2;
+
+    ctx.fillStyle = '#140c08';
+    ctx.fillRect(0, 0, canvasW, canvasH);
+
+    this._fillMolding(ctx, 0, 0, canvasW, canvasH, outer, '#7a4e2a', '#1c0e08', '#3f2414');
+    this._grainWoodRing(ctx, 0, 0, canvasW, canvasH, outer);
+
+    const bx = outer;
+    const by = outer;
+    const bw = canvasW - outer * 2;
+    const bh = canvasH - outer * 2;
+    this._fillMolding(ctx, bx, by, bw, bh, bead, '#8d5a32', '#241208', '#4a2c18');
+    this._grainWoodRing(ctx, bx, by, bw, bh, bead);
+
+    const sx = bx + bead;
+    const sy = by + bead;
+    const sw = bw - bead * 2;
+    const sh = bh - bead * 2;
+    this._fillMolding(ctx, sx, sy, sw, sh, scoop, '#5c3820', '#120804', '#2e1a10');
+    this._grainWoodRing(ctx, sx, sy, sw, sh, scoop);
+
+    const gx = sx + scoop;
+    const gy = sy + scoop;
+    const gw = sw - scoop * 2;
+    const gh = sh - scoop * 2;
+    this._fillMolding(ctx, gx, gy, gw, gh, gilt, '#f4e2a4', '#7a5414', '#c4a056');
+
+    const rx = gx + gilt;
+    const ry = gy + gilt;
+    const rw = gw - gilt * 2;
+    const rh = gh - gilt * 2;
+    ctx.fillStyle = '#0a0705';
+    ctx.fillRect(rx, ry, rw, rh);
+
+    const mx = rx + rebate;
+    const my = ry + rebate;
+    const mw = rw - rebate * 2;
+    const mh = rh - rebate * 2;
+    ctx.fillStyle = '#efe6d2';
+    ctx.fillRect(mx, my, mw, mh);
+    const matShade = ctx.createLinearGradient(mx, my, mx + mw, my + mh);
+    matShade.addColorStop(0, 'rgba(255,255,255,0.22)');
+    matShade.addColorStop(0.45, 'rgba(0,0,0,0)');
+    matShade.addColorStop(1, 'rgba(90,70,40,0.1)');
+    ctx.fillStyle = matShade;
+    ctx.fillRect(mx, my, mw, mh);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(mx, my, mw, mh);
+    ctx.clip();
+    ctx.strokeStyle = 'rgba(70,50,28,0.06)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < mw + mh; i += 3) {
+      ctx.beginPath();
+      ctx.moveTo(mx + i, my);
+      ctx.lineTo(mx + i - mh, my + mh);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(inset, inset, innerW, innerH);
+    ctx.clip();
+
+    const img = source.image as { width?: number; height?: number } | undefined;
+    const iw = img?.width ?? 0;
+    const ih = img?.height ?? 0;
+    if (img && iw > 0 && ih > 0) {
+      try {
+        ctx.drawImage(img as CanvasImageSource, inset, inset, innerW, innerH);
+      } catch {
+        ctx.fillStyle = '#1a1814';
+        ctx.fillRect(inset, inset, innerW, innerH);
+      }
+    } else {
+      ctx.fillStyle = '#1a1814';
+      ctx.fillRect(inset, inset, innerW, innerH);
+    }
+    ctx.restore();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(inset, inset, innerW, innerH);
+    ctx.clip();
+    ctx.strokeStyle = 'rgba(20,12,6,0.45)';
+    ctx.lineWidth = Math.max(3, Math.round(minSide * 0.012));
+    ctx.strokeRect(inset, inset, innerW, innerH);
+    ctx.restore();
+    ctx.strokeStyle = 'rgba(90,70,40,0.28)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(inset + 0.5, inset + 0.5, innerW - 1, innerH - 1);
+
+    if (isVideo) {
+      const play = Math.round(Math.min(innerW, innerH) * 0.11);
+      this._drawPlayGlyph(ctx, inset + innerW - play - 12, inset + innerH - play - 12, play);
+    }
+    const dateLabel = this._mediaDateLabel();
+    if (dateLabel) {
+      const dateFont = Math.max(10, Math.round(minSide * 0.028));
+      ctx.font = `500 ${dateFont}px ${FONT_MONO}`;
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#6a5738';
+      ctx.fillText(
+        dateLabel.toUpperCase(),
+        mx + mw - 10,
+        my + mh - mat / 2,
+      );
+    }
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.needsUpdate = true;
+    return texture;
+  }
+
+  private _fillGlassCardStrokeOnly(
+    ctx: CanvasRenderingContext2D,
+    w: number,
+    h: number,
+    radius: number,
+    scale: number,
+  ): void {
+    ctx.save();
+    ctx.shadowColor = GLASS_GLOW;
+    ctx.shadowBlur = Math.round(16 * scale);
+    ctx.strokeStyle = GLASS_BORDER;
+    ctx.lineWidth = 1.5;
+    this._roundRect(ctx, 1, 1, w - 2, h - 2, radius - 1);
+    ctx.stroke();
+    ctx.restore();
   }
 
   /** Rounded-rect path helper (does not fill/stroke). */
@@ -539,6 +1021,64 @@ export class NodePlane {
     if (line) ctx.fillText(line, x, yy);
   }
 
+  private _createGlassTextTexture(
+    ctx: CanvasRenderingContext2D,
+    canvas: HTMLCanvasElement,
+    text: string,
+  ): THREE.CanvasTexture {
+    const canvasW = canvas.width;
+    const canvasH = canvas.height;
+    const radius = 18;
+    const padX = 28;
+    const scale = canvasH / 420;
+
+    this._fillGlassCard(ctx, canvasW, canvasH, radius, scale);
+
+    const lines = text.split('\n').map((s) => s.trim()).filter(Boolean);
+    const kind = this._node.kind;
+    const badge = (kind === 'audio' ? 'AUDIO' : (lines[1] ?? '')).toUpperCase();
+    const title = lines[0] ?? '';
+
+    const glyphFont = Math.max(13, Math.round(14 * scale));
+    const glyphY = Math.round(22 * scale);
+    ctx.font = `500 ${glyphFont}px ${FONT_MONO}`;
+    ctx.fillStyle = CYAN_CYBER;
+    ctx.textBaseline = 'top';
+    ctx.textAlign = 'left';
+    this._setLetterSpacing(ctx, `${Math.round(0.18 * glyphFont)}px`);
+    ctx.fillText(badge || (kind === 'document' ? 'DOC' : kind.toUpperCase()), padX, glyphY);
+    this._setLetterSpacing(ctx, '0px');
+
+    const titleFont = Math.max(26, Math.round(28 * scale));
+    const titleY = glyphY + glyphFont + Math.round(14 * scale);
+    const maxTextWidth = canvasW - padX * 2;
+    ctx.font = `500 ${titleFont}px ${FONT_DISPLAY}`;
+    ctx.fillStyle = '#f4fbff';
+    this._setLetterSpacing(ctx, `${Math.round(-0.02 * titleFont)}px`);
+    const titleLineH = Math.round(titleFont * 1.22);
+    this._drawWrapped(ctx, title, padX, titleY, maxTextWidth, titleLineH, 2);
+    this._setLetterSpacing(ctx, '0px');
+
+    const bodyY = titleY + titleLineH * 2 + Math.round(16 * scale);
+    if (kind === 'audio') {
+      this._drawWaveformBars(
+        ctx,
+        padX,
+        bodyY,
+        maxTextWidth,
+        Math.round(48 * scale),
+        this._hashSeed(this._node.id),
+      );
+    } else if (badge === 'PDF') {
+      this._drawDocLines(ctx, padX, bodyY, maxTextWidth, scale);
+    }
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.needsUpdate = true;
+    return texture;
+  }
+
   /**
    * Bake `text` into a `THREE.CanvasTexture` for a `note` plane. Draws
    * wrapped, ellipsis-truncated prose on a warm paper background sized to
@@ -553,7 +1093,7 @@ export class NodePlane {
     const aspect = this._node.width > 0 && this._node.height > 0
       ? this._node.width / this._node.height
       : 1 / 1.4;
-    const canvasH = 512;
+    const canvasH = this._node.kind === 'note' ? 512 : 640;
     const canvasW = Math.max(128, Math.round(canvasH * aspect));
     const canvas = document.createElement('canvas');
     canvas.width = canvasW;
@@ -562,6 +1102,10 @@ export class NodePlane {
     if (!ctx) {
       // Fallback: blank paper texture (no text) — still a valid texture.
       return new THREE.CanvasTexture(canvas);
+    }
+
+    if (this._node.kind !== 'note') {
+      return this._createGlassTextTexture(ctx, canvas, text);
     }
 
     // Warm paper background + subtle border so the plane reads as a card.

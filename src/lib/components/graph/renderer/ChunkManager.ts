@@ -15,7 +15,7 @@ import {
   CHUNK_SIZE,
   getChunkUpdateThrottleMs,
 } from './constants';
-import { Chunk } from './Chunk';
+import { Chunk, nodeBelongsToSource } from './Chunk';
 import type { NodePlane } from './NodePlane';
 import { chunkKey, type CanvasNode, type ChunkKey } from './types';
 
@@ -71,6 +71,7 @@ export class ChunkManager {
 
     for (const [key, chunk] of this._mounted) {
       if (!this._layout.has(key)) {
+        if (chunk.hasVanishing()) continue;
         this._scene.remove(chunk.group);
         chunk.dispose();
         this._mounted.delete(key);
@@ -127,6 +128,8 @@ export class ChunkManager {
     const meshes: THREE.Mesh[] = [];
     for (const chunk of this._mounted.values()) {
       for (const plane of chunk.planes) {
+        if (!plane.mesh.visible) continue;
+        if (plane.node.kind === 'conversation') continue;
         meshes.push(plane.mesh);
       }
     }
@@ -151,6 +154,24 @@ export class ChunkManager {
         if (dist < bestDist) {
           bestDist = dist;
           best = plane;
+        }
+      }
+    }
+    return best;
+  }
+
+  findLayoutNode(nodeId: string, cameraZ?: number): CanvasNode | undefined {
+    let best: CanvasNode | undefined;
+    let bestDist = Infinity;
+    for (const bucket of this._layout.values()) {
+      for (const n of bucket) {
+        if (n.id !== nodeId) continue;
+        if (cameraZ === undefined) return n;
+        const z = n.cellZ * CHUNK_SIZE + n.localZ;
+        const dist = Math.abs(z - cameraZ);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = n;
         }
       }
     }
@@ -188,6 +209,7 @@ export class ChunkManager {
 
     for (const [key, chunk] of this._mounted) {
       if (!wanted.has(key)) {
+        if (chunk.hasVanishing()) continue;
         for (const p of chunk.planes) unmountedIds.push(p.node.id);
         this._scene.remove(chunk.group);
         chunk.dispose();
@@ -197,6 +219,71 @@ export class ChunkManager {
 
     // eslint-disable-next-line no-console
     console.log('[ChunkManager] remount', { cameraChunk: { cx, cy, cz }, mounted: mountedIds, unmounted: unmountedIds, totalMounted: this._mounted.size });
+  }
+
+  /**
+   * Marks this source's mounted planes for fade-out, drops them from the
+   * layout (so remount cannot respawn them), and returns those planes plus
+   * every thumb/full URL the source owned — including unmounted layout nodes.
+   */
+  beginVanish(sourceId: string): { planes: NodePlane[]; urls: string[] } {
+    const urlSet = new Set<string>();
+    const addNodeUrls = (n: CanvasNode) => {
+      if (n.imageUrl) urlSet.add(n.imageUrl);
+      if (n.fullUrl) urlSet.add(n.fullUrl);
+    };
+
+    for (const bucket of this._layout.values()) {
+      for (const n of bucket) {
+        if (nodeBelongsToSource(n, sourceId)) addNodeUrls(n);
+      }
+    }
+
+    const planes: NodePlane[] = [];
+    for (const chunk of this._mounted.values()) {
+      for (const plane of chunk.beginVanish(sourceId)) {
+        planes.push(plane);
+        for (const u of plane.textureUrls) urlSet.add(u);
+      }
+    }
+
+    for (const [key, bucket] of this._layout) {
+      const next = bucket.filter((n) => !nodeBelongsToSource(n, sourceId));
+      if (next.length) this._layout.set(key, next);
+      else this._layout.delete(key);
+    }
+
+    return { planes, urls: [...urlSet] };
+  }
+
+  /** URLs still sampled by a live (non-vanishing) plane or remaining layout node. */
+  collectLiveTextureUrls(): Set<string> {
+    const keep = new Set<string>();
+    for (const bucket of this._layout.values()) {
+      for (const n of bucket) {
+        if (n.imageUrl) keep.add(n.imageUrl);
+        if (n.fullUrl) keep.add(n.fullUrl);
+      }
+    }
+    for (const chunk of this._mounted.values()) {
+      for (const plane of chunk.planes) {
+        if (plane.vanishing || plane.disposed) continue;
+        for (const u of plane.textureUrls) keep.add(u);
+      }
+    }
+    return keep;
+  }
+
+  /** Dispose vanished planes; unmount chunks that have nothing left. */
+  finishVanish(_sourceId: string): void {
+    for (const [key, chunk] of this._mounted) {
+      chunk.sweepVanished();
+      if (chunk.planes.length === 0) {
+        this._scene.remove(chunk.group);
+        chunk.dispose();
+        this._mounted.delete(key);
+      }
+    }
   }
 
   /** Disposes all mounted chunks (the shared geometry is owned by the caller). */

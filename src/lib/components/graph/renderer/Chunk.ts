@@ -10,6 +10,14 @@ import { CHUNK_SIZE } from './constants';
 import { NodePlane } from './NodePlane';
 import { chunkKey, type CanvasNode, type ChunkKey } from './types';
 
+/** Library-asset planes for `sourceId`. Conversations never match. */
+export function nodeBelongsToSource(node: CanvasNode, sourceId: string): boolean {
+  if (!sourceId) return false;
+  if (node.kind === 'conversation') return false;
+  if (node.properties?.source_id !== sourceId) return false;
+  return node.id.startsWith('asset:') || node.properties?.library === true;
+}
+
 /**
  * Owns the `NodePlane`s for a single chunk cell and exposes a `THREE.Group`
  * that `ChunkManager` mounts/unmounts from the scene.
@@ -85,23 +93,80 @@ export class Chunk {
   }
 
   /**
-   * (Re)builds the `NodePlane`s for this chunk from a node list. Disposes any
-   * previously built planes first.
+   * Diffs this chunk against `nodes`. Reuses live planes (conversations and
+   * other sources keep their mesh + opacity). Vanishing planes whose source
+   * dropped out of the layout stay until `sweepVanished`. New planes spawn
+   * at opacity 0 and lerp in.
    *
    * @param nodes - nodes assigned to this chunk.
    */
   setNodes(nodes: CanvasNode[]): void {
+    const wantedIds = new Set(nodes.map((n) => n.id));
+    const existing = new Map(this._planes.map((p) => [p.node.id, p]));
+    const next: NodePlane[] = [];
+
+    for (const node of nodes) {
+      const prev = existing.get(node.id);
+      if (
+        prev &&
+        !prev.disposed &&
+        prev.node.imageUrl === node.imageUrl &&
+        prev.node.fullUrl === node.fullUrl
+      ) {
+        next.push(prev);
+      } else {
+        if (prev) {
+          this._group.remove(prev.mesh);
+          prev.dispose();
+        }
+        const plane = new NodePlane(node, this._sharedGeometry);
+        this._group.add(plane.mesh);
+        next.push(plane);
+      }
+    }
+
     for (const plane of this._planes) {
+      if (wantedIds.has(plane.node.id)) continue;
+      if (plane.vanishing && !plane.disposed) {
+        next.push(plane);
+        continue;
+      }
       this._group.remove(plane.mesh);
       plane.dispose();
     }
-    this._planes.length = 0;
 
-    for (const node of nodes) {
-      const plane = new NodePlane(node, this._sharedGeometry);
-      this._planes.push(plane);
-      this._group.add(plane.mesh);
+    this._planes.length = 0;
+    this._planes.push(...next);
+  }
+
+  beginVanish(sourceId: string): NodePlane[] {
+    const started: NodePlane[] = [];
+    for (const plane of this._planes) {
+      if (!nodeBelongsToSource(plane.node, sourceId)) continue;
+      plane.beginVanish();
+      started.push(plane);
     }
+    return started;
+  }
+
+  hasVanishing(): boolean {
+    return this._planes.some((p) => p.vanishing && !p.disposed);
+  }
+
+  sweepVanished(): void {
+    const kept: NodePlane[] = [];
+    for (const plane of this._planes) {
+      if (plane.vanishing && (plane.isVanished || plane.disposed)) {
+        if (!plane.disposed) {
+          this._group.remove(plane.mesh);
+          plane.dispose();
+        }
+        continue;
+      }
+      kept.push(plane);
+    }
+    this._planes.length = 0;
+    this._planes.push(...kept);
   }
 
   /**

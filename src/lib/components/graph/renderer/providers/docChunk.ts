@@ -1,9 +1,12 @@
 import type { KGNode } from '../../constants';
-import { isDocChunkFileSource } from '../Layout';
+import { isDocChunkFileSource, isLocalAssetNode } from '../Layout';
 import type { BuildCtx, CanvasNode } from '../types';
 import type { NodeKindProvider } from '../NodeKindProvider';
 
 function isDocChunkNode(node: KGNode): boolean {
+	// Library pdf/document assets share entity_type 'Document' with LightRAG
+	// chunks. Leave them for documentProvider (registered after this one).
+	if (isLocalAssetNode(node)) return false;
 	const et = node.properties?.entity_type;
 	if (typeof et === 'string' && et === 'Document') return true;
 	if (node.labels?.some((l) => l.endsWith(' (Document)'))) return true;
@@ -13,7 +16,7 @@ function isDocChunkNode(node: KGNode): boolean {
 }
 
 export const docChunkProvider: NodeKindProvider = {
-	kind: 'document',
+	kind: 'docChunk',
 	classify: isDocChunkNode,
 	shouldRender(): boolean {
 		return false;

@@ -11,13 +11,8 @@ function isConversationNode(node: KGNode): boolean {
 function formatConversationDate(ms: number): string {
 	const d = new Date(ms > 1e12 ? ms : ms * 1000);
 	if (isNaN(d.getTime())) return '';
-	return d.toLocaleString(undefined, {
-		year: 'numeric',
-		month: 'short',
-		day: 'numeric',
-		hour: '2-digit',
-		minute: '2-digit'
-	});
+	const day = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+	return `${day} · ${d.getFullYear()}`;
 }
 
 export const conversationProvider: NodeKindProvider = {
@@ -32,11 +27,11 @@ export const conversationProvider: NodeKindProvider = {
 		const createdAt = typeof np.createdAt === 'number' ? np.createdAt : null;
 		const dateLabel = createdAt !== null ? formatConversationDate(createdAt) : '';
 		const lines = [title];
-		if (dateLabel) lines.push(dateLabel, `Chat · ${dateLabel}`);
+		if (dateLabel) lines.push(dateLabel);
 		return { textContent: lines.join('\n') };
 	},
 	planeConfig: {
-		color: 0x1e2a42,
+		color: 0x0b1220,
 		textureSource: 'text',
 		lodEnabled: false
 	}

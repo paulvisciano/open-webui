@@ -3,7 +3,7 @@
   import { imageProcessingStore } from '$lib/components/graph/stores/image-processing.svelte';
   import type { KGNode } from '$lib/components/graph/constants';
   import type { CanvasNode } from './renderer/types';
-  import { classifyKind } from './renderer/Layout';
+  import { classifyKind, isLocalAssetNode } from './renderer/Layout';
   import { marked } from 'marked';
   import DOMPurify from 'dompurify';
   import {
@@ -11,21 +11,10 @@
     faceCropUrl,
     faceCropByIdUrl,
     photoImageUrl,
-    photoExifUrl,
   } from '$lib/components/graph/services/graph-api-client';
-  import { lightragClient } from '$lib/components/graph/services/lightrag-client';
-
-  // Document-management helpers not yet exposed by the OWUI graph router.
-  // Stubs keep NodeOverlay functional until /documents/* endpoints land.
-  const docClient = {
-    async resolveDocumentId(_fileSource: string): Promise<string | null> {
-      return null;
-    },
-    async getDocumentFullContent(_docId: string): Promise<{ content?: string } | null> {
-      return null;
-    },
-    async deleteDocument(_docId: string): Promise<void> {},
-  };
+  import { getAssetFileUrl, revealAssetPath } from '$lib/apis/graph';
+  import { EXIF_DISPLAY_KEYS, loadPhotoExif } from './exif';
+  import { getChatById, deleteChatById } from '$lib/apis/chats';
 
   interface ChatMessage {
     role: 'user' | 'assistant' | 'system';
@@ -34,12 +23,21 @@
     audioUrl?: string;
   }
 
-  const syncClient = {
-    async deleteConversation(_id: string): Promise<void> {},
-    async loadConversation(_id: string): Promise<ChatMessage[]> {
-      return [];
-    },
-  };
+  function parseChatMessages(payload: unknown): ChatMessage[] {
+    const messages = (payload as {
+      chat?: { history?: { messages?: Record<string, { role?: string; content?: unknown }> } };
+    })?.chat?.history?.messages;
+    if (!messages) return [];
+    const out: ChatMessage[] = [];
+    for (const raw of Object.values(messages)) {
+      if (raw?.role !== 'user' && raw?.role !== 'assistant' && raw?.role !== 'system') continue;
+      out.push({
+        role: raw.role,
+        content: typeof raw.content === 'string' ? raw.content : '',
+      });
+    }
+    return out;
+  }
 
   const token = (): string => (typeof localStorage !== 'undefined' ? localStorage.getItem('token') ?? '' : '');
 
@@ -93,41 +91,9 @@
       .toUpperCase();
   }
 
-  const EXIF_DISPLAY_KEYS: Record<string, string> = {
-    camera: 'Camera',
-    date_taken_friendly: 'Date',
-    location: 'Location',
-    lens: 'Lens',
-    f_number: 'f/',
-    iso: 'ISO',
-    focal_length: 'Focal Length',
-    exposure_time: 'Exposure',
-    image_width: 'Width',
-    image_height: 'Height',
-    flash: 'Flash',
-    white_balance: 'White Balance',
-    orientation: 'Orientation',
-  };
-
   const EXIF_CAMERA_KEYS = ['camera', 'date_taken_friendly', 'lens', 'flash'];
   const EXIF_EXPOSURE_KEYS = ['f_number', 'iso', 'focal_length', 'exposure_time'];
   const EXIF_IMAGE_KEYS = ['image_width', 'image_height'];
-
-  function formatExifRows(exif: Record<string, unknown>): { label: string; value: string }[] {
-    const rows: { label: string; value: string }[] = [];
-    for (const [key, displayLabel] of Object.entries(EXIF_DISPLAY_KEYS)) {
-      const val = exif[key];
-      if (val != null && val !== '') {
-        const strVal = String(val);
-        if (key === 'f_number') {
-          rows.push({ label: displayLabel, value: `f/${strVal}` });
-        } else {
-          rows.push({ label: displayLabel, value: strVal });
-        }
-      }
-    }
-    return rows;
-  }
 
   function filterExifGroup(
     rows: { label: string; value: string }[],
@@ -142,20 +108,21 @@
     kgNode,
     onClose,
     onNavigate,
+    originRect = null,
   }: {
     node: CanvasNode | null;
     kgNode: KGNode | null;
     onClose: () => void;
     onNavigate?: (nodeId: string) => void;
+    originRect?: { left: number; top: number; width: number; height: number } | null;
   } = $props();
 
-  const exifCache = new Map<string, { label: string; value: string }[] | null>();
   let fetchedExifNodeId = $state<string | null>(null);
   let fetchedExifRows = $state<{ label: string; value: string }[]>([]);
   let fullscreenUrl = $state<string | null>(null);
   let deleting = $state(false);
   let personPhotoErrors = $state(new Set<string>());
-  let activeTab = $state<'details' | 'insights' | 'connections'>('details');
+  let activeTab = $state<'details' | 'connections'>('details');
   let imageLoaded = $state(false);
   let touchStartX = $state(0);
   let touchStartY = $state(0);
@@ -165,8 +132,93 @@
   let convLoading = $state(false);
   let convDeleting = $state(false);
 
+  let photoImgEl: HTMLImageElement | undefined = $state();
+  let imageFrameEl: HTMLDivElement | undefined = $state();
+  let phase = $state<'entering' | 'open' | 'leaving'>('entering');
+  let openedNodeId: string | null = null;
+  let leaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let morphClearTimer: ReturnType<typeof setTimeout> | null = null;
+  let videoEl: HTMLVideoElement | undefined = $state();
+  let audioEl: HTMLAudioElement | undefined = $state();
+  let pdfFrameEl: HTMLIFrameElement | undefined = $state();
+  let mediaSrc = $state<string | null>(null);
+  let finderPath = $state<string | null>(null);
+  let finderCopied = $state(false);
+  let finderLoading = $state(false);
+  let imageError = $state(false);
+
   function isConversation(n: CanvasNode | null): boolean {
     return n?.kind === 'conversation';
+  }
+
+  function isDocumentKind(n: CanvasNode | null): boolean {
+    return n?.kind === 'document' || n?.kind === 'pdf';
+  }
+
+  function isPdfPreview(n: CanvasNode | null): boolean {
+    if (!n) return false;
+    if (n.kind === 'pdf') return true;
+    if (n.properties?.kind === 'pdf') return true;
+    const name = String(n.properties?.rel_path ?? n.properties?.title ?? '').toLowerCase();
+    return name.endsWith('.pdf');
+  }
+
+  function isSameOriginFileUrl(url: string): boolean {
+    try {
+      return new URL(url, window.location.href).origin === window.location.origin;
+    } catch {
+      return false;
+    }
+  }
+
+  function photoPreviewUrl(n: CanvasNode): string | undefined {
+    if (isLocalAssetNode(n)) return getAssetFileUrl(n.id);
+    return n.fullUrl ?? n.imageUrl ?? graphStore.photoImages[n.id];
+  }
+
+  function localFinderPath(n: CanvasNode): string {
+    const rel = String(n.properties?.rel_path ?? n.properties?.file_path ?? '');
+    const sourceId = String(n.properties?.source_id ?? '');
+    const source = graphStore.sources.find((s) => s.id === sourceId);
+    const root = source?.lastAbsPath ?? '';
+    if (root && rel) {
+      if (rel.startsWith('/') || /^[A-Za-z]:[\\/]/.test(rel)) return rel;
+      const sep = root.endsWith('/') || root.endsWith('\\') ? '' : '/';
+      return `${root}${sep}${rel}`;
+    }
+    return rel || String(n.properties?.title ?? n.id);
+  }
+
+  function disposePhotoImg() {
+    const img = photoImgEl;
+    if (!img) return;
+    img.onload = null;
+    img.onerror = null;
+    img.removeAttribute('src');
+    img.src = '';
+    imageLoaded = false;
+  }
+
+  function pauseMedia() {
+    const v = videoEl;
+    if (v) {
+      v.pause();
+      v.removeAttribute('src');
+      v.src = '';
+      v.load();
+    }
+    const a = audioEl;
+    if (a) {
+      a.pause();
+      a.removeAttribute('src');
+      a.src = '';
+      a.load();
+    }
+    const frame = pdfFrameEl;
+    if (frame) {
+      frame.src = 'about:blank';
+    }
+    mediaSrc = null;
   }
 
   function conversationSlug(title: string): string {
@@ -202,35 +254,13 @@
     if (convDeleting) return;
     convDeleting = true;
     try {
-      await syncClient.deleteConversation(id);
+      await deleteChatById(token(), id);
       graphStore.loadConversations(token());
       handleClose();
     } catch (err) {
       console.error('[NodeOverlay] Delete conversation failed:', err);
     } finally {
       convDeleting = false;
-    }
-  }
-
-  async function fetchExifForNode(nodeId: string, fileSource: string) {
-    if (exifCache.has(nodeId)) {
-      fetchedExifRows = exifCache.get(nodeId) ?? [];
-      fetchedExifNodeId = nodeId;
-      return;
-    }
-    try {
-      const resp = await fetch(photoExifUrl(fileSource));
-      if (!resp.ok) {
-        exifCache.set(nodeId, null);
-        return;
-      }
-      const exif = (await resp.json()) as Record<string, unknown>;
-      const rows = formatExifRows(exif);
-      exifCache.set(nodeId, rows);
-      fetchedExifRows = rows;
-      fetchedExifNodeId = nodeId;
-    } catch {
-      exifCache.set(nodeId, null);
     }
   }
 
@@ -395,7 +425,9 @@
   }
 
   let fileName = $derived(
-    (kgNode?.properties?.source_id as string) ??
+    (kgNode?.properties?.title as string) ??
+      (node?.properties?.title as string) ??
+      (kgNode?.properties?.source_id as string) ??
       (kgNode?.properties?.file_path as string) ??
       node?.id ??
       'Photo',
@@ -413,36 +445,22 @@
   let docLoading = $state(false);
   let docError = $state<string | null>(null);
 
-  async function fetchDocContentForNode(nodeId: string, fileSource: string) {
+  async function fetchDocContentForNode(nodeId: string) {
     if (docContentCache.has(nodeId)) {
       fetchedDocContent = docContentCache.get(nodeId) ?? null;
       fetchedDocNodeId = nodeId;
       return;
     }
-    docLoading = true;
+    const content =
+      (kgNode?.properties?.description as string) ??
+      (kgNode?.properties?.summary as string) ??
+      node?.textContent ??
+      '';
+    docContentCache.set(nodeId, content);
+    fetchedDocContent = content || null;
+    fetchedDocNodeId = nodeId;
+    docLoading = false;
     docError = null;
-    try {
-      const docId = await docClient.resolveDocumentId(fileSource);
-      if (!docId) {
-        docContentCache.set(nodeId, '');
-        fetchedDocContent = null;
-        fetchedDocNodeId = nodeId;
-        return;
-      }
-      const data = await docClient.getDocumentFullContent(docId);
-      const content = data?.content ?? '';
-      docContentCache.set(nodeId, content);
-      fetchedDocContent = content || null;
-      fetchedDocNodeId = nodeId;
-    } catch (err) {
-      console.error('[NodeOverlay] Failed to fetch document content:', err);
-      docError = 'Failed to load description.';
-      docContentCache.set(nodeId, '');
-      fetchedDocContent = null;
-      fetchedDocNodeId = nodeId;
-    } finally {
-      docLoading = false;
-    }
   }
 
   let locationText = $derived(
@@ -650,23 +668,18 @@
       fetchedExifRows = live;
       return;
     }
-    const fileSource =
-      (kgNode?.properties?.source_id as string) ??
-      (kgNode?.properties?.file_path as string);
-    if (fileSource) {
-      fetchExifForNode(id, fileSource);
-    }
+    const props = kgNode?.properties;
+    loadPhotoExif(id, props).then((rows) => {
+      if (node?.id !== id) return;
+      fetchedExifRows = rows;
+      fetchedExifNodeId = id;
+    });
   });
 
   $effect(() => {
     const id = node?.id;
     if (!id) return;
-    const fileSource =
-      (kgNode?.properties?.source_id as string) ??
-      (kgNode?.properties?.file_path as string);
-    if (fileSource) {
-      fetchDocContentForNode(id, fileSource);
-    }
+    fetchDocContentForNode(id);
   });
 
   $effect(() => {
@@ -679,11 +692,18 @@
     let cancelled = false;
     convLoading = true;
     convMessages = [];
-    syncClient.loadConversation(id).then((msgs) => {
-      if (cancelled) return;
-      convMessages = msgs;
-      convLoading = false;
-    });
+    getChatById(token(), id)
+      .then((chat) => {
+        if (cancelled) return;
+        convMessages = parseChatMessages(chat);
+        convLoading = false;
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error('[NodeOverlay] Load conversation failed:', err);
+        convMessages = [];
+        convLoading = false;
+      });
     return () => { cancelled = true; };
   });
 
@@ -695,9 +715,93 @@
     fullscreenUrl = null;
   }
 
+  function prefersReducedMotion(): boolean {
+    return typeof window !== 'undefined'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+
+  function applyMorphFrom(
+    rect: { left: number; top: number; width: number; height: number } | null,
+    towardOrigin: boolean,
+  ): boolean {
+    const el = imageFrameEl;
+    if (!el || !rect) return false;
+    const final = el.getBoundingClientRect();
+    if (final.width < 8 || final.height < 8) return false;
+    const dx = rect.left - final.left;
+    const dy = rect.top - final.top;
+    const sx = rect.width / final.width;
+    const sy = rect.height / final.height;
+    el.style.transformOrigin = 'top left';
+    if (towardOrigin) {
+      el.style.transition = 'transform 0.55s cubic-bezier(0.4, 0, 0.2, 1), border-radius 0.55s ease';
+      el.style.transform = `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`;
+      el.style.borderRadius = '10px';
+    } else {
+      el.style.transition = 'none';
+      el.style.transform = `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`;
+      el.style.borderRadius = '10px';
+      void el.offsetWidth;
+      el.style.transition = 'transform 0.85s cubic-bezier(0.16, 1.12, 0.32, 1), border-radius 0.85s cubic-bezier(0.16, 1, 0.3, 1)';
+      el.style.transform = 'none';
+      el.style.borderRadius = '';
+    }
+    return true;
+  }
+
+  $effect(() => {
+    const n = node;
+    if (!n) {
+      openedNodeId = null;
+      phase = 'entering';
+      return;
+    }
+    if (openedNodeId !== null) return;
+    openedNodeId = n.id;
+    phase = 'entering';
+    const rect = originRect;
+    const raf = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (prefersReducedMotion()) {
+          phase = 'open';
+          return;
+        }
+        applyMorphFrom(rect ?? null, false);
+        phase = 'open';
+        if (morphClearTimer) clearTimeout(morphClearTimer);
+        morphClearTimer = setTimeout(() => {
+          morphClearTimer = null;
+          if (imageFrameEl && phase === 'open') {
+            imageFrameEl.style.transform = '';
+            imageFrameEl.style.transition = '';
+            imageFrameEl.style.transformOrigin = '';
+            imageFrameEl.style.borderRadius = '';
+          }
+        }, 900);
+      });
+    });
+    return () => cancelAnimationFrame(raf);
+  });
+
   function handleClose() {
+    if (phase === 'leaving') return;
+    pauseMedia();
+    disposePhotoImg();
     fullscreenUrl = null;
-    onClose();
+    finderPath = null;
+    finderCopied = false;
+    if (prefersReducedMotion()) {
+      onClose();
+      return;
+    }
+    phase = 'leaving';
+    const canMorphBack = openedNodeId === node?.id;
+    applyMorphFrom(canMorphBack ? originRect ?? null : null, true);
+    if (leaveTimer) clearTimeout(leaveTimer);
+    leaveTimer = setTimeout(() => {
+      leaveTimer = null;
+      onClose();
+    }, 560);
   }
 
   async function handleDelete() {
@@ -708,18 +812,9 @@
     if (!fileSource || deleting) return;
     deleting = true;
     try {
-      const docId = await docClient.resolveDocumentId(fileSource);
-      if (docId) {
-        await docClient.deleteDocument(docId);
-      }
-      try {
-        await graphApiClient.deletePhotoEntities(fileSource);
-      } catch {
-        // Best-effort cleanup
-      }
+      await graphApiClient.deletePhotoEntities(fileSource);
       graphStore.refresh(token());
-      fullscreenUrl = null;
-      onClose();
+      handleClose();
     } catch (err) {
       console.error('[NodeOverlay] Delete failed:', err);
     } finally {
@@ -731,14 +826,68 @@
     personPhotoErrors = new Set([...personPhotoErrors, n.id]);
   }
 
-  /** Reset imageLoaded when navigating to a different photo. */
   $effect(() => {
     void node?.id;
     imageLoaded = false;
+    imageError = false;
+  });
+
+  $effect(() => {
+    const n = node;
+    if (n && (n.kind === 'video' || n.kind === 'audio')) {
+      mediaSrc = getAssetFileUrl(n.id);
+      return () => {
+        pauseMedia();
+      };
+    }
+    mediaSrc = null;
+  });
+
+  $effect(() => {
+    const n = node;
+    if (!n || !isDocumentKind(n) || (isPdfPreview(n) && isSameOriginFileUrl(getAssetFileUrl(n.id)))) {
+      finderPath = null;
+      finderCopied = false;
+      finderLoading = false;
+      return;
+    }
+    let cancelled = false;
+    finderLoading = true;
+    finderCopied = false;
+    revealAssetPath(token(), n.id)
+      .then((p) => {
+        if (cancelled) return;
+        finderPath = p ?? localFinderPath(n);
+        finderLoading = false;
+      })
+      .catch(() => {
+        if (cancelled) return;
+        finderPath = localFinderPath(n);
+        finderLoading = false;
+      });
+    return () => {
+      cancelled = true;
+    };
   });
 
   function onImageLoad() {
     imageLoaded = true;
+    imageError = false;
+  }
+
+  function onImageError() {
+    imageError = true;
+    imageLoaded = true;
+  }
+
+  async function copyFinderPath() {
+    if (!finderPath) return;
+    try {
+      await navigator.clipboard.writeText(finderPath);
+      finderCopied = true;
+    } catch {
+      finderCopied = false;
+    }
   }
 
   // ── Swipe gesture handlers ──────────────────────────────────────
@@ -805,14 +954,18 @@
 
 {#if node}
   {@const status = imageProcessingStore.statuses[node.id]}
-  {@const imageUrl = node.imageUrl ?? graphStore.photoImages[node.id]}
-  {@const fullUrl = node.fullUrl ?? (imageUrl ? imageUrl.replace(/([?&]w=)\d+\b/, '$1full') : undefined)}
   {@const isProcessing = status && status.stage !== 'complete' && status.stage !== 'error'}
   {@const isComplete = status?.stage === 'complete'}
   {@const isError = status?.stage === 'error'}
-  {@const descText = fetchedDocContent ?? descriptionContent ?? null}
   {@const isNote = node.kind === 'note'}
   {@const isConv = isConversation(node)}
+  {@const isVideo = node.kind === 'video'}
+  {@const isAudio = node.kind === 'audio'}
+  {@const isDoc = isDocumentKind(node)}
+  {@const isPdf = isPdfPreview(node)}
+  {@const fileUrl = getAssetFileUrl(node.id)}
+  {@const pdfEmbeddable = isPdf && isSameOriginFileUrl(fileUrl)}
+  {@const photoSrc = photoPreviewUrl(node)}
   {@const noteBody = fetchedDocContent ?? descriptionContent ?? node.textContent ?? ''}
   {@const convTitle = (kgNode?.properties?.name as string) ?? (node?.properties?.name as string) ?? node?.id ?? 'Conversation'}
   {@const convCreatedAt = (kgNode?.properties?.createdAt as number) ?? (node?.properties?.createdAt as number) ?? undefined}
@@ -822,7 +975,14 @@
   {@const convLinkedImages = conversationLinkedImages(convMessages)}
 
   <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
-  <div class="spatial-scene" data-od-id="overlay-app" onclick={handleClose} role="presentation">
+  <div
+    class="spatial-scene"
+    class:is-open={phase === 'open'}
+    class:is-leaving={phase === 'leaving'}
+    data-od-id="overlay-app"
+    onclick={handleClose}
+    role="presentation"
+  >
     <div class="scene-inner" data-od-id="overlay-body" onclick={(e) => e.stopPropagation()} role="presentation">
 
       <header class="topbar" data-od-id="topbar">
@@ -939,21 +1099,97 @@
               </div>
             {/if}
           </div>
+        {:else if isVideo}
+          <div class="image-frame is-media" data-od-id="video-viewer" bind:this={imageFrameEl}>
+            {#if mediaSrc}
+              <video
+                bind:this={videoEl}
+                class="media-el"
+                data-od-id="overlay-video"
+                controls
+                preload="metadata"
+                src={mediaSrc}
+                title={fileName}
+              ></video>
+            {:else}
+              <div class="photo-skeleton" data-od-id="video-skeleton">
+                <div class="skeleton-shimmer"></div>
+              </div>
+            {/if}
+          </div>
+        {:else if isAudio}
+          <div class="image-frame is-media" data-od-id="audio-viewer" bind:this={imageFrameEl}>
+            <div class="audio-stage" data-od-id="audio-stage">
+              <span class="audio-kicker">Audio</span>
+              <div class="audio-title">{fileName}</div>
+              {#if mediaSrc}
+                <audio
+                  bind:this={audioEl}
+                  class="audio-el"
+                  data-od-id="overlay-audio"
+                  controls
+                  preload="metadata"
+                  src={mediaSrc}
+                ></audio>
+              {:else}
+                <div class="note-loading" data-od-id="audio-loading">
+                  <span class="spinner"></span> Loading audio…
+                </div>
+              {/if}
+            </div>
+          </div>
+        {:else if isDoc}
+          <div class="image-frame is-media" data-od-id="document-viewer" bind:this={imageFrameEl}>
+            {#if pdfEmbeddable}
+              <iframe
+                bind:this={pdfFrameEl}
+                class="pdf-frame"
+                data-od-id="overlay-pdf"
+                title={fileName}
+                src={fileUrl}
+              ></iframe>
+            {:else}
+              <div class="finder-card" data-od-id="finder-card">
+                <span class="audio-kicker">{isPdf ? 'PDF' : 'Document'}</span>
+                <div class="audio-title">{fileName}</div>
+                {#if finderLoading}
+                  <div class="note-loading" data-od-id="finder-loading">
+                    <span class="spinner"></span> Resolving path…
+                  </div>
+                {:else if finderPath}
+                  <code class="finder-path" data-od-id="finder-path">{finderPath}</code>
+                  <button
+                    type="button"
+                    class="btn-copy"
+                    data-od-id="finder-copy"
+                    onclick={copyFinderPath}
+                  >
+                    {finderCopied ? 'Copied' : 'Copy path'}
+                  </button>
+                {:else}
+                  <div class="note-empty">Path unavailable.</div>
+                {/if}
+              </div>
+            {/if}
+          </div>
         {:else}
           <div class="image-frame" data-od-id="image-viewer"
+            bind:this={imageFrameEl}
             ontouchstart={onTouchStart}
             ontouchend={onTouchEnd}>
-            {#if fullUrl ?? imageUrl}
+            {#if photoSrc && !imageError}
               {#if !imageLoaded}
                 <div class="photo-skeleton" data-od-id="photo-skeleton">
                   <div class="skeleton-shimmer"></div>
                 </div>
               {/if}
               <img class="photo {imageLoaded ? '' : 'photo-hidden'}" data-od-id="main-photo"
-                   src={fullUrl ?? imageUrl!}
+                   bind:this={photoImgEl}
+                   src={photoSrc}
                    alt={fileName}
                    onload={onImageLoad}
-                   onclick={() => openFullscreen(fullUrl ?? imageUrl!)}>
+                   onerror={onImageError}
+                   onclick={() => openFullscreen(photoSrc)}>
             {:else}
               <div class="photo-placeholder" data-od-id="photo-placeholder">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
@@ -1017,32 +1253,16 @@
       </div>
 
       <aside class="sidebar" data-od-id="details-sidebar">
-        <nav class="tabs" data-od-id="sidebar-tabs">
-          <button class="tab {activeTab === 'details' ? 'active' : ''}" data-od-id="tab-details" onclick={() => (activeTab = 'details')}>Details</button>
-          <button class="tab {activeTab === 'insights' ? 'active' : ''}" data-od-id="tab-insights" onclick={() => (activeTab = 'insights')}>AI Insights</button>
-          {#if others.length > 0}
+        {#if others.length > 0}
+          <nav class="tabs" data-od-id="sidebar-tabs">
+            <button class="tab {activeTab === 'details' ? 'active' : ''}" data-od-id="tab-details" onclick={() => (activeTab = 'details')}>Details</button>
             <button class="tab {activeTab === 'connections' ? 'active' : ''}" data-od-id="tab-connections" onclick={() => (activeTab = 'connections')}>Related</button>
-          {/if}
-        </nav>
+          </nav>
+        {/if}
 
         <div class="sidebar-content" data-od-id="sidebar-content">
 
           {#if activeTab === 'details'}
-            <div class="description-panel" data-od-id="sec-description">
-              <div class="description-label">Description</div>
-              {#if docLoading}
-                <div class="loading-indicator" data-od-id="desc-loading">
-                  <span class="spinner"></span> Loading...
-                </div>
-              {:else if docError}
-                <div class="error-text" data-od-id="desc-error">{docError}</div>
-              {:else if descText}
-                <div class="description-text">{@html renderMarkdown(descText)}</div>
-              {:else}
-                <div class="empty-text">No description available.</div>
-              {/if}
-            </div>
-
             <div class="data-row" data-od-id="data-row-details">
               {#if locationText}
                 <section class="data-panel" data-od-id="sec-location">
@@ -1142,67 +1362,6 @@
             </div>
           {/if}
 
-          {#if activeTab === 'insights'}
-            <div class="data-row" data-od-id="data-row-insights">
-              <section class="data-panel" data-od-id="sec-insights-entities">
-                <div class="panel-label">Entities<span class="count">{others.length}</span></div>
-                {#if others.length > 0}
-                  <div class="chip-row">
-                    {#each others as n, i (n.id)}
-                      <span class="chip chip-entity {i === 0 ? 'chip-accent' : ''}" data-od-id="entity-{n.id}">{getNodeName(n)}</span>
-                    {/each}
-                  </div>
-                {:else}
-                  <div class="empty-text">No entities detected.</div>
-                {/if}
-              </section>
-
-              {#if locations.length > 0}
-                <section class="data-panel" data-od-id="sec-insights-locations">
-                  <div class="panel-label">Locations<span class="count">{locations.length}</span></div>
-                  <div class="chip-row">
-                    {#each locations as n (n.id)}
-                      <span class="chip chip-loc" data-od-id="loc-pill-{n.id}">{getNodeName(n)}</span>
-                    {/each}
-                  </div>
-                </section>
-              {/if}
-
-              {#if events.length > 0}
-                <section class="data-panel" data-od-id="sec-insights-events">
-                  <div class="panel-label">Events<span class="count">{events.length}</span></div>
-                  <div class="chip-row">
-                    {#each events as n (n.id)}
-                      <span class="chip chip-event" data-od-id="event-pill-{n.id}">{getNodeName(n)}</span>
-                    {/each}
-                  </div>
-                </section>
-              {/if}
-
-              {#if persons.length > 0}
-                <section class="data-panel" data-od-id="sec-insights-people">
-                  <div class="panel-label">People<span class="count">{persons.length}</span></div>
-                  <div class="people-row">
-                    {#each persons as n (n.id)}
-                      <div class="person" data-od-id="person-pill-{n.id}" tabindex="0" role="button">
-                        {#if isPersonNamed(n) && !personPhotoErrors.has(n.id)}
-                          <img class="person-thumb" src={resolvePersonThumbUrl(n)} alt={getNodeName(n)} onerror={() => handlePersonImgError(n)}>
-                        {:else if isPersonNamed(n)}
-                          <div class="person-initials">{getInitials(getNodeName(n))}</div>
-                        {:else}
-                          <div class="person-initials person-unknown">
-                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-7 8-7s8 3 8 7"/></svg>
-                          </div>
-                        {/if}
-                        <span class="person-name">{isPersonNamed(n) ? getNodeName(n) : 'Unknown'}</span>
-                      </div>
-                    {/each}
-                  </div>
-                </section>
-              {/if}
-            </div>
-          {/if}
-
           {#if activeTab === 'connections' && others.length > 0}
             <div class="data-row" data-od-id="data-row-connections">
               <section class="data-panel exif-panel" data-od-id="sec-connections">
@@ -1270,6 +1429,7 @@
   /* Focus-visible — keyboard accessibility */
   .close-btn:focus-visible,
   .btn-delete:focus-visible,
+  .btn-copy:focus-visible,
   .filmstrip-nav:focus-visible,
   .filmstrip-thumb:focus-visible,
   .tab:focus-visible,
@@ -1302,21 +1462,42 @@
     overflow-y: auto;
     overflow-x: hidden;
     background:
-      radial-gradient(ellipse 90% 70% at 50% 35%, oklch(14% 0.06 270 / 40%), transparent),
-      radial-gradient(ellipse 60% 50% at 30% 80%, oklch(10% 0.04 210 / 30%), transparent),
-      radial-gradient(ellipse 50% 40% at 80% 20%, oklch(8% 0.03 180 / 20%), transparent),
-      oklch(6% 0.02 260 / 92%);
-    backdrop-filter: blur(8px);
-    -webkit-backdrop-filter: blur(8px);
+      radial-gradient(ellipse 90% 70% at 50% 35%, oklch(14% 0.06 270 / 0%), transparent),
+      radial-gradient(ellipse 60% 50% at 30% 80%, oklch(10% 0.04 210 / 0%), transparent),
+      radial-gradient(ellipse 50% 40% at 80% 20%, oklch(8% 0.03 180 / 0%), transparent),
+      oklch(6% 0.02 260 / 0%);
+    backdrop-filter: blur(0px);
+    -webkit-backdrop-filter: blur(0px);
     color: var(--fg);
     font-family: var(--font-sans);
     font-size: 14px;
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-    animation: fade-in 0.25s ease;
+    transition:
+      background 0.7s cubic-bezier(0.16, 1, 0.3, 1),
+      backdrop-filter 0.7s cubic-bezier(0.16, 1, 0.3, 1),
+      -webkit-backdrop-filter 0.7s cubic-bezier(0.16, 1, 0.3, 1);
   }
-  @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+  .spatial-scene.is-open {
+    background:
+      radial-gradient(ellipse 90% 70% at 50% 35%, oklch(14% 0.06 270 / 28%), transparent),
+      radial-gradient(ellipse 60% 50% at 30% 80%, oklch(10% 0.04 210 / 22%), transparent),
+      radial-gradient(ellipse 50% 40% at 80% 20%, oklch(8% 0.03 180 / 14%), transparent),
+      oklch(6% 0.02 260 / 62%);
+    backdrop-filter: blur(18px) saturate(1.15);
+    -webkit-backdrop-filter: blur(18px) saturate(1.15);
+  }
+  .spatial-scene.is-leaving {
+    background:
+      radial-gradient(ellipse 90% 70% at 50% 35%, oklch(14% 0.06 270 / 0%), transparent),
+      radial-gradient(ellipse 60% 50% at 30% 80%, oklch(10% 0.04 210 / 0%), transparent),
+      radial-gradient(ellipse 50% 40% at 80% 20%, oklch(8% 0.03 180 / 0%), transparent),
+      oklch(6% 0.02 260 / 0%);
+    backdrop-filter: blur(0px);
+    -webkit-backdrop-filter: blur(0px);
+    transition-duration: 0.45s;
+  }
 
   .scene-inner {
     position: relative;
@@ -1429,35 +1610,36 @@
 
   .image-frame {
     position: relative;
-    max-width: 840px;
-    width: 100%;
+    max-width: min(840px, 100%);
+    width: fit-content;
+    min-height: 200px;
     margin: 0 auto;
     border-radius: 16px;
     overflow: hidden;
-    /* Fixed height prevents layout shift when switching between
-       photos with different aspect ratios. */
-    height: 65vh;
     background: var(--glass);
     box-shadow:
       0 40px 100px oklch(0% 0 0 / 60%),
       0 0 60px oklch(82% 0.14 210 / 8%),
       0 0 0 1px oklch(50% 0.03 255 / 10%);
     cursor: pointer;
-    transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.4s;
+    will-change: transform;
+    transition: box-shadow 0.4s;
   }
-  .image-frame:hover {
+  .spatial-scene.is-open .image-frame:hover {
     transform: translateY(-4px);
     box-shadow:
       0 50px 120px oklch(0% 0 0 / 70%),
       0 0 80px oklch(82% 0.14 210 / 12%),
       0 0 0 1px oklch(82% 0.14 210 / 20%);
+    transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.4s;
   }
   .image-frame .photo {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
+    display: block;
+    width: auto;
+    max-width: 100%;
+    height: auto;
+    max-height: 70vh;
+    object-fit: contain;
     cursor: zoom-in;
     transition: opacity 0.3s ease;
   }
@@ -1467,11 +1649,11 @@
   }
 
   .photo-skeleton {
-    width: 100%;
-    height: 100%;
+    position: absolute;
+    inset: 0;
+    min-height: 240px;
     background: var(--glass);
     border-radius: inherit;
-    position: relative;
     overflow: hidden;
   }
   .skeleton-shimmer {
@@ -1503,6 +1685,104 @@
     color: var(--faint);
   }
   .photo-placeholder svg { width: 64px; height: 64px; }
+
+  .image-frame.is-media {
+    cursor: default;
+    width: 100%;
+    height: 65vh;
+    max-width: 840px;
+  }
+  .image-frame.is-media:hover {
+    transform: none;
+    box-shadow:
+      0 40px 100px oklch(0% 0 0 / 60%),
+      0 0 60px oklch(82% 0.14 210 / 8%),
+      0 0 0 1px oklch(50% 0.03 255 / 10%);
+  }
+
+  .media-el,
+  .pdf-frame {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    background: var(--bg);
+  }
+  .media-el {
+    object-fit: contain;
+  }
+
+  .audio-stage,
+  .finder-card {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    padding: 24px 28px;
+    text-align: center;
+  }
+  .audio-kicker {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  .audio-title {
+    font-family: var(--font-display);
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--fg);
+    max-width: 90%;
+    overflow-wrap: anywhere;
+  }
+  .audio-el {
+    width: min(420px, 100%);
+  }
+  .finder-path {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--muted);
+    background: var(--glass-light);
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
+    padding: 12px 14px;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    text-align: left;
+  }
+  .btn-copy {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 10px 22px;
+    background: var(--accent-dim);
+    backdrop-filter: blur(20px) saturate(1.3);
+    -webkit-backdrop-filter: blur(20px) saturate(1.3);
+    border-radius: 100px;
+    border: 1px solid var(--accent);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    cursor: pointer;
+    color: var(--accent);
+    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .btn-copy:hover {
+    background: oklch(82% 0.14 210 / 28%);
+    transform: translateY(-1px);
+  }
+  .btn-copy:active {
+    transform: translateY(0) scale(0.98);
+  }
 
   .image-tags {
     position: absolute;
@@ -1629,60 +1909,6 @@
     color: var(--muted);
     white-space: nowrap;
     padding: 2px 0;
-  }
-
-  /* ════════════════════════════════════════════════════════════════════
-     Description panel — glassmorphism card
-     ════════════════════════════════════════════════════════════════════ */
-  .description-panel {
-    position: relative;
-    max-width: 920px;
-    width: 100%;
-    margin: 0 auto 1.5vh;
-    padding: 18px 24px;
-    background: var(--glass);
-    backdrop-filter: blur(24px) saturate(1.4);
-    -webkit-backdrop-filter: blur(24px) saturate(1.4);
-    border-radius: 14px;
-    box-shadow:
-      0 20px 60px oklch(0% 0 0 / 30%),
-      0 0 0 1px oklch(50% 0.03 255 / 6%);
-    transform: translateZ(10px);
-  }
-  .description-label {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.24em;
-    text-transform: uppercase;
-    color: var(--accent);
-    margin-bottom: 8px;
-    opacity: 0.95;
-  }
-  .description-text {
-    font-size: 15px;
-    line-height: 1.75;
-    color: oklch(86% 0.004 250);
-    max-height: 240px;
-    overflow-y: auto;
-    scrollbar-width: thin;
-    scrollbar-color: var(--accent-dim) transparent;
-  }
-  .description-text::-webkit-scrollbar { width: 2px; }
-  .description-text::-webkit-scrollbar-thumb { background: var(--accent-dim); }
-  .description-text :global(.overlay-p) { margin-bottom: 8px; }
-  .description-text :global(.overlay-p:last-child) { margin-bottom: 0; }
-  .description-text :global(.overlay-code) {
-    background: oklch(20% 0.02 255 / 40%);
-    border-radius: 8px;
-    padding: 10px;
-    overflow-x: hidden;
-    white-space: pre-wrap;
-    word-break: break-word;
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: var(--fg);
-    margin-bottom: 8px;
   }
 
   /* ════════════════════════════════════════════════════════════════════
@@ -1890,7 +2116,7 @@
   }
 
   /* ════════════════════════════════════════════════════════════════════
-     Sidebar — tabs (details/insights/connections) restyled to fit aesthetic
+     Sidebar — tabs (details/connections) restyled to fit aesthetic
      ════════════════════════════════════════════════════════════════════ */
   .sidebar {
     width: 100%;
@@ -2021,6 +2247,7 @@
     justify-content: center;
     animation: fade-in 0.2s ease;
   }
+  @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
   .fullscreen-overlay img {
     max-width: 92%;
     max-height: 92%;
@@ -2210,21 +2437,31 @@
   .note-error { color: var(--danger); }
   .note-empty { font-style: italic; color: var(--faint); }
 
-  /* ════════════════════════════════════════════════════════════════════
-     Float-in stagger animations
-     ════════════════════════════════════════════════════════════════════ */
-  .scene-inner > * {
-    animation: float-in 0.6s cubic-bezier(0.16, 1, 0.3, 1) both;
+  .topbar,
+  .sidebar,
+  .action-area,
+  .image-tags,
+  .filmstrip {
+    opacity: 0;
+    transform: translateY(18px);
+    transition:
+      opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1),
+      transform 0.7s cubic-bezier(0.16, 1, 0.3, 1);
   }
-  .topbar          { animation-delay: 0s; }
-  .image-stage     { animation-delay: 0.08s; }
-  .description-panel { animation-delay: 0.16s; }
-  .sidebar         { animation-delay: 0.20s; }
-  .data-row        { animation-delay: 0.24s; }
-  .action-area     { animation-delay: 0.32s; }
-  @keyframes float-in {
-    from { opacity: 0; transform: translateY(20px) translateZ(-30px); }
-    to   { opacity: 1; }
+  .spatial-scene.is-open .topbar { opacity: 1; transform: none; transition-delay: 0.2s; }
+  .spatial-scene.is-open .image-tags { opacity: 1; transform: none; transition-delay: 0.28s; }
+  .spatial-scene.is-open .filmstrip { opacity: 1; transform: none; transition-delay: 0.34s; }
+  .spatial-scene.is-open .sidebar { opacity: 1; transform: none; transition-delay: 0.38s; }
+  .spatial-scene.is-open .action-area { opacity: 1; transform: none; transition-delay: 0.46s; }
+  .spatial-scene.is-leaving .topbar,
+  .spatial-scene.is-leaving .sidebar,
+  .spatial-scene.is-leaving .action-area,
+  .spatial-scene.is-leaving .image-tags,
+  .spatial-scene.is-leaving .filmstrip {
+    opacity: 0;
+    transform: translateY(10px);
+    transition-delay: 0s;
+    transition-duration: 0.28s;
   }
 
   /* ════════════════════════════════════════════════════════════════════
@@ -2235,7 +2472,8 @@
     .spatial-scene,
     .image-frame,
     .close-btn,
-    .btn-delete {
+    .btn-delete,
+    .btn-copy {
       animation: none !important;
       transition-duration: 0.01ms !important;
     }
@@ -2247,14 +2485,12 @@
   @media (max-width: 768px) {
     .spatial-scene { padding: 2vh 4vw; perspective: none; }
     .scene-inner { transform: none !important; }
-    .image-frame { border-radius: 12px; height: 45vh; }
-    .photo-skeleton { height: 45vh; }
-    .description-panel { padding: 14px 18px; border-radius: 12px; }
-    .description-text { font-size: 13px; line-height: 1.65; }
+    .image-frame { border-radius: 12px; }
+    .image-frame .photo { max-height: 48vh; }
     .data-row { flex-direction: column; gap: 8px; }
     .data-panel { min-width: 100%; border-radius: 10px; }
     .topbar { margin-bottom: 1.5vh; }
-    .image-stage, .description-panel, .data-row, .action-area, .sidebar {
+    .image-stage, .data-row, .action-area, .sidebar {
       transform: none !important;
     }
     .chat-view-thread { max-height: 60vh; }

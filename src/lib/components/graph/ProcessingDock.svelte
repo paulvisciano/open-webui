@@ -1,5 +1,6 @@
 <script lang="ts">
   import { imageProcessingStore, type ImageStage } from '$lib/components/graph/stores/image-processing.svelte';
+  import { scanProgressStore, type ScanStage } from '$lib/components/graph/stores/scan-progress.svelte';
   import type { SceneManager } from './renderer/SceneManager';
   import { graphApiClient } from '$lib/components/graph/services/graph-api-client';
 
@@ -19,6 +20,13 @@
     error: '#ef4444',
   };
 
+  const SCAN_STAGE_COLOR: Record<ScanStage, string> = {
+    walking: '#22d3ee',
+    indexing: '#00d4ff',
+    complete: '#34d399',
+    error: '#ef4444',
+  };
+
   const CIRCUMFERENCE = 2 * Math.PI * 21; // ≈ 131.95, rounded to 132 in prototype
 
   let collapsed = $state(false);
@@ -33,25 +41,48 @@
     );
   });
 
-  const total = $derived(entries.length);
+  const scanJobs = $derived.by(() => Object.values(scanProgressStore.jobs));
+
+  const total = $derived(entries.length + scanJobs.length);
 
   const errorCount = $derived(
-    entries.filter((e) => e.stage === 'error').length,
+    entries.filter((e) => e.stage === 'error').length +
+      scanJobs.filter((j) => j.stage === 'error').length,
   );
 
   const allDone = $derived(
-    total > 0 && entries.every((e) => e.stage === 'error'),
+    total > 0 &&
+      entries.every((e) => e.stage === 'error') &&
+      scanJobs.every((j) => j.stage === 'complete' || j.stage === 'error'),
   );
 
   const progressPercent = $derived(0);
 
-  const countLabel = $derived(
-    total === 0 ? '' : `${total} processing${errorCount > 0 ? ` · ${errorCount} error${errorCount !== 1 ? 's' : ''}` : ''}`,
+  const headerTitle = $derived(
+    scanJobs.length > 0 && entries.length === 0 ? 'Indexing' : 'Processing',
   );
 
-  const footerLabel = $derived(
-    total === 0 ? '' : `${entries.filter((e) => e.stage !== 'error').length} in progress`,
-  );
+  const countLabel = $derived.by(() => {
+    if (total === 0) return '';
+    const scanSeen = scanJobs.reduce((n, j) => n + j.seen, 0);
+    if (scanJobs.length > 0 && entries.length === 0) {
+      const err = errorCount > 0 ? ` · ${errorCount} error${errorCount !== 1 ? 's' : ''}` : '';
+      return scanSeen > 0 ? `${scanSeen} files${err}` : `${scanJobs.length} scanning${err}`;
+    }
+    return `${total} processing${errorCount > 0 ? ` · ${errorCount} error${errorCount !== 1 ? 's' : ''}` : ''}`;
+  });
+
+  const footerLabel = $derived.by(() => {
+    if (total === 0) return '';
+    const activeImages = entries.filter((e) => e.stage !== 'error').length;
+    const activeScans = scanJobs.filter((j) => j.stage !== 'error' && j.stage !== 'complete').length;
+    const n = activeImages + activeScans;
+    if (scanJobs.length > 0 && entries.length === 0) {
+      const job = scanJobs[0];
+      return job?.countLabel || `${n} walking`;
+    }
+    return `${n} in progress`;
+  });
 
   function getProgressRingOffset(stepper: { state: string }[]): number {
     const done = stepper.filter((s) => s.state === 'done').length;
@@ -60,7 +91,7 @@
     return CIRCUMFERENCE * (1 - progress);
   }
 
-  function getStageDotClass(stage: ImageStage): string {
+  function getStageDotClass(stage: ImageStage | ScanStage): string {
     if (stage === 'complete') return 'complete';
     if (stage === 'error') return 'error';
     return 'active';
@@ -185,6 +216,11 @@
         timers.set(entry.nodeId, setTimeout(() => imageProcessingStore.remove(entry.nodeId), 2000));
       }
     }
+    for (const job of Object.values(scanProgressStore.jobs)) {
+      if (job.stage === 'complete') {
+        timers.set(`scan:${job.sourceId}`, setTimeout(() => scanProgressStore.remove(job.sourceId), 2000));
+      }
+    }
     return () => {
       for (const t of timers.values()) clearTimeout(t);
     };
@@ -215,7 +251,7 @@
 {/if}
 
 {#if visible && total > 0}
-  <div class="processing-dock" class:collapsed class:dock-mobile-open={dockMobileOpen}>
+  <div class="processing-dock" class:collapsed class:dock-mobile-open={dockMobileOpen} data-testid="graph-processing-dock">
     <div
       class="dock-header"
       role="button"
@@ -228,7 +264,7 @@
         <div class="dock-header-icon">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4m0 12v4M4.93 4.93l2.83 2.83m8.48 8.48 2.83 2.83M2 12h4m12 0h4M4.93 19.07l2.83-2.83m8.48-8.48 2.83-2.83"/></svg>
         </div>
-        <span class="dock-header-title">Processing</span>
+        <span class="dock-header-title">{headerTitle}</span>
       </div>
       <div class="dock-header-right">
         <span class="dock-count">{countLabel}</span>
@@ -239,6 +275,73 @@
     </div>
 
     <div class="dock-list">
+      {#each scanJobs as job, i (job.sourceId)}
+        {@const stepper = job.stepper}
+        {@const ringOffset = getProgressRingOffset(stepper)}
+        {@const stageColor = SCAN_STAGE_COLOR[job.stage] ?? '#00d4ff'}
+        <div
+          class="dock-item {job.stage === 'complete' ? 'completed' : job.stage === 'error' ? 'error' : ''}"
+          data-testid="graph-scan-dock"
+          style="animation-delay: {i * 50}ms"
+        >
+          <div class="dock-thumb {job.stage === 'complete' ? 'complete' : job.stage === 'error' ? '' : 'processing'} scan">
+            <svg class="dock-thumb-ring" viewBox="0 0 46 46">
+              <circle class="track" cx="23" cy="23" r="21" />
+              <circle
+                class="fill"
+                cx="23" cy="23" r="21"
+                stroke-dasharray={CIRCUMFERENCE}
+                stroke-dashoffset={job.stage === 'complete' ? 0 : ringOffset}
+                transform="rotate(-90 23 23)"
+              />
+            </svg>
+            {#if job.stage === 'complete'}
+              <div class="dock-thumb-icon check">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12" /></svg>
+              </div>
+            {:else if job.stage === 'error'}
+              <div class="dock-thumb-icon warn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
+              </div>
+            {:else}
+              <div class="dock-thumb-icon scan-icon">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" /></svg>
+              </div>
+            {/if}
+          </div>
+          <div class="dock-info">
+            <span class="dock-filename">{job.name}</span>
+            <div class="dock-stage">
+              <span class="dock-stage-dot {getStageDotClass(job.stage)}" style="background: {stageColor}"></span>
+              <span data-testid="graph-scan-stage">{job.stageLabel}</span>
+            </div>
+            {#if job.countLabel}
+              <span class="dock-scan-counts" data-testid="graph-scan-counts">{job.countLabel}</span>
+            {/if}
+            <div class="dock-pipeline">
+              {#each stepper as step}
+                <div class="dock-pipeline-segment {step.state === 'done' ? 'done' : step.state === 'current' ? 'active' : ''}"></div>
+              {/each}
+            </div>
+            <span class="dock-time">
+              {#if job.stage === 'complete'}
+                Done
+              {:else if job.stage === 'error'}
+                Failed
+              {:else if job.stage === 'walking'}
+                Walking…
+              {:else}
+                Indexing…
+              {/if}
+            </span>
+          </div>
+          <div class="dock-actions">
+            <button class="dock-action-btn" aria-label="Dismiss scan progress" onclick={() => scanProgressStore.remove(job.sourceId)}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+            </button>
+          </div>
+        </div>
+      {/each}
       {#each entries as entry, i (entry.nodeId)}
         {@const stepper = entry.stepper}
         {@const ringOffset = getProgressRingOffset(stepper)}
@@ -632,6 +735,21 @@
     position: relative;
     overflow: hidden;
     box-shadow: 0 0 0 1px oklch(50% 0.03 255 / 10%);
+  }
+
+  .dock-thumb.scan {
+    background: oklch(20% 0.03 210 / 70%);
+  }
+
+  .dock-thumb-icon.scan-icon {
+    color: #00d4ff;
+  }
+
+  .dock-scan-counts {
+    font-family: var(--dock-mono);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    color: var(--dock-muted);
   }
 
   .dock-thumb::after {

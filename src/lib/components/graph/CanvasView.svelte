@@ -1,35 +1,40 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { untrack } from 'svelte';
-  import { fade } from 'svelte/transition';
   import type { KGNode } from './constants';
   import { graphStore } from './stores/graph.svelte';
+  import { searchHighlight } from './renderer/search-highlight-flag';
   import { graphSyncClient } from './services/sync-client.svelte';
   import { textureCache } from './services/TextureCache';
   import { SceneManager } from './renderer/SceneManager';
   import { TIME_BUCKET_SPACING, CHUNK_SIZE, INITIAL_CAMERA_Z } from './renderer/constants';
   import { buildCanvasLayout, buildTimeIndex } from './renderer/Layout';
   import type { TimeIndex } from './renderer/Layout';
-  import { isMobile } from './composables/use-breakpoint';
   import { usePan, type PanCustomEvent, useComposedGesture, pinchComposition, type PinchCustomEvent, type GestureCallback, useSwipe, type SwipeCustomEvent } from 'svelte-gestures';
   import NodeOverlay from './NodeOverlay.svelte';
+  import ConversationCloud from './ConversationCloud.svelte';
   import ProcessingOverlay from './ProcessingOverlay.svelte';
   import ProcessingDock from './ProcessingDock.svelte';
   import type { CanvasNode } from './renderer/types';
+  import { compactExifLine, dateFromProperties, loadPhotoExif, peekExif } from './exif';
 
   /** Default pinch-zoom sensitivity. The KG config store exposed this via a
    *  settings drawer; OWUI has no such UI yet so we use a fixed constant. */
-  const DEFAULT_PINCH_SENSITIVITY = 1.0;
+  const DEFAULT_PINCH_SENSITIVITY = 2.6;
 
   let loadError = $state<string | null>(null);
   let loaded = $state(false);
 
   let {
     onqueryAbout = (_node: KGNode) => {},
-    onselectconversation = (_id: string) => {}
+    onselectconversation = (_id: string) => {},
+    dateLabel = $bindable<string | null>(null),
+    timelineOpen = $bindable(false),
   }: {
     onqueryAbout?: (node: KGNode) => void;
     onselectconversation?: (id: string) => void;
+    dateLabel?: string | null;
+    timelineOpen?: boolean;
   } = $props();
 
   let containerEl: HTMLDivElement | undefined = $state();
@@ -42,6 +47,9 @@
 
   let selectedNodeId = $state<string | null>(null);
   let selectedCanvasNode = $state<CanvasNode | null>(null);
+  let overlayOrigin = $state<{ left: number; top: number; width: number; height: number } | null>(null);
+  /** First library-asset click flies to the wall; second opens NodeOverlay. */
+  let galleryFocus = $state(false);
   let selectedKgNode = $derived<KGNode | null>(
     selectedNodeId ? graphStore.nodes.find((n) => n.id === selectedNodeId) ?? null : null,
   );
@@ -49,10 +57,39 @@
   let hoveredNodeId = $state<string | null>(null);
   let tooltipX = $state(0);
   let tooltipY = $state(0);
+  let hoveredKind = $derived(hoveredNodeId ? sceneManager?.getCanvasNode(hoveredNodeId)?.kind ?? null : null);
+  let hoverTooltip = $derived(
+    hoveredKind === 'photo' ? 'Click to view image'
+      : hoveredKind === 'conversation' ? 'Click to view convo'
+      : hoveredKind === 'video' ? 'Click to view video'
+      : hoveredKind === 'audio' ? 'Click to play audio'
+      : hoveredKind === 'document' || hoveredKind === 'pdf' ? 'Click to view document'
+      : 'Click to view details'
+  );
+  let hoverExifLine = $state('');
+
+  $effect(() => {
+    const id = hoveredNodeId;
+    const kind = hoveredKind;
+    if (!id || (kind !== 'photo' && kind !== 'video')) {
+      hoverExifLine = '';
+      return;
+    }
+    const kg = graphStore.nodes.find((n) => n.id === id);
+    const fallback = dateFromProperties(kg?.properties);
+    const cached = peekExif(id);
+    if (cached) {
+      hoverExifLine = compactExifLine(cached) || fallback;
+      return;
+    }
+    hoverExifLine = fallback;
+    loadPhotoExif(id, kg?.properties).then((rows) => {
+      if (hoveredNodeId === id) hoverExifLine = compactExifLine(rows) || fallback;
+    });
+  });
 
   let timeIndex = $state<TimeIndex | null>(null);
-  let dateLabel = $state<string | null>(null);
-  let timelineOpen = $state(false);
+
   let currentBucketIdx = $state(-1);
   let doubleTapPhase = $state(0);
   let doubleTapReturnZ = $state(0);
@@ -71,6 +108,7 @@
   function clearSelection(): void {
     selectedNodeId = null;
     selectedCanvasNode = null;
+    overlayOrigin = null;
   }
 
   function navigateToNode(nodeId: string): void {
@@ -84,6 +122,13 @@
   let lastUserNavAt = 0;
 
   function wireSceneManager(sm: SceneManager): void {
+    graphStore.setVanishHandler(async (id) => {
+      if (pendingTimer) {
+        clearTimeout(pendingTimer);
+        pendingTimer = null;
+      }
+      await sm.vanishSource(id);
+    });
     sm.setPinchSensitivity(DEFAULT_PINCH_SENSITIVITY);
     sm.onSelectNode = (nodeId) => {
       if (nodeId) {
@@ -92,13 +137,32 @@
         const isConversation = cn?.kind === 'conversation'
           || kg?.properties?.entity_type === 'Conversation';
         if (isConversation) {
+          galleryFocus = false;
+          sm.flyToNode(nodeId);
           lastUserNavAt = Date.now();
           onselectconversation(nodeId);
           return;
         }
+        if (!galleryFocus) {
+          sm.flyToNode(nodeId);
+          galleryFocus = true;
+          return;
+        }
+        const nodeYaw = cn?.yaw ?? 0;
+        let yawDelta = Math.abs(nodeYaw - sm.lookYaw);
+        if (yawDelta > Math.PI) yawDelta = Math.abs(yawDelta - 2 * Math.PI);
+        if (yawDelta > 0.4) {
+          galleryFocus = false;
+          sm.resetLook();
+          clearSelection();
+          return;
+        }
+        overlayOrigin = sm.getPlaneScreenRect(nodeId);
         selectedNodeId = nodeId;
         selectedCanvasNode = cn ?? null;
       } else {
+        galleryFocus = false;
+        sm.resetLook();
         clearSelection();
       }
     };
@@ -185,28 +249,8 @@
     }
   }
 
-  function handleDoubleTap(x: number, y: number): void {
-    if (!sceneManager || !timeIndex || currentBucketIdx < 0) return;
-    const sm = sceneManager;
-    const bucketZ = (idx: number) => idx * TIME_BUCKET_SPACING * CHUNK_SIZE + INITIAL_CAMERA_Z;
-
-    if (doubleTapPhase === 0) {
-      doubleTapReturnZ = sm.basePosZ;
-      doubleTapOriginIdx = currentBucketIdx;
-      const withinZ = Math.max(sm.minCameraZ, bucketZ(currentBucketIdx) + CHUNK_SIZE * 0.5);
-      sm.flyToXYZ(sm.basePosX, sm.basePosY, withinZ, 500);
-      doubleTapPhase = 1;
-      return;
-    }
-
-    const stepBack = doubleTapOriginIdx - doubleTapPhase;
-    if (stepBack < 0) {
-      sm.flyToXYZ(sm.basePosX, sm.basePosY, doubleTapReturnZ, 600);
-      doubleTapPhase = 0;
-      return;
-    }
-    sm.flyToXYZ(sm.basePosX, sm.basePosY, bucketZ(stepBack), 600);
-    doubleTapPhase++;
+  function handleDoubleTap(_x: number, _y: number): void {
+    sceneManager?.dashAlongLook();
   }
 
   function updateDateLabel(camChunkZ: number): void {
@@ -256,6 +300,7 @@
     if (bucketIdx < 0 || bucketIdx >= n) return;
     const targetZ = bucketIdx * TIME_BUCKET_SPACING * CHUNK_SIZE + INITIAL_CAMERA_Z;
     sceneManager.flyTo(targetZ);
+    galleryFocus = false;
     if (closeOnFly) timelineOpen = false;
     doubleTapPhase = 0;
   }
@@ -436,6 +481,7 @@
       graphStore.photoImages,
       graphStore.personImages,
       undefined,
+      graphStore.sourceOnline ?? {},
     );
     timeIndex = buildTimeIndex(graphStore.nodes, graphStore.edges);
     sceneManager.setNodes(nodes);
@@ -448,6 +494,7 @@
 
   function scheduleRebuild(): void {
     if (!mounted || !sceneManager) return;
+    if (graphStore.isVanishing) return;
     if (pendingTimer) return;
     const elapsed = Date.now() - lastAppliedAt;
     const delay = Math.max(0, THROTTLE_MS - elapsed);
@@ -481,6 +528,7 @@
       }
       await graphStore.loadGraph(token);
       await graphStore.loadConversations(token);
+      await graphStore.loadCanvas(token);
     } catch (e) {
       loadError = e instanceof Error ? e.message : 'Failed to load graph';
     } finally {
@@ -492,6 +540,7 @@
   function exposeSceneManager(sm: SceneManager): void {
     if (typeof window !== 'undefined') {
       (window as any).__sceneManager = sm;
+      (window as any).__graphTextureCount = () => textureCache.size();
     }
   }
 
@@ -535,11 +584,14 @@
       timelineCloseTimer = null;
     }
     containerEl?.removeEventListener('pointermove', onContainerPointerMove);
+    graphStore.setVanishHandler(null);
+    searchHighlight.matchIds = null;
     sceneManager?.stop();
     sceneManager?.dispose();
     sceneManager = undefined;
     if (typeof window !== 'undefined') {
       delete (window as any).__sceneManager;
+      delete (window as any).__graphTextureCount;
     }
     // Cancel any in-flight texture image fetches so their browser connection
     // slots are released immediately — otherwise pending face-crop / photo
@@ -557,6 +609,7 @@
     void graphStore.nodes;
     void graphStore.edges;
     void graphStore.photoImages;
+    void graphStore.sourceOnline;
 
     if (!mounted || !fontsLoaded) return;
     if (!firstLayoutApplied) {
@@ -571,6 +624,38 @@
       return;
     }
     scheduleRebuild();
+  });
+
+  $effect(() => {
+    void graphStore.searchQuery;
+    const ids = graphStore.searchMatchIds;
+    searchHighlight.matchIds = ids ? new Set(ids) : null;
+  });
+
+  $effect(() => {
+    const id = graphStore.focusRequest;
+    if (!mounted || !sceneManager || !id) return;
+    const sm = sceneManager;
+    const kg = graphStore.nodes.find((n) => n.id === id);
+    const isConversation = kg?.properties?.entity_type === 'Conversation'
+      || (kg?.labels ?? []).some((l) => l === 'Conversation');
+    queueMicrotask(() => {
+      if (graphStore.focusRequest === id) graphStore.focusRequest = null;
+    });
+    if (isConversation) {
+      sm.flyToNode(id);
+      onselectconversation(id);
+      return;
+    }
+    let attempts = 0;
+    const tryFly = () => {
+      if (sm.getCanvasNode(id)) {
+        sm.flyToNode(id);
+        return;
+      }
+      if (attempts++ < 20) setTimeout(tryFly, 100);
+    };
+    tryFly();
   });
 
   // Fly the camera to the active conversation node whenever the active id
@@ -654,16 +739,24 @@
 
 {#if hoveredNodeId && !selectedNodeId}
   <div class="hover-tooltip show" style="left: {tooltipX + 14}px; top: {tooltipY + 14}px;" data-od-id="hover-tooltip">
-    Click to view details
+      {hoverTooltip}
+      {#if hoverExifLine}
+        <span class="hover-exif">{hoverExifLine}</span>
+      {/if}
   </div>
 {/if}
 
   {#if dateLabel}
   {#if timelineOpen}
+    <button
+      type="button"
+      class="navigate-scrim"
+      aria-label="Close date picker"
+      onclick={closeTimeline}
+    ></button>
     <div
-      class="navigate-overlay"
+      class="navigate-popover"
       onwheel={(e) => { e.preventDefault(); handleTimelineScroll(e.deltaY); }}
-      onclick={(e) => { if (e.target === e.currentTarget) closeTimeline(); }}
       onkeydown={(e) => (e.key === 'Escape' ? closeTimeline() : null)}
       {...usePan(handleTimelinePan, () => ({ touchAction: 'none', delay: 0 }), { onpandown: handleTimelinePanStart, onpanup: handleTimelinePanEnd })}
       data-od-id="navigate-overlay"
@@ -701,35 +794,12 @@
     </div>
   {/if}
 
-  <div
-    class="timeline-pill"
-    data-od-id="timeline-bar"
-    data-testid="timeline-bar"
-  >
-    <button
-      type="button"
-      class="timeline-header"
-      onclick={toggleTimeline}
-      onkeydown={(e) => (e.key === 'Enter' || e.key === ' ' ? toggleTimeline() : null)}
-      data-od-id="timeline-header"
-    >
-      <span class="timeline-header-label" data-od-id="timeline-header-label">
-        {#key dateLabel}
-          <span in:fade={{ duration: 220 }}>{dateLabel}</span>
-        {/key}
-      </span>
-    </button>
-  </div>
 {/if}
 
-{#if loaded && !isEmpty && !loadError && !$isMobile}
-  <div class="zoom-hint" data-od-id="zoom-hint">
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
-    <span>Scroll to time travel · Pinch to zoom · Drag to pan</span>
-  </div>
-{/if}
 
-<NodeOverlay node={selectedCanvasNode} kgNode={selectedKgNode} onClose={clearSelection} onNavigate={navigateToNode} />
+
+<ConversationCloud {sceneManager} {onselectconversation} hidden={galleryFocus} />
+<NodeOverlay node={selectedCanvasNode} kgNode={selectedKgNode} originRect={overlayOrigin} onClose={clearSelection} onNavigate={navigateToNode} />
 
 {#if sceneManager}
   <ProcessingOverlay {sceneManager} />
@@ -847,11 +917,14 @@
   .hover-tooltip {
     position: absolute;
     z-index: 20;
-    padding: 5px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 6px 12px;
     background: var(--canvas-glass);
     backdrop-filter: blur(20px) saturate(1.4);
     -webkit-backdrop-filter: blur(20px) saturate(1.4);
-    border-radius: 100px;
+    border-radius: 12px;
     box-shadow: 0 0 0 1px oklch(50% 0.03 255 / 8%);
     color: var(--canvas-muted);
     font-family: var(--font-mono);
@@ -864,32 +937,58 @@
     transition: opacity 0.12s ease;
   }
   .hover-tooltip.show { opacity: 1; }
+  .hover-exif {
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--canvas-accent);
+    opacity: 1;
+    max-width: 28rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
 
-  /* ── Navigate overlay with picker wheel ── */
-  .navigate-overlay {
+  .navigate-scrim {
     position: fixed;
     inset: 0;
-    z-index: 19;
+    z-index: 48;
+    border: 0;
+    padding: 0;
+    background: transparent;
+    cursor: default;
+  }
+
+  .navigate-popover {
+    position: fixed;
+    right: calc(16px + env(safe-area-inset-right, 0px));
+    bottom: calc(4.75rem + env(safe-area-inset-bottom, 0px));
+    z-index: 50;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    background: oklch(6% 0.02 260 / 70%);
-    backdrop-filter: blur(16px) saturate(0.8);
-    -webkit-backdrop-filter: blur(16px) saturate(0.8);
+    align-items: stretch;
+    width: 220px;
+    padding: 10px 8px 12px;
+    border-radius: 18px;
+    background: oklch(10% 0.02 255 / 90%);
+    backdrop-filter: blur(24px) saturate(1.5);
+    -webkit-backdrop-filter: blur(24px) saturate(1.5);
+    border: 1px solid oklch(82% 0.14 210 / 28%);
+    box-shadow:
+      0 12px 40px oklch(0% 0 0 / 50%),
+      0 0 0 1px oklch(50% 0.03 255 / 10%);
     cursor: default;
     touch-action: none;
-    animation: overlay-fade-in 0.2s ease-out;
+    animation: overlay-fade-in 0.18s ease-out;
   }
 
   .navigate-overlay-label {
-    font-family: var(--font-display);
-    font-size: 16px;
-    letter-spacing: 0.2em;
+    font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
+    font-size: 10px;
+    letter-spacing: 0.18em;
     text-transform: uppercase;
-    color: oklch(82% 0.14 210 / 60%);
+    color: oklch(82% 0.14 210 / 70%);
     pointer-events: none;
-    margin-bottom: 8px;
+    margin: 0 0 6px;
+    text-align: center;
   }
 
   @keyframes overlay-fade-in {
@@ -900,62 +999,79 @@
   /* ── Timeline pill (collapsed date label, always visible) ── */
   .timeline-pill {
     position: absolute;
-    right: 24px;
-    top: 24px;
+    left: auto;
+    right: calc(236px + env(safe-area-inset-right, 0px));
     z-index: 20;
+    top: auto;
+    bottom: calc(1.15rem + env(safe-area-inset-bottom, 0px));
+    transform: none;
+    z-index: 40;
     pointer-events: auto;
   }
 
   .timeline-header {
     display: flex;
     align-items: center;
-    padding: 6px 12px;
-    background: oklch(12% 0.015 255 / 40%);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border-radius: 8px;
-    border: 1px solid oklch(65% 0.04 250 / 15%);
+    gap: 8px;
+    height: 40px;
+    padding: 0 14px 0 16px;
+    background: oklch(10% 0.02 255 / 82%);
+    backdrop-filter: blur(24px) saturate(1.5);
+    -webkit-backdrop-filter: blur(24px) saturate(1.5);
+    border-radius: 100px;
+    border: 1px solid oklch(82% 0.14 210 / 28%);
+    box-shadow:
+      0 8px 28px oklch(0% 0 0 / 45%),
+      0 0 0 1px oklch(50% 0.03 255 / 10%);
     cursor: pointer;
-    transition: background 0.2s, border-color 0.2s;
+    transition: background 0.2s, border-color 0.2s, box-shadow 0.2s;
   }
-  .timeline-header:hover {
-    background: oklch(16% 0.02 255 / 50%);
-    border-color: oklch(65% 0.06 250 / 25%);
+  .timeline-header:hover,
+  .timeline-header.open {
+    background: oklch(14% 0.025 255 / 88%);
+    border-color: oklch(82% 0.14 210 / 50%);
   }
   .timeline-header:focus-visible {
-    outline: 2px solid var(--canvas-accent);
-    outline-offset: 2px;
-    border-radius: inherit;
+    outline: none;
+    border-color: oklch(82% 0.14 210 / 70%);
+    box-shadow:
+      0 8px 28px oklch(0% 0 0 / 45%),
+      0 0 0 3px oklch(82% 0.14 210 / 25%);
   }
 
   .timeline-header-label {
     font-family: var(--font-mono);
-    font-size: 11px;
+    font-size: 13px;
     letter-spacing: 0.1em;
     text-transform: uppercase;
-    color: var(--canvas-muted);
+    color: oklch(92% 0.02 210);
     font-weight: 500;
     font-variant-numeric: tabular-nums;
   }
 
+  .timeline-header-chevron {
+    width: 14px;
+    height: 14px;
+    color: oklch(82% 0.14 210);
+    flex-shrink: 0;
+    transition: transform 0.2s ease;
+  }
+  .timeline-header.open .timeline-header-chevron {
+    transform: rotate(180deg);
+  }
+
   @media (max-width: 768px) {
     .timeline-pill {
-      right: 20px;
-      top: 20px;
-    }
-    .timeline-header {
-      padding: 8px 16px;
-    }
-    .timeline-header-label {
-      font-size: 13px;
+      right: calc(16px + env(safe-area-inset-right, 0px));
+      bottom: calc(88px + env(safe-area-inset-bottom, 0px));
     }
   }
 
   /* ── iOS-style carousel wheel ── */
   .timeline-wheel {
     position: relative;
-    width: 240px;
-    height: 220px;
+    width: 100%;
+    height: 196px;
     overflow: hidden;
     perspective: 400px;
   }
@@ -982,7 +1098,7 @@
     position: absolute;
     left: 0;
     right: 0;
-    top: 88px;
+    top: 76px;
     transform-origin: center center;
     transition: transform 0.08s ease-out;
     will-change: transform;
@@ -1003,7 +1119,7 @@
     user-select: none;
     -webkit-user-select: none;
     font-family: var(--font-mono);
-    font-size: 18px;
+    font-size: 13px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--canvas-faint);
@@ -1025,37 +1141,12 @@
     color: var(--canvas-accent);
     font-family: var(--font-display);
     font-weight: 600;
-    font-size: 22px;
+    font-size: 15px;
   }
 
   .timeline-wheel-mask {
     display: none;
   }
-
-  /* ── Zoom hint — glass pill (bottom-left) ── */
-  .zoom-hint {
-    position: absolute;
-    left: 16px;
-    bottom: 16px;
-    z-index: 20;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 12px;
-    background: var(--canvas-glass);
-    backdrop-filter: blur(20px) saturate(1.4);
-    -webkit-backdrop-filter: blur(20px) saturate(1.4);
-    border-radius: 100px;
-    box-shadow: 0 0 0 1px oklch(50% 0.03 255 / 8%);
-    color: var(--canvas-faint);
-    font-family: var(--font-mono);
-    font-size: 11px;
-    letter-spacing: 0.04em;
-    pointer-events: none;
-    animation: float-in 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.5s both;
-    transition: opacity 0.4s;
-  }
-  .zoom-hint svg { color: var(--canvas-muted); }
 
   /* ── Shared animations ── */
   @keyframes float-in {

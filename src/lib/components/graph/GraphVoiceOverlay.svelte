@@ -27,14 +27,18 @@
 <style>
 	.voice-caption {
 		margin: 0;
-		max-width: min(34rem, calc(100vw - 48px));
+		max-width: min(28rem, calc(100vw - 48px));
+		padding: 10px 16px;
+		border-radius: 14px;
+		background: oklch(10% 0.02 255 / 72%);
+		border: 1px solid oklch(82% 0.14 210 / 22%);
 		text-align: center;
-		font-size: clamp(1.15rem, 4.6vw, 1.55rem);
-		line-height: 1.45;
+		font-size: 14px;
+		line-height: 1.5;
 		font-weight: 400;
-		letter-spacing: -0.01em;
-		font-family: var(--font-display);
-		color: oklch(94% 0.01 210);
+		letter-spacing: 0.01em;
+		font-family: var(--font-sans, Inter, system-ui, sans-serif);
+		color: oklch(92% 0.02 210);
 		text-wrap: pretty;
 	}
 
