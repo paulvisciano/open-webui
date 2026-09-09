@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# start-all.sh — Start llama-server, Open WebUI backend, frontend, and Knowledge Graph MCP together.
+# start-all.sh — Start llama-server, Open WebUI backend, and frontend together.
 #
 # Defaults:
 #   llama-server  → http://localhost:8082   (LLM_PORT)
 #   backend       → http://localhost:8080   (PORT)
 #   frontend      → https://localhost:5173
-#   kg-mcp        → http://localhost:9653/mcp  (MCP_PORT)
-#   lightrag      → http://localhost:9621   (LIGHTRAG_PORT, Docker)
 #
 # Usage:
 #   ./start-all.sh             # foreground (Ctrl+C stops everything)
@@ -16,15 +14,6 @@ set -euo pipefail
 #
 # Override any env var before running, e.g.:
 #   LLM_PORT=9000 ./start-all.sh
-#
-# Knowledge Graph env vars (all optional — defaults point to the local
-# knowledge-graph Docker stack):
-#   KG_DIR              — knowledge-graph project root (default ~/Projects/knowledge-graph)
-#   MCP_PORT            — MCP server port (default 9653)
-#   LIGHTRAG_PORT       — LightRAG REST port (default 9621)
-#   LIGHTRAG_API_URL     — LightRAG REST base URL (default http://localhost:9621)
-#   LIGHTRAG_API_KEY     — API key for LightRAG (default "")
-#   KG_API_URL           — Knowledge Graph API base URL (default http://localhost:8000)
 
 BACKGROUND=false
 for arg in "$@"; do
@@ -44,9 +33,6 @@ TMUX_PREFIX="open-webui"
 
 LLM_PORT="${LLM_PORT:-8082}"
 PORT="${PORT:-8080}"
-MCP_PORT="${MCP_PORT:-9653}"
-LIGHTRAG_PORT="${LIGHTRAG_PORT:-9621}"
-KG_DIR="${KG_DIR:-$HOME/Projects/knowledge-graph}"
 
 MODEL_DIR="${MODEL_DIR:-$HOME/models}"
 LLM_MODEL_PATH="${LLM_MODEL_PATH:-$MODEL_DIR/bonsai-27b/Bonsai-27B-Q1_0.gguf}"
@@ -66,12 +52,11 @@ LLAMA_PID=""
 TTS_PID=""
 BACKEND_PID=""
 FRONTEND_PID=""
-MCP_PID=""
 
 cleanup() {
     echo ""
     echo "Stopping all services..."
-    for pid in "$FRONTEND_PID" "$BACKEND_PID" "$MCP_PID" "$TTS_PID" "$LLAMA_PID"; do
+    for pid in "$FRONTEND_PID" "$BACKEND_PID" "$TTS_PID" "$LLAMA_PID"; do
         [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
     done
     wait 2>/dev/null || true
@@ -82,11 +67,11 @@ if [[ "$BACKGROUND" == "false" ]]; then
     trap cleanup EXIT INT TERM
 fi
 
-KG_LLAMA_SERVER="$HOME/Projects/knowledge-graph/vendor/llama.cpp/src/build/bin/llama-server"
+LOCAL_LLAMA_SERVER="$HOME/Projects/knowledge-graph/vendor/llama.cpp/src/build/bin/llama-server"
 HOMEBREW_LLAMA_SERVER="$(which llama-server 2>/dev/null || echo /opt/homebrew/bin/llama-server)"
 
-if [[ -x "$KG_LLAMA_SERVER" ]]; then
-    LLAMA_SERVER="$KG_LLAMA_SERVER"
+if [[ -x "$LOCAL_LLAMA_SERVER" ]]; then
+    LLAMA_SERVER="$LOCAL_LLAMA_SERVER"
     export DYLD_LIBRARY_PATH="$HOME/Projects/knowledge-graph/vendor/llama.cpp/src/build/bin:${DYLD_LIBRARY_PATH:-}"
     echo "Using project-built llama-server (Metal): $LLAMA_SERVER"
 elif [[ -x "$HOMEBREW_LLAMA_SERVER" ]]; then
@@ -125,10 +110,8 @@ if [[ "$BACKGROUND" == "true" ]]; then
         exit 1
     fi
     tmux kill-session -t "$TMUX_PREFIX-llama" 2>/dev/null || true
-    tmux kill-session -t "$TMUX_PREFIX-piper" 2>/dev/null || true
     tmux kill-session -t "$TMUX_PREFIX-backend" 2>/dev/null || true
     tmux kill-session -t "$TMUX_PREFIX-frontend" 2>/dev/null || true
-    tmux kill-session -t "$TMUX_PREFIX-mcp" 2>/dev/null || true
 fi
 
 LLAMA_CMD=(
@@ -164,84 +147,6 @@ for i in $(seq 1 120); do
     echo -n "."
     sleep 1
     [[ "$i" -eq 120 ]] && { echo " ✗ FAILED"; tail -20 /tmp/bonsai-llama.log; exit 1; }
-done
-
-# ─── LightRAG (Docker) ─────────────────────────────────────────────────────
-# Starts the LightRAG + Postgres containers from the knowledge-graph Docker
-# stack.  The MCP facade proxies query/save calls to LightRAG (:9621), so it
-# must be up before the MCP server starts.
-KG_COMPOSE_FILE="$KG_DIR/docker-compose.yml"
-if [[ ! -f "$KG_COMPOSE_FILE" ]]; then
-    echo "ERROR: docker-compose.yml not found at $KG_COMPOSE_FILE"
-    echo "  Set KG_DIR to the knowledge-graph project root."
-    exit 1
-fi
-
-if ! command -v docker &>/dev/null; then
-    echo "ERROR: docker not found. Start Docker Desktop first."
-    exit 1
-fi
-
-if ! docker info &>/dev/null; then
-    echo "▶ Starting Docker Desktop..."
-    open -a Docker
-    echo -n "  waiting for Docker daemon..."
-    for i in $(seq 1 60); do
-        docker info &>/dev/null && { echo " ✓ ready"; break; }
-        echo -n "."
-        sleep 2
-        [[ "$i" -eq 60 ]] && { echo " ✗ FAILED"; exit 1; }
-    done
-fi
-
-echo "▶ Starting LightRAG + Postgres via docker compose..."
-docker compose -f "$KG_COMPOSE_FILE" up -d lightrag postgres
-
-echo -n "  waiting for LightRAG on port $LIGHTRAG_PORT..."
-for i in $(seq 1 30); do
-    code="$(curl -sk -o /dev/null -w "%{http_code}" "http://localhost:${LIGHTRAG_PORT}/health" 2>/dev/null || echo "000")"
-    if [[ "$code" == "200" ]]; then
-        echo " ✓ ready"
-        break
-    fi
-    echo -n "."
-    sleep 2
-    [[ "$i" -eq 30 ]] && { echo " ✗ FAILED"; docker logs knowledge-graph-lightrag --tail 20 2>/dev/null; exit 1; }
-done
-
-# ─── Knowledge Graph MCP ───────────────────────────────────────────────────
-# Starts the MCP facade server (mcp-services/) via uv run — it manages its own
-# venv.  The server proxies query/save/navigate calls to LightRAG (:9621) and
-# the KG API (:8000), both expected to be running from the knowledge-graph
-# Docker stack.
-if existing_mcp_pid="$(lsof -ti tcp:"$MCP_PORT" -sTCP:LISTEN 2>/dev/null)" && [[ -n "$existing_mcp_pid" ]]; then
-    echo "Port $MCP_PORT in use (PID $existing_mcp_pid) — killing it."
-    kill "$existing_mcp_pid" 2>/dev/null || true
-    sleep 1
-fi
-
-MCP_DIR="$SCRIPT_DIR/mcp-services"
-export MEMORY_SEARCH_MCP_PORT="$MCP_PORT"
-echo "▶ Starting Knowledge Graph MCP on port $MCP_PORT..."
-if [[ "$BACKGROUND" == "true" ]]; then
-    tmux new-session -d -s "$TMUX_PREFIX-mcp" \
-        "cd '$MCP_DIR' && MEMORY_SEARCH_MCP_PORT='$MCP_PORT' uv run python -m knowledge_graph_mcp 2>&1 | tee /tmp/open-webui-mcp.log"
-else
-    cd "$MCP_DIR"
-    uv run python -m knowledge_graph_mcp &>/tmp/open-webui-mcp.log &
-    MCP_PID=$!
-    cd "$SCRIPT_DIR"
-fi
-
-echo -n "  waiting for MCP server..."
-for i in $(seq 1 30); do
-    if lsof -ti tcp:"$MCP_PORT" -sTCP:LISTEN &>/dev/null; then
-        echo " ✓ ready"
-        break
-    fi
-    echo -n "."
-    sleep 1
-    [[ "$i" -eq 30 ]] && { echo " ✗ FAILED"; tail -20 /tmp/open-webui-mcp.log; exit 1; }
 done
 
 # Kokoro TTS runs in-process inside the backend (not a separate daemon).
@@ -304,7 +209,6 @@ fi
 export OPENAI_API_BASE_URL="http://localhost:${LLM_PORT}/v1"
 export OPENAI_API_KEY="dummy"
 export WEBUI_SECRET_KEY="${WEBUI_SECRET_KEY:-$(head -c 24 /dev/random | base64)}"
-export TOOL_SERVER_CONNECTIONS="[{\"url\":\"http://localhost:${MCP_PORT}/mcp\",\"path\":\"/mcp\",\"type\":\"mcp\",\"auth_type\":\"none\",\"key\":null,\"config\":{\"enable\":true,\"access_grants\":[{\"principal_type\":\"user\",\"principal_id\":\"*\",\"permission\":\"read\"}]},\"info\":{\"id\":\"knowledge-graph\",\"name\":\"Knowledge Graph\"}}]"
 
 if [[ "$BACKGROUND" == "true" ]]; then
     tmux new-session -d -s "$TMUX_PREFIX-backend" \
@@ -339,7 +243,6 @@ if [[ -n "$LAN_IP" ]]; then
     echo "  Backend:     https://${LAN_IP}:${PORT}  (LAN)"
 fi
 echo "  Llama API:   http://localhost:${LLM_PORT}/v1/models"
-echo "  KG MCP:      http://localhost:${MCP_PORT}/mcp"
 if [[ -n "$LAN_IP" ]] && [[ -f "$SCRIPT_DIR/static/install-ca.html" ]]; then
     echo ""
     echo "  Phone setup: open https://${LAN_IP}:5173/install-ca.html on your phone,"
@@ -377,7 +280,6 @@ if [[ "$BACKGROUND" == "false" ]]; then
     # Record PIDs so stop-all.sh can clean up even if it can't reach the ports.
     : > "$SCRIPT_DIR/.start-all.pids"
     [[ -n "$LLAMA_PID" ]]     && echo "$LLAMA_PID"     >> "$SCRIPT_DIR/.start-all.pids"
-    [[ -n "$MCP_PID" ]]       && echo "$MCP_PID"       >> "$SCRIPT_DIR/.start-all.pids"
     [[ -n "$BACKEND_PID" ]]   && echo "$BACKEND_PID"   >> "$SCRIPT_DIR/.start-all.pids"
     [[ -n "$FRONTEND_PID" ]]  && echo "$FRONTEND_PID"  >> "$SCRIPT_DIR/.start-all.pids"
     wait
