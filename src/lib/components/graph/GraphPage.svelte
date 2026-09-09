@@ -197,7 +197,12 @@
 	};
 
 	const startVoiceChat = async ({ continueChat = false } = {}) => {
-		if (voiceActive || voiceStarting) return;
+		if (voiceStarting) return;
+		if (voiceService) {
+			await voiceService.stop();
+			voiceService = null;
+			voiceActive = false;
+		}
 		orbOptionsOpen = false;
 		voiceStarting = true;
 		const t0 = performance.now();
