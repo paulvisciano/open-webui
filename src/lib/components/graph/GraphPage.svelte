@@ -495,6 +495,7 @@
 
 		{#if displayedSources.length > 0}
 		<div class="graph-folder-hud" data-testid="graph-source-list">
+			<p class="graph-folder-kicker">On view</p>
 			<ul class="graph-source-list">
 				{#each displayedSources as source (source.id)}
 					<li
@@ -504,13 +505,21 @@
 						data-testid="graph-source-pill"
 						title={source.lastAbsPath || source.name}
 					>
-						<span
-							class="graph-source-status {source.online ? 'is-online' : 'is-offline'}"
-							aria-label={graphStore.scanningSourceIds.has(source.id) ? 'indexing' : source.online ? 'online' : 'offline'}
-						></span>
+						{#if source.online}
+							<svg class="graph-source-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+								<path d="M4 7.5h5.2l1.4 1.6H20v8.4a1.5 1.5 0 0 1-1.5 1.5H5.5A1.5 1.5 0 0 1 4 17.5V7.5Z" />
+								<path d="M4 11h16" />
+							</svg>
+						{:else}
+							<svg class="graph-source-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+								<path d="M4 8h5l1.5 2H20v8.5a1.5 1.5 0 0 1-1.5 1.5H5.5A1.5 1.5 0 0 1 4 18.5V8Z" />
+							</svg>
+						{/if}
 						<span class="graph-source-name">{source.name || source.lastAbsPath || source.id}</span>
 						{#if graphStore.scanningSourceIds.has(source.id)}
 							<span class="graph-source-label">Indexing</span>
+						{:else if !source.online}
+							<span class="graph-source-label">Offline</span>
 						{/if}
 					</li>
 				{/each}
@@ -884,37 +893,39 @@
 		padding: 0;
 		list-style: none;
 	}
+	.graph-folder-kicker {
+		margin: 0 2px 6px;
+		font-family: 'Fraunces', Georgia, serif;
+		font-size: 9px;
+		letter-spacing: 0.18em;
+		text-transform: uppercase;
+		color: #c4a056;
+	}
 	.graph-source-row {
 		display: flex;
 		align-items: center;
 		gap: 8px;
 		min-width: 0;
 		padding: 4px 2px;
-		color: oklch(88% 0.01 210);
-		font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
-		font-size: 11px;
-		line-height: 1.2;
-		letter-spacing: 0.02em;
+		color: #efe6d2;
+		font-family: 'Fraunces', Georgia, serif;
+		font-size: 12px;
+		line-height: 1.25;
 	}
 	.graph-source-row.is-offline {
+		color: #8a7d6a;
+	}
+	.graph-source-icon {
+		width: 14px;
+		height: 14px;
+		flex-shrink: 0;
+		opacity: 0.9;
+	}
+	.graph-source-row.is-offline .graph-source-icon {
 		opacity: 0.45;
 	}
-	.graph-source-status {
-		width: 6px;
-		height: 6px;
-		border-radius: 50%;
-		flex-shrink: 0;
-	}
-	.graph-source-status.is-online {
-		background: var(--folder-green);
-		box-shadow: 0 0 8px color-mix(in srgb, var(--folder-green) 70%, transparent);
-	}
-	.graph-source-row.is-indexing .graph-source-status {
+	.graph-source-row.is-indexing .graph-source-icon {
 		animation: source-pulse 1.2s ease-in-out infinite;
-	}
-	.graph-source-status.is-offline {
-		background: var(--folder-dim);
-		box-shadow: none;
 	}
 	.graph-source-name {
 		overflow: hidden;
@@ -924,11 +935,14 @@
 	}
 	.graph-source-label {
 		margin-left: auto;
-		color: oklch(82% 0.14 210 / 80%);
+		color: #c4a056;
 		text-transform: uppercase;
-		letter-spacing: 0.08em;
+		letter-spacing: 0.1em;
 		font-size: 9px;
 		flex-shrink: 0;
+	}
+	.graph-source-row.is-offline .graph-source-label {
+		color: #8a7d6a;
 	}
 	@keyframes source-pulse {
 		0%, 100% { opacity: 1; }
