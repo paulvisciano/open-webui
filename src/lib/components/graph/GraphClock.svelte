@@ -144,7 +144,7 @@
   .flip-cal-dock {
     position: absolute;
     right: calc(16px + env(safe-area-inset-right, 0px));
-    bottom: calc(5.15rem + env(safe-area-inset-bottom, 0px));
+    bottom: calc(0.95rem + env(safe-area-inset-bottom, 0px));
     left: auto;
     transform: none;
     z-index: 40;
@@ -166,8 +166,8 @@
 
   .cal-book {
     position: relative;
-    width: 76px;
-    height: 84px;
+    width: 114px;
+    height: 128px;
     perspective: 700px;
   }
   .cal-sheet {
@@ -175,8 +175,8 @@
     flex-direction: column;
     align-items: center;
     justify-content: flex-start;
-    padding: 8px 6px 8px;
-    border-radius: 12px;
+    padding: 12px 10px 10px;
+    border-radius: 16px;
     background: oklch(10% 0.02 255 / 88%);
     border: 1px solid oklch(82% 0.14 210 / 28%);
     box-shadow:
@@ -208,22 +208,22 @@
 
   .cal-dow {
     font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
-    font-size: 8px;
+    font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.18em;
     color: oklch(82% 0.14 210);
   }
   .cal-day {
     font-family: var(--font-display, 'Fraunces', Georgia, serif);
-    font-size: 32px;
+    font-size: 48px;
     font-weight: 600;
     line-height: 1;
     color: oklch(94% 0.02 210);
   }
   .cal-mon {
-    margin-top: 2px;
+    margin-top: 4px;
     font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
-    font-size: 8px;
+    font-size: 11px;
     font-weight: 500;
     letter-spacing: 0.12em;
     color: oklch(78% 0.03 210 / 80%);
@@ -238,11 +238,11 @@
 
   @media (max-width: 640px) {
     .cal-book {
-      width: 66px;
-      height: 74px;
+      width: 96px;
+      height: 108px;
     }
     .cal-day {
-      font-size: 28px;
+      font-size: 40px;
     }
   }
 </style>

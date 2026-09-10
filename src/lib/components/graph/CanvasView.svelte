@@ -1474,7 +1474,7 @@
   .navigate-popover {
     position: fixed;
     right: calc(16px + env(safe-area-inset-right, 0px));
-    bottom: calc(4.75rem + env(safe-area-inset-bottom, 0px));
+    bottom: calc(0.95rem + 140px + env(safe-area-inset-bottom, 0px));
     z-index: 50;
     display: flex;
     flex-direction: column;
