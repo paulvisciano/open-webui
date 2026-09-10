@@ -102,8 +102,9 @@ export class NodePlane {
     this._mesh.position.set(node.localX, node.localY, node.localZ);
     this._mesh.rotation.y = node.yaw ?? 0;
     const yaw = node.yaw ?? 0;
-    if (yaw > 0.2) this._mesh.position.x += 2.4;
-    else if (yaw < -0.2) this._mesh.position.x -= 2.4;
+    const proud = node.kind === 'video' ? 8.2 : 2.4;
+    if (yaw > 0.2) this._mesh.position.x += proud;
+    else if (yaw < -0.2) this._mesh.position.x -= proud;
     this._mesh.userData.nodeId = node.id;
     this._material.opacity = 0;
     this._mesh.visible = false;
@@ -304,7 +305,10 @@ export class NodePlane {
     }
     if (this._node.kind === 'video' || this._node.kind === 'photo') {
       try {
-        const baked = this._createMediaCaptionTexture(texture, this._node.kind === 'video');
+        const baked = this._createMediaCaptionTexture(
+          texture,
+          this._currentLod !== 'full',
+        );
         if (this._noteTexture && this._noteTexture !== baked) {
           this._noteTexture.dispose();
         }
@@ -394,16 +398,34 @@ export class NodePlane {
     return !!this._inlineVideo && !this._inlineVideo.paused;
   }
 
-  playInline(url: string): void {
+  keepMuted(): void {
+    if (!this._inlineVideo) return;
+    this._inlineVideo.muted = true;
+    this._inlineVideo.defaultMuted = true;
+    this._inlineVideo.volume = 0;
+    this._inlineVideo.setAttribute('muted', '');
+  }
+
+  playInline(url: string, opts?: { muted?: boolean; rate?: number; loop?: boolean; onEnded?: () => void }): void {
     if (this._disposed) return;
     this.stopInline();
     this._stillMap = this._material.map;
+    const muted = opts?.muted ?? false;
     const video = document.createElement('video');
-    video.src = url;
     video.playsInline = true;
-    video.loop = true;
+    video.loop = opts?.loop ?? true;
     video.crossOrigin = 'anonymous';
-    video.muted = false;
+    video.muted = muted;
+    video.defaultMuted = muted;
+    if (muted) {
+      video.volume = 0;
+      video.setAttribute('muted', '');
+    } else {
+      video.volume = 1;
+      video.removeAttribute('muted');
+    }
+    video.playbackRate = opts?.rate ?? 1;
+    video.src = url;
     const applyVideoAspect = () => {
       if (video.videoWidth > 0 && video.videoHeight > 0) {
         this._fitNaturalAspect(video.videoWidth, video.videoHeight);
@@ -411,10 +433,22 @@ export class NodePlane {
       }
     };
     video.addEventListener('loadedmetadata', applyVideoAspect);
-    void video.play().catch(() => {
-      video.muted = true;
-      void video.play().catch(() => {});
-    });
+    if (opts?.onEnded) {
+      video.addEventListener('ended', () => {
+        if (this._inlineVideo === video) opts.onEnded?.();
+      });
+    }
+    const tryPlay = () => {
+      video.muted = muted || video.muted;
+      if (muted) video.volume = 0;
+      void video.play().catch(() => {
+        video.muted = true;
+        video.volume = 0;
+        void video.play().catch(() => {});
+      });
+    };
+    video.addEventListener('canplay', tryPlay, { once: true });
+    tryPlay();
     const tex = new THREE.VideoTexture(video);
     tex.colorSpace = THREE.SRGBColorSpace;
     this._material.map = tex;
@@ -762,32 +796,6 @@ export class NodePlane {
     ctx.restore();
   }
 
-  private _drawPlayGlyph(
-    ctx: CanvasRenderingContext2D,
-    cx: number,
-    cy: number,
-    size: number,
-    fill = '#d4af37',
-    ring = 'rgba(212,175,55,0.7)',
-  ): void {
-    const r = size / 2;
-    ctx.save();
-    ctx.strokeStyle = ring;
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.fillStyle = fill;
-    ctx.beginPath();
-    const ox = cx + r * 0.08;
-    ctx.moveTo(ox - r * 0.22, cy - r * 0.32);
-    ctx.lineTo(ox + r * 0.38, cy);
-    ctx.lineTo(ox - r * 0.22, cy + r * 0.32);
-    ctx.closePath();
-    ctx.fill();
-    ctx.restore();
-  }
-
   private _imageSize(texture: THREE.Texture): { w: number; h: number } | null {
     const img = texture.image as {
       width?: number;
@@ -807,6 +815,16 @@ export class NodePlane {
   private _fitNaturalAspect(iw: number, ih: number): void {
     const aspect = iw / ih;
     if (!Number.isFinite(aspect) || aspect <= 0) return;
+    if (this._node.kind === 'video') {
+      if (aspect >= 1) {
+        const w = Math.max(this._node.width, this._node.height * aspect, 72);
+        this._mesh.scale.set(w, w / aspect, 1);
+      } else {
+        const h = Math.max(this._node.height, 72);
+        this._mesh.scale.set(h * aspect, h, 1);
+      }
+      return;
+    }
     const span = Math.max(this._node.width, this._node.height, 72);
     if (aspect >= 1) {
       this._mesh.scale.set(span, span / aspect, 1);
@@ -848,7 +866,8 @@ export class NodePlane {
     const long = 1024;
     const canvasW = aspect >= 1 ? long : Math.max(256, Math.round(long * aspect));
     const canvasH = aspect >= 1 ? Math.max(256, Math.round(long / aspect)) : long;
-    const radius = Math.max(12, Math.round(Math.min(canvasW, canvasH) * 0.045));
+    const radiusFrac = this._node.kind === 'video' ? 0.012 : 0.045;
+    const radius = Math.max(this._node.kind === 'video' ? 3 : 12, Math.round(Math.min(canvasW, canvasH) * radiusFrac));
     const canvas = document.createElement('canvas');
     canvas.width = canvasW;
     canvas.height = canvasH;
@@ -870,7 +889,7 @@ export class NodePlane {
     this._material.needsUpdate = true;
   }
 
-  private _createVideoScreenTexture(source: THREE.Texture, withPlay = true): THREE.CanvasTexture {
+  private _createVideoScreenTexture(source: THREE.Texture, withDate = true): THREE.CanvasTexture {
     const imgSize = this._imageSize(source);
     const aspect = imgSize
       ? imgSize.w / imgSize.h
@@ -886,7 +905,9 @@ export class NodePlane {
     const ctx = canvas.getContext('2d');
     if (!ctx) return new THREE.CanvasTexture(canvas);
 
-    const radius = Math.round(Math.min(canvasW, canvasH) * 0.045);
+    const isVideo = this._node.kind === 'video';
+    const minDim = Math.min(canvasW, canvasH);
+    const radius = Math.round(minDim * (isVideo ? 0.012 : 0.045));
     ctx.clearRect(0, 0, canvasW, canvasH);
     ctx.save();
     this._roundRect(ctx, 0, 0, canvasW, canvasH, radius);
@@ -905,14 +926,9 @@ export class NodePlane {
       ctx.fillRect(0, 0, canvasW, canvasH);
     }
 
-    if (withPlay) {
-      const play = Math.round(Math.min(canvasW, canvasH) * 0.14);
-      this._drawPlayGlyph(ctx, canvasW / 2, canvasH / 2, play, 'rgba(255,255,255,0.92)', 'rgba(0,0,0,0.35)');
-    }
-
-    const dateLabel = this._mediaDateLabel();
+    const dateLabel = withDate ? this._mediaDateLabel() : '';
     if (dateLabel) {
-      const dateFont = Math.max(11, Math.round(Math.min(canvasW, canvasH) * 0.028));
+      const dateFont = Math.max(11, Math.round(minDim * 0.028));
       ctx.font = `500 ${dateFont}px ${FONT_MONO}`;
       ctx.textAlign = 'right';
       ctx.textBaseline = 'bottom';
@@ -930,8 +946,11 @@ export class NodePlane {
     return texture;
   }
 
-  private _createMediaCaptionTexture(source: THREE.Texture, isVideo: boolean): THREE.CanvasTexture {
-    return this._createVideoScreenTexture(source, isVideo);
+  private _createMediaCaptionTexture(
+    source: THREE.Texture,
+    withDate = true,
+  ): THREE.CanvasTexture {
+    return this._createVideoScreenTexture(source, withDate);
   }
 
 
