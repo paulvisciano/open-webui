@@ -132,6 +132,7 @@ export class SceneManager {
   private _hoveredNodeId: string | null = null;
   private _cursorMode: 'idle' | 'grabbing' | 'pointer' = 'idle';
   private _hall: THREE.Group | null = null;
+  private _skyTime: { value: number } | null = null;
 
   // Dynamic camera Z bounds derived from the layout's depth (time) range.
   // Newest photos sit at maxCellZ*CHUNK_SIZE; the camera starts just above
@@ -185,6 +186,9 @@ export class SceneManager {
   /** Optional callback fired when the camera crosses a chunk boundary. */
   onChunkChange?: (cx: number, cy: number, cz: number) => void;
 
+  onCameraZ?: (z: number) => void;
+  private _lastReportedZ = Number.NaN;
+
   /** Fired when the user clicks a photo plane (or null on empty-space click). */
   onSelectNode?: (nodeId: string | null) => void;
 
@@ -198,6 +202,10 @@ export class SceneManager {
   onTimelineScroll?: (delta: number) => void;
 
   private _playingVideoId: string | null = null;
+
+  get playingVideoId(): string | null {
+    return this._playingVideoId;
+  }
 
   /**
    * Creates the renderer, camera, scene, shared geometry, and chunk manager,
@@ -480,7 +488,12 @@ export class SceneManager {
      // zooming in past the oldest photos can't fly the camera inside the
      // photo plane (which renders a blank scene).
      this._minCameraZ = Math.max(MIN_CAMERA_Z, minCellZ * CHUNK_SIZE + INITIAL_CAMERA_Z);
-     const far = Math.max(CAMERA_FAR_MIN, this._maxCameraZ + CHUNK_SIZE * (RENDER_DISTANCE + CHUNK_FADE_MARGIN + 1));
+      const hallSpan = (maxCellZ - minCellZ + 4) * CHUNK_SIZE + INITIAL_CAMERA_Z;
+      const far = Math.max(
+        CAMERA_FAR_MIN,
+        hallSpan,
+        this._maxCameraZ + CHUNK_SIZE * (RENDER_DISTANCE + CHUNK_FADE_MARGIN + 1),
+      );
      if (this._camera.far !== far) {
        this._camera.far = far;
        this._camera.updateProjectionMatrix();
@@ -545,7 +558,7 @@ export class SceneManager {
     if (!node) return;
     const worldX = node.cellX * CHUNK_SIZE + node.localX;
     const worldZ = node.cellZ * CHUNK_SIZE + node.localZ;
-    const viewDist = 78;
+    const viewDist = this.viewDistForNode(node);
     const worldY = node.cellY * CHUNK_SIZE + node.localY;
     let targetX = worldX;
     let targetY = worldY;
@@ -558,6 +571,16 @@ export class SceneManager {
       yawTo = node.yaw;
     }
     this.beginFly(targetX, targetY, targetZ, 1600, yawTo, 0);
+  }
+
+  private viewDistForNode(node: CanvasNode): number {
+    const vHalf = Math.tan((this._camera.fov * Math.PI) / 360);
+    const aspect = Math.max(0.5, this._camera.aspect || 1);
+    const w = Math.max(1, node.width);
+    const h = Math.max(1, node.height);
+    const distH = h / 2 / (vHalf * 0.82);
+    const distW = w / 2 / (vHalf * aspect * 0.7);
+    return Math.min(120, Math.max(28, Math.max(distH, distW)));
   }
 
   toggleInlineVideo(nodeId: string, url: string): void {
@@ -687,15 +710,191 @@ export class SceneManager {
 
   private disposeGalleryHall(): void {
     if (!this._hall) return;
+    this._skyTime = null;
     this._scene.remove(this._hall);
     this._hall.traverse((obj) => {
       const mesh = obj as THREE.Mesh;
       mesh.geometry?.dispose();
-      const mat = mesh.material;
-      if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
-      else mat?.dispose();
+      const mats = mesh.material
+        ? Array.isArray(mesh.material)
+          ? mesh.material
+          : [mesh.material]
+        : [];
+      for (const m of mats) {
+        const shaderMap = (m as THREE.ShaderMaterial).uniforms?.map?.value as THREE.Texture | undefined;
+        if (shaderMap) shaderMap.dispose();
+        else (m as THREE.MeshBasicMaterial).map?.dispose();
+        m.dispose();
+      }
     });
     this._hall = null;
+  }
+
+  private _makeCarpetTexture(repeatV: number): THREE.CanvasTexture {
+    const w = 512;
+    const h = 256;
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      const edge = ctx.createLinearGradient(0, 0, w, 0);
+      edge.addColorStop(0, '#2a1214');
+      edge.addColorStop(0.07, '#4a141c');
+      edge.addColorStop(0.16, '#7a1c28');
+      edge.addColorStop(0.5, '#962830');
+      edge.addColorStop(0.84, '#7a1c28');
+      edge.addColorStop(0.93, '#4a141c');
+      edge.addColorStop(1, '#2a1214');
+      ctx.fillStyle = edge;
+      ctx.fillRect(0, 0, w, h);
+      for (let x = 0; x < w; x++) {
+        const t = x / w;
+        const inPile = t > 0.09 && t < 0.91;
+        const a = inPile ? 0.06 + (Math.sin(x * 0.85) * 0.5 + 0.5) * 0.09 : 0.14;
+        ctx.fillStyle = `rgba(18,0,4,${a})`;
+        ctx.fillRect(x, 0, 1, h);
+      }
+      for (let y = 0; y < h; y += 3) {
+        ctx.fillStyle = 'rgba(255,72,82,0.04)';
+        ctx.fillRect(Math.floor(w * 0.12), y, Math.floor(w * 0.76), 1);
+      }
+      const sheen = ctx.createLinearGradient(0, 0, w, 0);
+      sheen.addColorStop(0.36, 'rgba(255,255,255,0)');
+      sheen.addColorStop(0.5, 'rgba(255,196,186,0.08)');
+      sheen.addColorStop(0.64, 'rgba(255,255,255,0)');
+      ctx.fillStyle = sheen;
+      ctx.fillRect(0, 0, w, h);
+    }
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(1, repeatV);
+    tex.anisotropy = 8;
+    return tex;
+  }
+
+  private _makeStarField(
+    wallX: number,
+    len: number,
+    ceilY: number,
+    z0: number,
+    skyTime: { value: number },
+  ): THREE.Points {
+    const count = Math.min(5500, Math.max(2200, Math.floor(len * 2.4)));
+    const positions = new Float32Array(count * 3);
+    const colors = new Float32Array(count * 3);
+    const sizes = new Float32Array(count);
+    const phases = new Float32Array(count);
+    const speeds = new Float32Array(count);
+    const rnd = (i: number) => {
+      const x = Math.sin(i * 127.1 + 311.7) * 43758.5453;
+      return x - Math.floor(x);
+    };
+    for (let i = 0; i < count; i++) {
+      positions[i * 3] = (rnd(i) * 2 - 1) * wallX * 0.98;
+      positions[i * 3 + 1] = ceilY - 0.4 - rnd(i + 5) * 2.2;
+      positions[i * 3 + 2] = z0 + rnd(i + 11) * len;
+      const roll = rnd(i + 23);
+      let r = 0.84;
+      let g = 0.9;
+      let b = 1;
+      if (roll < 0.08) {
+        r = 1;
+        g = 0.84;
+        b = 0.58;
+      } else if (roll < 0.22) {
+        r = 0.7;
+        g = 0.84;
+        b = 1;
+      }
+      const bright = 0.5 + rnd(i + 41) * 0.5;
+      colors[i * 3] = r * bright;
+      colors[i * 3 + 1] = g * bright;
+      colors[i * 3 + 2] = b * bright;
+      const mag = rnd(i + 59);
+      sizes[i] = mag > 0.97 ? 9 : mag > 0.9 ? 5.4 : mag > 0.68 ? 3.1 : 1.65;
+      phases[i] = rnd(i + 71);
+      speeds[i] = 0.45 + rnd(i + 83) * 1.4;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geo.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1));
+    geo.setAttribute('aPhase', new THREE.BufferAttribute(phases, 1));
+    geo.setAttribute('aSpeed', new THREE.BufferAttribute(speeds, 1));
+    const mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: skyTime,
+        uPixelRatio: { value: Math.min(2, window.devicePixelRatio || 1) },
+        uZ0: { value: z0 },
+        uLen: { value: len },
+      },
+      vertexShader: `
+        attribute float aSize;
+        attribute float aPhase;
+        attribute float aSpeed;
+        uniform float uTime;
+        uniform float uPixelRatio;
+        uniform float uZ0;
+        uniform float uLen;
+        varying vec3 vColor;
+        varying float vTw;
+        varying float vSpike;
+        varying float vFade;
+        void main() {
+          vColor = color;
+          float tw = 0.64 + 0.36 * (0.5 + 0.5 * sin(uTime * (0.5 + aPhase * 1.55) + aPhase * 6.2831));
+          vTw = tw;
+          vSpike = step(7.5, aSize);
+          vec3 pos = position;
+          pos.z = uZ0 + mod(position.z - uZ0 + uTime * aSpeed, uLen);
+          pos.x += sin(uTime * 0.03 + aPhase * 6.2831) * 1.1;
+          vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+          gl_Position = projectionMatrix * mv;
+          float dist = max(1.0, -mv.z);
+          float ndc = length(gl_Position.xy / max(gl_Position.w, 0.0001));
+          float vanish = 1.0 - smoothstep(0.04, 0.18, ndc);
+          float far = smoothstep(280.0, 620.0, dist);
+          vFade = 1.0 - vanish * far;
+          vFade *= 1.0 - smoothstep(480.0, 820.0, dist);
+          if (vFade < 0.03) {
+            gl_PointSize = 0.0;
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+          }
+          gl_PointSize = min(aSize * tw * uPixelRatio * (220.0 / dist) * vFade, 14.0);
+        }
+      `,
+      fragmentShader: `
+        varying vec3 vColor;
+        varying float vTw;
+        varying float vSpike;
+        varying float vFade;
+        void main() {
+          vec2 p = gl_PointCoord - 0.5;
+          float d = length(p);
+          float core = exp(-d * d * 38.0);
+          float halo = exp(-d * d * 11.0) * 0.22;
+          float ax = exp(-abs(p.x) * 30.0) * exp(-abs(p.y) * 2.6);
+          float ay = exp(-abs(p.y) * 30.0) * exp(-abs(p.x) * 2.6);
+          float spike = (ax + ay) * 0.5 * vSpike;
+          float alpha = (core + halo + spike) * vTw * vFade * vFade;
+          if (alpha < 0.012) discard;
+          gl_FragColor = vec4(vColor * (0.72 + 0.5 * vTw), alpha);
+        }
+      `,
+      vertexColors: true,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false,
+    });
+    const points = new THREE.Points(geo, mat);
+    points.name = 'galleryStars';
+    points.frustumCulled = false;
+    return points;
   }
 
   private updateGalleryHall(nodes: CanvasNode[]): void {
@@ -731,20 +930,38 @@ export class SceneManager {
     right.position.set(wallX, 8, mid);
     right.rotation.y = -Math.PI / 2;
 
+    const floorY = -hallH / 2 + 8;
+    const ceilY = hallH / 2 + 8;
+    const carpetTex = this._makeCarpetTexture(Math.max(4, len / 140));
     const floorMat = new THREE.MeshBasicMaterial({
-      color: 0x1c1610,
+      map: carpetTex,
       side: THREE.DoubleSide,
       fog: true,
     });
     const floor = new THREE.Mesh(new THREE.PlaneGeometry(wallX * 2, len), floorMat);
+    floor.name = 'galleryFloor';
     floor.rotation.x = -Math.PI / 2;
-    floor.position.set(0, -hallH / 2 + 8, mid);
+    floor.position.set(0, floorY, mid);
+
+    const ceiling = new THREE.Mesh(
+      new THREE.PlaneGeometry(wallX * 2, len),
+      new THREE.MeshBasicMaterial({
+        color: 0x08090c,
+        side: THREE.DoubleSide,
+        fog: true,
+      }),
+    );
+    ceiling.name = 'galleryCeiling';
+    ceiling.rotation.x = Math.PI / 2;
+    ceiling.position.set(0, ceilY, mid);
+
+    const skyTime = { value: 0 };
+    this._skyTime = skyTime;
+    const stars = this._makeStarField(wallX, len, ceilY, z0, skyTime);
 
     this._hall = new THREE.Group();
     this._hall.name = 'galleryHall';
-    this._hall.add(left, right, floor);
-
-    const floorY = -hallH / 2 + 8;
+    this._hall.add(left, right, floor, ceiling, stars);
 
     const days = new Map<string, { z: number; count: number; date: Date }>();
     for (const n of nodes) {
@@ -920,6 +1137,8 @@ export class SceneManager {
     );
     this._camera.rotation.set(this._lookPitch, this._lookYaw, 0);
 
+    if (this._skyTime) this._skyTime.value = now * 0.001;
+
     this._globe.rotation.y += GLOBE_SPIN * (deltaMs / 1000);
     const glow = this._globeRoot.getObjectByName('globeGlow');
     if (glow) glow.rotation.y = this._globe.rotation.y;
@@ -936,6 +1155,10 @@ export class SceneManager {
       this._lastChunkY = cy;
       this._lastChunkZ = cz;
       this.onChunkChange?.(cx, cy, cz);
+    }
+    if (this.onCameraZ && Math.abs(this._basePos.z - this._lastReportedZ) >= 8) {
+      this._lastReportedZ = this._basePos.z;
+      this.onCameraZ(this._basePos.z);
     }
 
     this._renderer.render(this._scene, this._camera);
@@ -1153,6 +1376,9 @@ export class SceneManager {
     }
     if (e.pointerType === 'touch') {
       if (this._pointer.down && !this._pointer.dragged) {
+        // Don't let GraphPage treat a conversation tap as a background dismiss.
+        // The actual select is delayed for double-tap detection.
+        if (this.isConversationHit(this.raycast(e))) e.stopPropagation();
         this.detectDoubleTap(e.clientX, e.clientY);
       }
       this._pointer.down = false;
@@ -1160,7 +1386,8 @@ export class SceneManager {
       return;
     }
     if (this._pointer.down && !this._pointer.dragged) {
-      this.clickRaycast(e);
+      const hit = this.clickRaycast(e);
+      if (this.isConversationHit(hit)) e.stopPropagation();
     }
     this._pointer.down = false;
     this.updateCursor();
@@ -1258,13 +1485,18 @@ export class SceneManager {
   }
 
   /** Raycasts on click and fires `onSelectNode` with the hit id (or null). */
-  private clickRaycast(e: PointerEvent): void {
-    this.clickRaycastAt(e.clientX, e.clientY);
+  private clickRaycast(e: PointerEvent): string | undefined {
+    return this.clickRaycastAt(e.clientX, e.clientY);
   }
 
-  private clickRaycastAt(clientX: number, clientY: number): void {
+  private clickRaycastAt(clientX: number, clientY: number): string | undefined {
     const hit = this.raycastAt(clientX, clientY);
     this.onSelectNode?.(hit ?? null);
+    return hit;
+  }
+
+  private isConversationHit(nodeId: string | undefined | null): boolean {
+    return !!nodeId && this.getCanvasNode(nodeId)?.kind === 'conversation';
   }
 
   private raycastAt(clientX: number, clientY: number): string | undefined {
