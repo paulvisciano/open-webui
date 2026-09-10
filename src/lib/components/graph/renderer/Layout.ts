@@ -858,7 +858,7 @@ export function buildCanvasLayout(
   // Photos and conversations pack onto left/right walls by time.
   // gridPosOf stores (col along Z, row along Y).
   // Nodes can appear in multiple buckets, so keys include cellZ.
-  const gridPosOf = new Map<string, { x: number; y: number; worldZ: number }>();
+  const gridPosOf = new Map<string, { x: number; y: number; worldZ: number; span: number }>();
   const wallMetaOf = new Map<string, { cols: number; rows: number }>();
   const wallSideOf = new Map<string, 'L' | 'R'>();
   const convPosOf = new Map<string, { x: number; y: number; worldZ: number }>();
@@ -874,27 +874,53 @@ export function buildCanvasLayout(
     }
   }
   wallNodes.sort((a, b) => (parseNodeDate(a)?.getTime() ?? 0) - (parseNodeDate(b)?.getTime() ?? 0));
-  const left: KGNode[] = [];
-  const right: KGNode[] = [];
-  for (let i = 0; i < wallNodes.length; i++) {
-    if (i % 2 === 0) left.push(wallNodes[i]);
-    else right.push(wallNodes[i]);
-  }
-  const packWallSide = (group: KGNode[], side: 'L' | 'R') => {
-    const count = group.length;
-    if (count === 0) return;
-    const rows = Math.min(WALL_ROWS, Math.max(1, count));
-    const cols = Math.ceil(count / rows);
-    wallMetaOf.set(side, { cols, rows });
-    for (let i = 0; i < count; i++) {
-      const row = i % rows;
-      const col = Math.floor(i / rows);
-      gridPosOf.set(group[i].id, { x: col, y: row, worldZ: col * WALL_PITCH_Z });
-      wallSideOf.set(group[i].id, side);
+
+  type WallCell = { node: KGNode; row: number; span: number };
+  const columns: WallCell[][] = [];
+  let pendingPhotos: KGNode[] = [];
+  let pendingConvos: KGNode[] = [];
+  const flushPhotos = () => {
+    while (pendingPhotos.length) {
+      const slice = pendingPhotos.splice(0, WALL_ROWS);
+      columns.push(slice.map((node, row) => ({ node, row, span: 1 })));
     }
   };
-  packWallSide(left, 'L');
-  packWallSide(right, 'R');
+  const flushConvos = () => {
+    while (pendingConvos.length) {
+      const slice = pendingConvos.splice(0, WALL_ROWS);
+      columns.push(slice.map((node, row) => ({ node, row, span: 1 })));
+    }
+  };
+  for (const n of wallNodes) {
+    const kind = classifyKind(n);
+    if (kind === 'video') {
+      flushConvos();
+      flushPhotos();
+      columns.push([{ node: n, row: 0, span: WALL_ROWS }]);
+    } else if (kind === 'conversation') {
+      flushPhotos();
+      pendingConvos.push(n);
+    } else {
+      flushConvos();
+      pendingPhotos.push(n);
+    }
+  }
+  flushConvos();
+  flushPhotos();
+
+  const sideCols = { L: 0, R: 0 };
+  for (let col = 0; col < columns.length; col++) {
+    const side: 'L' | 'R' = col % 2 === 0 ? 'L' : 'R';
+    const wallCol = Math.floor(col / 2);
+    const worldZ = wallCol * WALL_PITCH_Z;
+    sideCols[side] = wallCol + 1;
+    for (const cell of columns[col]) {
+      gridPosOf.set(cell.node.id, { x: wallCol, y: cell.row, worldZ, span: cell.span });
+      wallSideOf.set(cell.node.id, side);
+    }
+  }
+  wallMetaOf.set('L', { cols: sideCols.L, rows: WALL_ROWS });
+  wallMetaOf.set('R', { cols: sideCols.R, rows: WALL_ROWS });
 
   const timeline: { t: number; z: number }[] = [];
   for (const n of wallNodes) {
@@ -1007,12 +1033,15 @@ export function buildCanvasLayout(
     let localZ: number;
     let cellZ = cellZ0;
     if (onWall) {
-      const grid = gridPosOf.get(node.id) ?? { x: 0, y: 0, worldZ: 0 };
+      const grid = gridPosOf.get(node.id) ?? { x: 0, y: 0, worldZ: 0, span: 1 };
       const meta = wallMetaOf.get(side ?? 'L') ?? { cols: 1, rows: 1 };
       const row = grid.y;
       cellX = side === 'R' ? WALL_CELL_X_RIGHT : WALL_CELL_X_LEFT;
       localX = CHUNK_SIZE / 2;
-      localY = (row - (meta.rows - 1) / 2) * WALL_PITCH_Y;
+      localY =
+        (grid.span ?? 1) >= WALL_ROWS
+          ? 0
+          : (row - (meta.rows - 1) / 2) * WALL_PITCH_Y;
       const worldZ = grid.worldZ;
       cellZ = Math.floor(worldZ / CHUNK_SIZE);
       localZ = worldZ - cellZ * CHUNK_SIZE;
@@ -1033,7 +1062,22 @@ export function buildCanvasLayout(
     let width: number;
     let height: number;
     if (onWall) {
-      if (kind === 'conversation') {
+      if (kind === 'video') {
+        const colH = WALL_PITCH_Y + WALL_TILE_W;
+        if (typeof pw === 'number' && typeof ph === 'number' && pw > 0 && ph > 0) {
+          const aspect = pw / ph;
+          if (aspect >= 1) {
+            width = Math.min(colH * aspect, WALL_PITCH_Z * 1.15);
+            height = width / aspect;
+          } else {
+            height = colH;
+            width = height * aspect;
+          }
+        } else {
+          width = WALL_TILE_W * 0.85;
+          height = colH;
+        }
+      } else if (kind === 'conversation') {
         width = WALL_TILE_W * 1.12;
         height = WALL_TILE_W * 0.7;
       } else if (typeof pw === 'number' && typeof ph === 'number' && pw > 0 && ph > 0) {
