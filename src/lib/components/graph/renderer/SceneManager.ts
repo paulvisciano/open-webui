@@ -607,7 +607,8 @@ export class SceneManager {
   resetLook(): void {
     if (this._disposed) return;
     this.stopInlineVideo();
-    this.beginFly(0, 0, this._basePos.z, 1600, 0, 0);
+    const z = Math.max(this._minCameraZ, Math.min(this._maxCameraZ, this._basePos.z));
+    this.beginFly(0, 0, z, 1600, 0, 0);
   }
 
   dashAlongLook(): void {
@@ -1192,8 +1193,7 @@ export class SceneManager {
     const mag = delta * ZOOM_FACTOR * 8 * scale * this._pinchSensitivity;
     const alongView = Math.cos(this._lookYaw) < 0 ? -mag : mag;
     this._basePos.z += alongView;
-    if (this._basePos.z < this._minCameraZ) this._basePos.z = this._minCameraZ;
-    if (this._basePos.z > this._maxCameraZ) this._basePos.z = this._maxCameraZ;
+    this.clampCorridorPose();
     this._userMoved = true;
   }
 
@@ -1219,6 +1219,14 @@ export class SceneManager {
       this._velocity.x *= 0.45;
       if (this._targetVel.x < 0) this._targetVel.x = 0;
     }
+  }
+
+  private clampCorridorPose(): void {
+    if (this.facingWall) return;
+    if (this._basePos.y > 80) this._basePos.y = 80;
+    if (this._basePos.y < -80) this._basePos.y = -80;
+    if (this._basePos.z < this._minCameraZ) this._basePos.z = this._minCameraZ;
+    if (this._basePos.z > this._maxCameraZ) this._basePos.z = this._maxCameraZ;
   }
 
   /** Applies held keyboard keys to the velocity vector. */
@@ -1275,12 +1283,13 @@ export class SceneManager {
     this._basePos.z += this._velocity.z;
 
     this.clampInsideHall();
-    if (this._basePos.y > 80) this._basePos.y = 80;
-    if (this._basePos.y < -80) this._basePos.y = -80;
-
-    if (this._basePos.z < this._minCameraZ) this._basePos.z = this._minCameraZ;
-    if (this._basePos.z > this._maxCameraZ) this._basePos.z = this._maxCameraZ;
-    if (this._pinchActive && this._pinchMinZ !== null && this._pinchMaxZ !== null) {
+    this.clampCorridorPose();
+    if (
+      !this.facingWall
+      && this._pinchActive
+      && this._pinchMinZ !== null
+      && this._pinchMaxZ !== null
+    ) {
       if (this._basePos.z < this._pinchMinZ) this._basePos.z = this._pinchMinZ;
       if (this._basePos.z > this._pinchMaxZ) this._basePos.z = this._pinchMaxZ;
     }
