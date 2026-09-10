@@ -24,6 +24,7 @@
 	import { VoiceCallService } from '$lib/components/chat/MessageInput/VoiceCallService.svelte';
 
 	import { graphStore } from './stores/graph.svelte';
+	import { isTrashSource } from './assets';
 	import { scanProgressStore, countsFromScanResponse } from './stores/scan-progress.svelte';
 	import type { KGNode } from './constants';
 	import { createSheetDrag, type SheetSnap } from './composables/use-sheet-drag';
@@ -49,6 +50,7 @@
 	let graphSearchOpen = $state(false);
 	let corridorDate = $state<string | null>(null);
 	let corridorTimelineOpen = $state(false);
+	let inspecting = $state(false);
 	let orbCloseTimer: ReturnType<typeof setTimeout> | null = null;
 
 	$effect(() => {
@@ -90,12 +92,14 @@
 	let browseError = $state('');
 	let attaching = $state(false);
 	let detachingId = $state('');
-	const displayedSources = $derived.by(() =>
-		graphStore.sources.map((s) => ({
+	const displayedSources = $derived.by(() => {
+		const rows = graphStore.sources.map((s) => ({
 			...s,
 			online: graphStore.sourceOnline[s.id] ?? s.online
-		}))
-	);
+		}));
+		if (!inspecting) return rows;
+		return rows.filter((s) => !isTrashSource(s));
+	});
 
 	const graphToken = () =>
 		typeof localStorage !== 'undefined' ? (localStorage.token ?? '') : '';
@@ -488,6 +492,7 @@
 
 <div
 	class="graph-page absolute inset-0 flex w-full h-screen max-h-[100dvh] overflow-hidden max-w-full"
+	class:is-inspecting={inspecting}
 >
 	<div
 		class="absolute inset-0"
@@ -499,6 +504,7 @@
 			onqueryAbout={queryAbout}
 			bind:dateLabel={corridorDate}
 			bind:timelineOpen={corridorTimelineOpen}
+			bind:inspecting={inspecting}
 		/>
 
 		{#if !$showSidebar && !showChatPanel && !(voiceStarting || (voiceActive && voiceService))}
@@ -841,11 +847,18 @@
 </div>
 
 <style>
+	.graph-page.is-inspecting .graph-menu-btn,
+	.graph-page.is-inspecting .graph-folder-hud {
+		opacity: 0;
+		pointer-events: none;
+	}
+
 	.graph-menu-btn {
 		position: absolute;
 		top: calc(20px + env(safe-area-inset-top, 0px));
 		right: 0.7rem;
 		z-index: 50;
+		transition: opacity 0.4s ease;
 		width: 40px;
 		height: 40px;
 		display: flex;
@@ -902,6 +915,7 @@
 		box-shadow:
 			0 8px 28px oklch(0% 0 0 / 40%),
 			0 0 0 1px oklch(50% 0.03 255 / 10%);
+		transition: opacity 0.4s ease;
 	}
 
 	@media (max-width: 768px) {
@@ -1252,6 +1266,7 @@
 			0 8px 28px oklch(0% 0 0 / 45%),
 			0 0 0 1px oklch(50% 0.03 255 / 10%);
 		pointer-events: auto;
+		transition: opacity 0.4s ease;
 	}
 
 	.graph-toolbar-search {
