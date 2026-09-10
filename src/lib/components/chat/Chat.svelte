@@ -124,6 +124,7 @@
 	import Image from '../common/Image.svelte';
 	import XMark from '../icons/XMark.svelte';
 	import GarbageBin from '../icons/GarbageBin.svelte';
+	import Pencil from '../icons/Pencil.svelte';
 	import EmbeddedChatHistoryDropdown from './EmbeddedChatHistoryDropdown.svelte';
 	import InputVariablesModal from './MessageInput/InputVariablesModal.svelte';
 
@@ -323,6 +324,46 @@
 
 	$: contextUsage = getContextUsage() ?? (contextCompactionEnabled ? serverContextUsage : null);
 	$: embeddedHeaderTitle = embeddedTitle || $chatTitle || $i18n.t('Chat');
+	$: embeddedChatId = $chatId || chatIdProp;
+
+	let renamingEmbedded = false;
+	let embeddedRenameDraft = '';
+	let embeddedRenameInput: HTMLInputElement | undefined;
+
+	const startEmbeddedRename = async () => {
+		if (!embeddedChatId || renamingEmbedded) return;
+		embeddedRenameDraft = embeddedHeaderTitle;
+		renamingEmbedded = true;
+		await tick();
+		embeddedRenameInput?.focus();
+		embeddedRenameInput?.select();
+	};
+
+	const cancelEmbeddedRename = () => {
+		renamingEmbedded = false;
+		embeddedRenameDraft = '';
+	};
+
+	const commitEmbeddedRename = async () => {
+		const id = embeddedChatId;
+		const next = embeddedRenameDraft.trim();
+		if (!renamingEmbedded) return;
+		renamingEmbedded = false;
+		if (!id) return;
+		if (!next) {
+			toast.error($i18n.t('Title cannot be an empty string.'));
+			return;
+		}
+		if (next === embeddedHeaderTitle) return;
+		try {
+			await updateChatById(localStorage.token, id, { title: next });
+			chatTitle.set(next);
+			await onEmbeddedChatTitle?.(id, next);
+			await refreshChatList(localStorage.token);
+		} catch (err) {
+			toast.error(typeof err === 'string' ? err : $i18n.t('Failed to rename chat'));
+		}
+	};
 
 	let selectedToolIds: string[] = [];
 	let selectedSkillIds: string[] = [];
@@ -4332,19 +4373,55 @@
 							class="h-10 shrink-0 flex items-center justify-between gap-2 border-b border-gray-50/80 px-3 text-gray-700 dark:border-gray-850/40 dark:text-gray-200"
 						>
 							<div class="flex min-w-0 items-center gap-2">
-								<EmbeddedChatHistoryDropdown
-									title={embeddedHeaderTitle}
-									chats={embeddedChats}
-									canCreateNew={!!onNewEmbeddedChat &&
-										Object.keys(history?.messages ?? {}).length > 0}
-									{loading}
-									onNewChat={onNewEmbeddedChat}
-									onSelectChat={onSelectEmbeddedChat}
-									onDeleteChat={onDeleteEmbeddedChat}
-								/>
+								{#if renamingEmbedded}
+									<input
+										bind:this={embeddedRenameInput}
+										bind:value={embeddedRenameDraft}
+										class="font-display min-w-0 flex-1 bg-transparent text-[15px] font-medium text-gray-700 outline-hidden dark:text-gray-200"
+										aria-label={$i18n.t('Rename')}
+										on:keydown={(e) => {
+											if (e.key === 'Enter') {
+												e.preventDefault();
+												(e.currentTarget as HTMLInputElement).blur();
+											} else if (e.key === 'Escape') {
+												e.preventDefault();
+												cancelEmbeddedRename();
+											}
+										}}
+										on:blur={commitEmbeddedRename}
+									/>
+								{:else}
+									<EmbeddedChatHistoryDropdown
+										title={embeddedHeaderTitle}
+										chats={embeddedChats}
+										canCreateNew={!!onNewEmbeddedChat &&
+											Object.keys(history?.messages ?? {}).length > 0}
+										{loading}
+										onNewChat={onNewEmbeddedChat}
+										onSelectChat={onSelectEmbeddedChat}
+										onDeleteChat={onDeleteEmbeddedChat}
+										onRename={startEmbeddedRename}
+									/>
+								{/if}
 							</div>
 							<div class="flex items-center gap-1">
-							{#if ($chatId || chatIdProp) && onDeleteEmbeddedChat}
+							{#if embeddedChatId}
+								<Tooltip content={$i18n.t('Rename')} placement="bottom">
+									<button
+										type="button"
+										class="rounded-md p-2 text-gray-500 transition hover:text-gray-900 dark:hover:text-white"
+										on:click={async (e) => {
+											e.preventDefault();
+											e.stopPropagation();
+											await startEmbeddedRename();
+										}}
+										aria-label={$i18n.t('Rename')}
+									>
+										<Pencil className="size-4" strokeWidth="1.5" />
+									</button>
+								</Tooltip>
+							{/if}
+							{#if embeddedChatId && onDeleteEmbeddedChat}
 								<Tooltip content={$i18n.t('Delete')} placement="bottom">
 									<button
 										type="button"

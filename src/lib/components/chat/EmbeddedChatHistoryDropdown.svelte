@@ -18,6 +18,7 @@
 	export let onNewChat: (() => void | Promise<void>) | null = null;
 	export let onSelectChat: ((chatId: string) => void | Promise<void>) | null = null;
 	export let onDeleteChat: ((chatId: string) => void | Promise<void>) | null = null;
+	export let onRename: (() => void | Promise<void>) | null = null;
 
 	let show = false;
 	let optionsChatId = '';
@@ -37,6 +38,7 @@
 		type="button"
 		class="font-display group flex min-w-0 items-center gap-1 text-[15px] font-medium text-gray-700 transition hover:text-gray-900 dark:text-gray-200 dark:hover:text-white"
 		aria-label={$i18n.t('Chat history')}
+		on:dblclick|preventDefault|stopPropagation={() => onRename?.()}
 	>
 		<span class="min-w-0 truncate">{title}</span>
 		<ChevronRight
