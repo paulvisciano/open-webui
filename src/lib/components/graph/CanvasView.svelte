@@ -29,6 +29,8 @@
   } from './time-travel';
   import type { CanvasNode } from './renderer/types';
   import { dateFromProperties, loadPhotoExif, peekExif, plaqueFromExif, type PlaqueInfo } from './exif';
+  import { wallNeighborId } from './renderer/wall-nav';
+  import { hoverCaption } from './hover-caption';
   import { getAssetFileUrl } from '$lib/apis/graph';
 
   /** Default pinch-zoom sensitivity. The KG config store exposed this via a
@@ -43,11 +45,13 @@
     onselectconversation = (_id: string) => {},
     dateLabel = $bindable<string | null>(null),
     timelineOpen = $bindable(false),
+    inspecting = $bindable(false),
   }: {
     onqueryAbout?: (node: KGNode) => void;
     onselectconversation?: (id: string) => void;
     dateLabel?: string | null;
     timelineOpen?: boolean;
+    inspecting?: boolean;
   } = $props();
 
   let containerEl: HTMLDivElement | undefined = $state();
@@ -63,6 +67,8 @@
   let overlayOrigin = $state<{ left: number; top: number; width: number; height: number } | null>(null);
   /** First library-asset click flies to the wall; second opens NodeOverlay. */
   let galleryFocus = $state(false);
+  let focusedNodeId = $state<string | null>(null);
+  let layoutNodes = $state<CanvasNode[]>([]);
   let selectedKgNode = $derived<KGNode | null>(
     selectedNodeId ? graphStore.nodes.find((n) => n.id === selectedNodeId) ?? null : null,
   );
@@ -80,16 +86,17 @@
   } | null>(null);
   let videoHudPinned = $state(false);
   let hoveredKind = $derived(hoveredNodeId ? sceneManager?.getCanvasNode(hoveredNodeId)?.kind ?? null : null);
-  let hoverTooltip = $derived(
-    hoveredKind === 'conversation' ? 'Click to view convo'
-      : hoveredKind === 'audio' ? 'Click to play audio'
-      : hoveredKind === 'document' || hoveredKind === 'pdf' ? 'Click to view document'
-      : hoveredKind && hoveredKind !== 'photo' && hoveredKind !== 'video' ? 'Click to view details'
-      : ''
-  );
+  let hoverTooltip = $derived.by(() => {
+    if (focusedNodeId || lightbox || !hoveredNodeId) return '';
+    const cn = sceneManager?.getCanvasNode(hoveredNodeId);
+    const kg = graphStore.nodes.find((n) => n.id === hoveredNodeId);
+    const kind = cn?.kind ?? hoveredKind;
+    return hoverCaption(kind, nodeTimeMs(cn?.properties ?? kg?.properties ?? null));
+  });
   let hoverPlaque = $state<PlaqueInfo | null>(null);
   let photoPlaqueRect = $state<{ left: number; top: number; width: number; height: number } | null>(null);
   let lightbox = $state<{
+    nodeId: string;
     url: string;
     kind: 'photo' | 'video';
     alt: string;
@@ -98,33 +105,33 @@
   } | null>(null);
   let lightboxMediaEl: HTMLElement | undefined = $state();
   let lightboxLeaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let videoAutoplayTimer: ReturnType<typeof setTimeout> | null = null;
+
+  let plaqueNodeId = $derived(lightbox?.nodeId ?? focusedNodeId);
 
   let plaquePos = $derived.by(() => {
-    const rect = photoPlaqueRect;
+    const media = lightbox && !lightbox.leaving ? lightboxMediaEl : null;
+    const rect = media ? media.getBoundingClientRect() : photoPlaqueRect;
     if (!rect) return null;
-    const gap = 16;
-    const w = 240;
+    const gap = 8;
+    const w = 260;
     const vw = typeof window !== 'undefined' ? window.innerWidth : 1200;
     const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
-    const right = rect.left + rect.width;
-    const spaceRight = vw - right;
-    const spaceLeft = rect.left;
-    let left = spaceRight >= Math.max(spaceLeft, 96) ? right + gap : rect.left - w - gap;
-    left = Math.max(12, Math.min(left, vw - w - 12));
-    if (left < right && left + w > rect.left) {
-      left = spaceRight >= spaceLeft ? Math.min(right + gap, vw - w - 12) : Math.max(12, rect.left - w - gap);
+    let left = rect.left + rect.width - w;
+    let top = rect.top + rect.height + gap;
+    if (top > vh - 168) {
+      left = rect.left + rect.width + gap;
+      top = rect.top + rect.height - 48;
     }
-    let top = rect.top + Math.max(24, rect.height * 0.55);
-    top = Math.max(12, Math.min(top, vh - 168));
+    left = Math.max(12, Math.min(left, vw - w - 12));
+    top = Math.max(12, Math.min(top, vh - 120));
     return { left, top };
   });
 
   $effect(() => {
-    const id = hoveredNodeId;
-    const kind = hoveredKind;
-    if (!id || (kind !== 'photo' && kind !== 'video')) {
+    const id = plaqueNodeId;
+    if (!id) {
       hoverPlaque = null;
-      photoPlaqueRect = null;
       return;
     }
     const kg = graphStore.nodes.find((n) => n.id === id);
@@ -138,9 +145,13 @@
     } else {
       hoverPlaque = plaqueFromExif([], fallback);
       loadPhotoExif(id, kg?.properties).then((rows) => {
-        if (hoveredNodeId === id) apply(rows);
+        if (plaqueNodeId === id) apply(rows);
       });
     }
+  });
+
+  $effect(() => {
+    inspecting = !!(lightbox || (galleryFocus && focusedNodeId));
   });
 
   $effect(() => {
@@ -206,13 +217,51 @@
     corridorClockRef.focusMs = nodeTimeMs(kg?.properties ?? null);
   }
 
-  function focusVideoOnWall(id: string): void {
+  function clearVideoAutoplay(): void {
+    if (videoAutoplayTimer) {
+      clearTimeout(videoAutoplayTimer);
+      videoAutoplayTimer = null;
+    }
+  }
+
+  function focusMediaOnWall(id: string): void {
     const sm = sceneManager;
     if (!sm) return;
     sm.flyToNode(id);
     galleryFocus = true;
+    focusedNodeId = id;
     lastUserNavAt = Date.now();
     setClockFocus(id);
+    const rect = sm.getPlaneScreenRect(id);
+    if (rect && rect.width >= 80) photoPlaqueRect = rect;
+    const kind = sm.getCanvasNode(id)?.kind;
+    if (kind !== 'video') {
+      clearVideoAutoplay();
+      sm.stopInlineVideo();
+      playingVideoId = null;
+    }
+  }
+
+  function stepWall(dir: 1 | -1): void {
+    const id = lightbox?.nodeId ?? focusedNodeId;
+    if (!id) return;
+    const next = wallNeighborId(layoutNodes, id, dir);
+    if (!next) return;
+    if (lightbox) {
+      openLightbox(next);
+      return;
+    }
+    focusMediaOnWall(next);
+  }
+
+  function focusVideoOnWall(id: string): void {
+    const sm = sceneManager;
+    focusMediaOnWall(id);
+    clearVideoAutoplay();
+    if (sm) {
+      sm.toggleInlineVideo(id, getAssetFileUrl(id));
+      playingVideoId = sm.playingVideoId;
+    }
     syncVideoHud(id);
     const started = Date.now();
     const tick = () => {
@@ -261,6 +310,7 @@
     const cn = sm?.getCanvasNode(id);
     const kg = graphStore.nodes.find((n) => n.id === id);
     const isVideo = cn?.kind === 'video' || kg?.properties?.kind === 'video';
+    clearVideoAutoplay();
     if (isVideo) {
       sm?.stopInlineVideo();
       playingVideoId = null;
@@ -270,7 +320,9 @@
       clearTimeout(lightboxLeaveTimer);
       lightboxLeaveTimer = null;
     }
+    focusedNodeId = id;
     lightbox = {
+      nodeId: id,
       url: getAssetFileUrl(id),
       kind: isVideo ? 'video' : 'photo',
       alt: dateFromProperties(kg?.properties) || (isVideo ? 'Video' : 'Photo'),
@@ -331,18 +383,14 @@
           return;
         }
         if (!galleryFocus) {
-          sm.flyToNode(nodeId);
-          galleryFocus = true;
-          setClockFocus(nodeId);
+          focusMediaOnWall(nodeId);
           return;
         }
         const nodeYaw = cn?.yaw ?? 0;
         let yawDelta = Math.abs(nodeYaw - sm.lookYaw);
         if (yawDelta > Math.PI) yawDelta = Math.abs(yawDelta - 2 * Math.PI);
         if (yawDelta > 0.4) {
-          sm.flyToNode(nodeId);
-          galleryFocus = true;
-          setClockFocus(nodeId);
+          focusMediaOnWall(nodeId);
           return;
         }
         const isPhoto = cn?.kind === 'photo' || kg?.properties?.kind === 'photo';
@@ -355,8 +403,10 @@
         selectedCanvasNode = cn ?? null;
       } else {
         galleryFocus = false;
+        focusedNodeId = null;
         playingVideoId = null;
         videoHud = null;
+        clearVideoAutoplay();
         setClockFocus(null);
         sm.resetLook();
         clearSelection();
@@ -364,29 +414,32 @@
     };
     sm.onHoverNode = (nodeId) => {
       hoveredNodeId = nodeId;
-      const kind = nodeId ? sm.getCanvasNode(nodeId)?.kind : null;
-      if (nodeId && kind === 'video') {
-        syncVideoHud(nodeId);
-        photoPlaqueRect = null;
-      } else if (playingVideoId) {
+      if (playingVideoId) {
         syncVideoHud(playingVideoId);
+        return;
+      }
+      videoHud = null;
+      const kind = nodeId ? sm.getCanvasNode(nodeId)?.kind : null;
+      if (focusedNodeId) return;
+      if (nodeId && kind === 'photo') {
+        const rect = sm.getPlaneScreenRect(nodeId);
+        photoPlaqueRect = rect && rect.width >= 140 ? rect : null;
+      } else {
         photoPlaqueRect = null;
-      } else if (!videoHudPinned) {
-        videoHud = null;
-        if (nodeId && kind === 'photo') {
-          const rect = sm.getPlaneScreenRect(nodeId);
-          photoPlaqueRect = rect && rect.width >= 140 ? rect : null;
-        } else {
-          photoPlaqueRect = null;
-        }
       }
     };
     sm.onChunkChange = (_cx, _cy, cz) => {
       updateDateLabel(cz * CHUNK_SIZE);
     };
     sm.onCameraZ = (z) => {
-      if (!selectedNodeId) corridorClockRef.focusMs = null;
+      if (!selectedNodeId && !focusedNodeId) corridorClockRef.focusMs = null;
       updateDateLabel(z);
+      const id = focusedNodeId;
+      if (id) {
+        const rect = sm.getPlaneScreenRect(id);
+        if (rect && rect.width >= 80) photoPlaqueRect = rect;
+      }
+      if (playingVideoId) syncVideoHud(playingVideoId);
     };
     sm.onDoubleTap = (x, y) => {
       handleDoubleTap(x, y);
@@ -458,10 +511,33 @@
   function handleSwipe(event: SwipeCustomEvent): void {
     if (event.detail.pointerType !== 'touch') return;
     const dir = event.detail.direction;
+    if (lightbox || focusedNodeId) {
+      if (dir === 'left') stepWall(1);
+      else if (dir === 'right') stepWall(-1);
+      return;
+    }
     if (dir === 'top') {
       handleTimelineScroll(-SWIPE_TIMELINE_DELTA);
     } else if (dir === 'bottom') {
       handleTimelineScroll(SWIPE_TIMELINE_DELTA);
+    }
+  }
+
+  function handleInspectKey(e: KeyboardEvent): void {
+    if (e.key === 'Escape' && lightbox) {
+      closeLightbox();
+      return;
+    }
+    if (timelineOpen) return;
+    const target = e.target as HTMLElement | null;
+    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+    if (!lightbox && !focusedNodeId) return;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      stepWall(1);
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      stepWall(-1);
     }
   }
 
@@ -517,6 +593,10 @@
     const targetZ = wallZ ?? fractionalIndexToCameraZ(bucketIdx);
     sceneManager.flyTo(targetZ);
     galleryFocus = false;
+    focusedNodeId = null;
+    clearVideoAutoplay();
+    sceneManager.stopInlineVideo();
+    playingVideoId = null;
     if (closeOnFly) timelineOpen = false;
     doubleTapPhase = 0;
   }
@@ -701,6 +781,7 @@
     );
     timeIndex = buildTimeIndex(graphStore.nodes, graphStore.edges);
     corridorClockRef.wallTimeline = collapseWallSamples(wallTimeSamplesFromCanvas(nodes));
+    layoutNodes = nodes;
     sceneManager.setNodes(nodes);
     lastAppliedAt = Date.now();
     if (timeIndex.indexToLabel.length > 0) {
@@ -725,7 +806,7 @@
     const rect = containerEl.getBoundingClientRect();
     tooltipX = e.clientX - rect.left;
     tooltipY = e.clientY - rect.top;
-    if (hoveredNodeId && hoveredKind === 'photo' && sceneManager && !lightbox) {
+    if (!focusedNodeId && hoveredNodeId && hoveredKind === 'photo' && sceneManager && !lightbox) {
       const plane = sceneManager.getPlaneScreenRect(hoveredNodeId);
       photoPlaqueRect = plane && plane.width >= 140 ? plane : null;
     }
@@ -807,6 +888,7 @@
       clearTimeout(lightboxLeaveTimer);
       lightboxLeaveTimer = null;
     }
+    clearVideoAutoplay();
     containerEl?.removeEventListener('pointermove', onContainerPointerMove);
     graphStore.setVanishHandler(null);
     searchHighlight.matchIds = null;
@@ -946,7 +1028,7 @@
   });
  </script>
  
-  <svelte:window onkeydown={(e) => { if (e.key === 'Escape' && lightbox) closeLightbox(); }} />
+  <svelte:window onkeydown={handleInspectKey} />
   <div bind:this={containerEl} class="canvas-container" data-testid="graph-canvas"
     {...useComposedGesture(canvasGesture, { onpinch: handlePinch })}
     {...useSwipe(handleSwipe, () => ({ timeframe: 400, minSwipeDistance: 40, touchAction: 'none' }))}
@@ -979,14 +1061,12 @@
   </div>
 {/if}
 
-{#if hoverPlaque && plaquePos && !lightbox && !selectedNodeId && (hoverPlaque.title || hoverPlaque.location || hoverPlaque.camera || hoverPlaque.tech)}
+{#if hoverPlaque && plaquePos && !selectedNodeId && (focusedNodeId || lightbox) && (hoverPlaque.location || hoverPlaque.camera || hoverPlaque.tech)}
   <aside
     class="museum-plaque"
+    class:in-lightbox={!!lightbox}
     style="left: {plaquePos.left}px; top: {plaquePos.top}px"
   >
-    {#if hoverPlaque.title}
-      <div class="plaque-title">{hoverPlaque.title}</div>
-    {/if}
     {#if hoverPlaque.location}
       <div class="plaque-loc">{hoverPlaque.location}</div>
     {/if}
@@ -1012,7 +1092,7 @@
   </div>
 {/if}
 
-{#if videoHud && !selectedNodeId}
+{#if videoHud && !selectedNodeId && playingVideoId === videoHud.id}
   <div
     class="video-wall-hud"
     class:is-playing={playingVideoId === videoHud.id}
@@ -1287,52 +1367,45 @@
   .museum-plaque {
     position: absolute;
     z-index: 24;
-    width: 240px;
+    width: 260px;
     max-width: calc(100vw - 24px);
-    padding: 12px 16px 14px;
-    border-radius: 10px;
-    background: oklch(12% 0.02 85 / 88%);
-    border: 1px solid oklch(82% 0.08 85 / 22%);
-    box-shadow:
-      0 12px 32px oklch(0% 0 0 / 45%),
-      0 0 0 1px oklch(50% 0.03 85 / 10%);
-    backdrop-filter: blur(20px) saturate(1.3);
-    -webkit-backdrop-filter: blur(20px) saturate(1.3);
+    padding: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
     pointer-events: none;
-    color: oklch(92% 0.02 85);
-    animation: plaque-in 0.28s cubic-bezier(0.16, 1, 0.3, 1) both;
+    text-align: right;
+    color: oklch(78% 0.02 85 / 70%);
+    animation: plaque-in 0.28s ease both;
+  }
+  .museum-plaque.in-lightbox {
+    z-index: 90;
   }
   @keyframes plaque-in {
-    from { opacity: 0; transform: translateX(10px); }
-    to { opacity: 1; transform: none; }
-  }
-  .plaque-title {
-    font-family: var(--font-display);
-    font-size: 15px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    color: oklch(96% 0.02 85);
+    from { opacity: 0; }
+    to { opacity: 1; }
   }
   .plaque-loc {
-    margin-top: 2px;
     font-family: var(--font-body);
-    font-size: 12px;
-    color: oklch(78% 0.03 85 / 85%);
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.02em;
+    color: oklch(78% 0.02 85 / 62%);
   }
   .plaque-camera {
-    margin-top: 10px;
-    font-family: var(--font-mono);
-    font-size: 10px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: oklch(82% 0.14 210);
-  }
-  .plaque-tech {
     margin-top: 3px;
     font-family: var(--font-mono);
-    font-size: 10px;
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: oklch(72% 0.06 210 / 55%);
+  }
+  .plaque-tech {
+    margin-top: 2px;
+    font-family: var(--font-mono);
+    font-size: 9px;
     letter-spacing: 0.04em;
-    color: oklch(72% 0.02 85 / 80%);
+    color: oklch(70% 0.02 85 / 45%);
   }
 
   .lightbox {
@@ -1342,6 +1415,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
+    padding: 24px;
     background: oklch(4% 0.01 260 / 92%);
     backdrop-filter: blur(16px);
     -webkit-backdrop-filter: blur(16px);
@@ -1351,9 +1425,14 @@
     background: oklch(4% 0.01 260 / 0%);
     pointer-events: none;
   }
+  @media (max-width: 720px) {
+    .lightbox {
+      padding: 24px 16px 168px;
+    }
+  }
   .lightbox-media {
-    max-width: 94vw;
-    max-height: 94vh;
+    max-width: 82vw;
+    max-height: 78vh;
     border-radius: 10px;
     box-shadow: 0 24px 80px oklch(0% 0 0 / 55%);
     will-change: transform;
