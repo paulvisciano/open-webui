@@ -382,7 +382,7 @@
 		recentChats = recentChats.map((c) =>
 			c.id === id ? { ...c, title, chat: { ...(c.chat ?? {}), title } } : c
 		);
-		// Live-update the conversation node title in the graph.
+		graphStore.mergeNodeProperties(id, ['Conversation'], { title, name: title });
 		const token = localStorage.token;
 		await graphStore.loadConversations(token);
 	};
@@ -415,7 +415,7 @@
 		const target = e.target as HTMLElement;
 		if (
 			target.closest(
-				'.graph-folder-hud, .graph-search-host, .graph-search-scrim, .graph-folder-sheet, .graph-folder-backdrop, .graph-menu-btn, .chat-collapsed-orb-host, .chat-side-panel, .video-wall-hud, .graph-clock, .flip-cal-dock'
+				'.graph-search-host, .graph-search-scrim, .graph-folder-sheet, .graph-folder-backdrop, .graph-menu-btn, .graph-toolbar, .graph-toolbar-search, .chat-collapsed-orb-host, .chat-side-panel, .video-wall-hud, .graph-clock, .flip-cal-dock'
 			)
 		)
 			return;
@@ -526,60 +526,11 @@
 			</button>
 		{/if}
 
-		{#if displayedSources.length > 0}
-		<div class="graph-folder-hud" data-testid="graph-source-list">
-			<p class="graph-folder-kicker">On view</p>
-			<ul class="graph-source-list">
-				{#each displayedSources as source (source.id)}
-					<li
-						class="graph-source-row"
-						class:is-offline={!source.online}
-						class:is-indexing={graphStore.scanningSourceIds.has(source.id)}
-						data-testid="graph-source-pill"
-						title={source.lastAbsPath || source.name}
-					>
-						{#if source.online}
-							<svg class="graph-source-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-								<path d="M4 7.5h5.2l1.4 1.6H20v8.4a1.5 1.5 0 0 1-1.5 1.5H5.5A1.5 1.5 0 0 1 4 17.5V7.5Z" />
-								<path d="M4 11h16" />
-							</svg>
-						{:else}
-							<svg class="graph-source-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-								<path d="M4 8h5l1.5 2H20v8.5a1.5 1.5 0 0 1-1.5 1.5H5.5A1.5 1.5 0 0 1 4 18.5V8Z" />
-							</svg>
-						{/if}
-						<span class="graph-source-name">{source.name || source.lastAbsPath || source.id}</span>
-						{#if graphStore.scanningSourceIds.has(source.id)}
-							<span class="graph-source-label">Indexing</span>
-						{:else if !source.online}
-							<span class="graph-source-label">Offline</span>
-						{/if}
-						<button
-							type="button"
-							class="graph-source-remove"
-							aria-label="Remove {source.name || source.lastAbsPath || source.id} from graph"
-							title="Remove from graph (keeps files on disk)"
-							disabled={detachingId === source.id}
-							onclick={(e) => {
-								e.stopPropagation();
-								void removeFolderFromGraph(source.id);
-							}}
-						>
-							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
-								<path d="M6 6l12 12M18 6L6 18" />
-							</svg>
-						</button>
-					</li>
-				{/each}
-			</ul>
-		</div>
-		{/if}
-
 		{#if folderSheetOpen}
 			<button
 				type="button"
 				class="graph-folder-backdrop"
-				aria-label="Close attach folder"
+				aria-label="Close manage gallery"
 				onclick={closeFolderSheet}
 			></button>
 			<div
@@ -592,8 +543,8 @@
 			>
 				<header class="graph-folder-head">
 					<div>
-						<p class="graph-folder-kicker">Index in place</p>
-						<h2 id="graph-folder-title">Attach folder</h2>
+						<p class="graph-folder-kicker">Gallery</p>
+						<h2 id="graph-folder-title">Manage Gallery</h2>
 					</div>
 					<button type="button" class="graph-folder-x" aria-label="Close" onclick={closeFolderSheet}>
 						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
@@ -601,6 +552,55 @@
 						</svg>
 					</button>
 				</header>
+				{#if displayedSources.length > 0}
+					<section class="graph-folder-attached" data-testid="graph-source-list">
+						<p class="graph-folder-section">On view</p>
+						<ul class="graph-source-list">
+							{#each displayedSources as source (source.id)}
+								<li
+									class="graph-source-row"
+									class:is-offline={!source.online}
+									class:is-indexing={graphStore.scanningSourceIds.has(source.id)}
+									data-testid="graph-source-pill"
+									title={source.lastAbsPath || source.name}
+								>
+									{#if source.online}
+										<svg class="graph-source-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+											<path d="M4 7.5h5.2l1.4 1.6H20v8.4a1.5 1.5 0 0 1-1.5 1.5H5.5A1.5 1.5 0 0 1 4 17.5V7.5Z" />
+											<path d="M4 11h16" />
+										</svg>
+									{:else}
+										<svg class="graph-source-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+											<path d="M4 8h5l1.5 2H20v8.5a1.5 1.5 0 0 1-1.5 1.5H5.5A1.5 1.5 0 0 1 4 18.5V8Z" />
+										</svg>
+									{/if}
+									<span class="graph-source-name">{source.name || source.lastAbsPath || source.id}</span>
+									{#if graphStore.scanningSourceIds.has(source.id)}
+										<span class="graph-source-label">Indexing</span>
+									{:else if !source.online}
+										<span class="graph-source-label">Offline</span>
+									{/if}
+									<button
+										type="button"
+										class="graph-source-remove"
+										aria-label="Remove {source.name || source.lastAbsPath || source.id} from gallery"
+										title="Remove from gallery (keeps files on disk)"
+										disabled={detachingId === source.id}
+										onclick={(e) => {
+											e.stopPropagation();
+											void removeFolderFromGraph(source.id);
+										}}
+									>
+										<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+											<path d="M6 6l12 12M18 6L6 18" />
+										</svg>
+									</button>
+								</li>
+							{/each}
+						</ul>
+					</section>
+				{/if}
+				<p class="graph-folder-section">Add a folder</p>
 				<p class="graph-folder-hint">Walk the disk from the server. Files stay on disk — nothing is copied.</p>
 				<form
 					class="graph-folder-pathrow"
@@ -686,18 +686,6 @@
 
 		<GraphSearch bind:open={graphSearchOpen} onselect={openChat} />
 		<div class="graph-toolbar">
-			<button
-				type="button"
-				class="graph-toolbar-search"
-				data-testid="graph-search"
-				aria-label="Search"
-				onclick={() => (graphSearchOpen = true)}
-			>
-				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-					<circle cx="11" cy="11" r="7" />
-					<path d="M20 20l-3-3" />
-				</svg>
-			</button>
 		{#if voiceStarting || (voiceActive && voiceService)}
 			<div class="voice-dock">
 				{#if voiceService}
@@ -734,13 +722,13 @@
 				<div class="chat-collapsed-orb">
 					<div
 						class="chat-orb-add"
-						data-testid="graph-add-folder"
+						data-testid="graph-manage-gallery"
 						style:opacity={orbOptionsOpen ? '1' : '0'}
-						style:transform={orbOptionsOpen ? 'translateY(0) scale(1)' : 'translateY(20px) scale(0.9)'}
+						style:transform={orbOptionsOpen ? 'translate(-50%, 0) scale(1)' : 'translate(-50%, 20px) scale(0.9)'}
 						style:pointer-events={orbOptionsOpen ? 'auto' : 'none'}
 						role="button"
 						tabindex="0"
-						aria-label="Add folder"
+						aria-label="Manage Gallery"
 						onclick={(e) => { e.stopPropagation(); orbOptionsOpen = false; openFolderSheet(); }}
 						onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); orbOptionsOpen = false; openFolderSheet(); } }}
 						onmouseenter={orbCancelClose}
@@ -752,13 +740,13 @@
 								<path d="M12 11v6M9 14h6" />
 							</svg>
 						</div>
-						<span>Add folder</span>
+						<span>Manage Gallery</span>
 					</div>
 
 					<div
 						class="chat-orb-expand"
 						style:opacity={orbOptionsOpen ? '1' : '0'}
-						style:transform={orbOptionsOpen ? 'translateY(0) scale(1)' : 'translateY(20px) scale(0.9)'}
+						style:transform={orbOptionsOpen ? 'translate(-50%, 0) scale(1)' : 'translate(-50%, 20px) scale(0.9)'}
 						style:pointer-events={orbOptionsOpen ? 'auto' : 'none'}
 						role="button"
 						tabindex="0"
@@ -789,6 +777,18 @@
 		</div>
 		{/if}
 		</div>
+			<button
+				type="button"
+				class="graph-toolbar-search"
+				data-testid="graph-search"
+				aria-label="Search"
+				onclick={() => (graphSearchOpen = true)}
+			>
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<circle cx="11" cy="11" r="7" />
+					<path d="M20 20l-3-3" />
+				</svg>
+			</button>
 	</div>
 
 	{#if showChatPanel && $mobile && !voiceActive}
@@ -847,8 +847,7 @@
 </div>
 
 <style>
-	.graph-page.is-inspecting .graph-menu-btn,
-	.graph-page.is-inspecting .graph-folder-hud {
+	.graph-page.is-inspecting .graph-menu-btn {
 		opacity: 0;
 		pointer-events: none;
 	}
@@ -880,7 +879,6 @@
 		height: 22px;
 	}
 
-	.graph-folder-hud,
 	.graph-folder-sheet,
 	.graph-folder-backdrop {
 		--folder-bg: var(--color-cyber-bg, #0a0e17);
@@ -896,35 +894,19 @@
 		font-family: var(--font-sans);
 	}
 
-	.graph-folder-hud {
-		position: absolute;
-		left: 16px;
-		bottom: calc(20px + env(safe-area-inset-bottom, 0px));
-		top: auto;
-		z-index: 40;
-		display: flex;
-		flex-direction: column;
-		align-items: stretch;
-		max-width: min(240px, calc(100% - 8rem));
-		pointer-events: auto;
-		padding: 8px 10px;
-		border-radius: 16px;
-		background: oklch(10% 0.02 255 / 72%);
-		backdrop-filter: blur(24px) saturate(1.4);
-		-webkit-backdrop-filter: blur(24px) saturate(1.4);
-		box-shadow:
-			0 8px 28px oklch(0% 0 0 / 40%),
-			0 0 0 1px oklch(50% 0.03 255 / 10%);
-		transition: opacity 0.4s ease;
+	.graph-folder-attached {
+		margin: 0 0 14px;
+		padding: 0 0 12px;
+		border-bottom: 1px solid color-mix(in srgb, var(--folder-cyan) 14%, var(--folder-border));
 	}
-
-	@media (max-width: 768px) {
-		.graph-folder-hud {
-			bottom: calc(88px + env(safe-area-inset-bottom, 0px));
-			max-width: calc(100% - 7rem);
-		}
+	.graph-folder-section {
+		margin: 0 0 8px;
+		font-size: 10px;
+		font-weight: 600;
+		letter-spacing: 0.14em;
+		text-transform: uppercase;
+		color: var(--folder-cyan);
 	}
-
 	.graph-source-list {
 		display: flex;
 		flex-direction: column;
@@ -932,24 +914,18 @@
 		margin: 0;
 		padding: 0;
 		list-style: none;
-	}
-	.graph-folder-kicker {
-		margin: 0 2px 6px;
-		font-family: 'Fraunces', Georgia, serif;
-		font-size: 9px;
-		letter-spacing: 0.18em;
-		text-transform: uppercase;
-		color: #c4a056;
+		max-height: 9.5rem;
+		overflow-y: auto;
 	}
 	.graph-source-row {
 		display: flex;
 		align-items: center;
 		gap: 8px;
 		min-width: 0;
-		padding: 4px 2px;
-		color: #efe6d2;
-		font-family: 'Fraunces', Georgia, serif;
-		font-size: 12px;
+		padding: 6px 4px;
+		border-radius: 8px;
+		color: var(--folder-text);
+		font-size: 13px;
 		line-height: 1.25;
 	}
 	.graph-source-row.is-offline {
@@ -1249,8 +1225,10 @@
 
 	.graph-toolbar {
 		position: absolute;
-		right: calc(16px + env(safe-area-inset-right, 0px));
+		left: 50%;
+		right: auto;
 		bottom: calc(0.95rem + env(safe-area-inset-bottom, 0px));
+		transform: translateX(-50%);
 		z-index: 41;
 		display: flex;
 		flex-direction: row;
@@ -1270,12 +1248,21 @@
 	}
 
 	.graph-toolbar-search {
+		position: absolute;
+		right: calc(16px + 114px + 12px + env(safe-area-inset-right, 0px));
+		bottom: calc(0.95rem + env(safe-area-inset-bottom, 0px));
+		z-index: 41;
 		width: 44px;
 		height: 44px;
 		padding: 0;
-		border: 1px solid transparent;
+		border: 1px solid oklch(82% 0.14 210 / 28%);
 		border-radius: 50%;
-		background: transparent;
+		background: oklch(10% 0.02 255 / 82%);
+		backdrop-filter: blur(24px) saturate(1.5);
+		-webkit-backdrop-filter: blur(24px) saturate(1.5);
+		box-shadow:
+			0 8px 28px oklch(0% 0 0 / 45%),
+			0 0 0 1px oklch(50% 0.03 255 / 10%);
 		color: oklch(82% 0.14 210);
 		display: flex;
 		align-items: center;
@@ -1288,10 +1275,16 @@
 	}
 	.graph-toolbar-search:hover {
 		background: oklch(82% 0.14 210 / 12%);
+		border-color: oklch(82% 0.14 210 / 40%);
+	}
+	@media (max-width: 640px) {
+		.graph-toolbar-search {
+			right: calc(16px + 96px + 12px + env(safe-area-inset-right, 0px));
+		}
 	}
 
 	.chat-collapsed-orb-host {
-		position: relative;
+		position: static;
 		left: auto;
 		right: auto;
 		bottom: auto;
@@ -1318,7 +1311,7 @@
 	}
 
 	.chat-collapsed-orb {
-		position: relative;
+		position: static;
 		display: flex;
 		flex-direction: column;
 		align-items: center;
@@ -1394,7 +1387,8 @@
 
 	.chat-orb-expand {
 		position: absolute;
-		right: 0;
+		left: 50%;
+		right: auto;
 		bottom: calc(100% + 10px);
 		display: flex;
 		align-items: center;
@@ -1432,7 +1426,8 @@
 
 	.chat-orb-add {
 		position: absolute;
-		right: 0;
+		left: 50%;
+		right: auto;
 		bottom: calc(100% + 62px);
 		display: flex;
 		align-items: center;
@@ -1652,9 +1647,9 @@
 		z-index: 42;
 		display: flex;
 		flex-direction: column;
-		align-items: flex-end;
+		align-items: center;
 		justify-content: flex-end;
-		padding: 0 calc(16px + env(safe-area-inset-right, 0px)) calc(5.4rem + env(safe-area-inset-bottom, 0px));
+		padding: 0 16px calc(0.95rem + 72px + env(safe-area-inset-bottom, 0px));
 		pointer-events: none;
 	}
 	.voice-vignette {
@@ -1668,15 +1663,15 @@
 		z-index: 1;
 		display: flex;
 		flex-direction: column;
-		align-items: flex-end;
+		align-items: center;
 		gap: 0.5rem;
 		pointer-events: none;
 		width: min(28rem, calc(100vw - 2rem));
 		margin-bottom: 0;
 	}
 	.voice-hero :global(.voice-caption) {
-		text-align: right;
-		margin-left: auto;
+		text-align: left;
+		margin-left: 0;
 	}
 	.voice-status {
 		margin: 0;
@@ -1684,7 +1679,7 @@
 		letter-spacing: 0.18em;
 		text-transform: uppercase;
 		color: oklch(82% 0.14 210 / 75%);
-		text-align: right;
+		text-align: center;
 		font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
 	}
 	.voice-dock {
