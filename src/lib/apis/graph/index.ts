@@ -244,6 +244,14 @@ export const startScan = async (token: string = '', sourceId: string) => {
 	});
 };
 
+export const detachSource = async (token: string = '', sourceId: string) => {
+	return await graphJson(
+		`${WEBUI_API_BASE_URL}/graph/sources/${encodeURIComponent(sourceId)}`,
+		token,
+		{ method: 'DELETE' }
+	);
+};
+
 export const getCanvas = async (token: string = ''): Promise<GraphCanvas> => {
 	const res = await graphJson(`${WEBUI_API_BASE_URL}/graph/canvas`, token);
 	return {

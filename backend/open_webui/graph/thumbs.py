@@ -340,3 +340,14 @@ def ensure_thumb(asset: Mapping[str, Any], size: int = THUMB_MAX) -> Path | None
             except Exception:
                 return None
         return None
+
+
+def delete_source_thumbs(source_id: str) -> None:
+    try:
+        dest = (GRAPH_THUMBS_DIR / _safe_id(source_id)).resolve()
+        root = GRAPH_THUMBS_DIR.resolve()
+    except (ValueError, OSError):
+        return
+    if dest == root or root not in dest.parents:
+        return
+    shutil.rmtree(dest, ignore_errors=True)

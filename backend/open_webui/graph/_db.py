@@ -529,6 +529,34 @@ async def count_assets_by_source(source_id: str) -> int:
     return int(n or 0)
 
 
+async def delete_source(source_id: str) -> int:
+    """Drop source + its graph_asset rows. Never touches files on disk."""
+    if not source_id:
+        return 0
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """DELETE FROM graph_asset_fts
+                   WHERE asset_id IN (
+                       SELECT id FROM graph_asset WHERE source_id = $1
+                   )""",
+                source_id,
+            )
+            result = await conn.execute(
+                'DELETE FROM graph_asset WHERE source_id = $1',
+                source_id,
+            )
+            await conn.execute(
+                'DELETE FROM graph_source WHERE id = $1',
+                source_id,
+            )
+    try:
+        return int(str(result).split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
 async def get_source(source_id: str) -> dict | None:
     pool = await get_pool()
     async with pool.acquire() as conn:

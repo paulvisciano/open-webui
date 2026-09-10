@@ -204,6 +204,9 @@ class PresenceMonitor:
             forced=None,
         )
 
+    def forget(self, source_id: str) -> None:
+        self._sources.pop(source_id, None)
+
     def set_online(self, source_id: str, online: bool) -> None:
         """QA/dev hook: force presence. ``online=False`` sticks across polls."""
         state = self._sources.get(source_id)
@@ -330,6 +333,10 @@ def set_abs_path(source_id: str, abs_path: str | Path) -> None:
 
 def set_online(source_id: str, online: bool) -> None:
     presence_monitor.set_online(source_id, online)
+
+
+def forget_source(source_id: str) -> None:
+    presence_monitor.forget(source_id)
 
 
 def snapshot() -> dict[str, bool]:

@@ -26,6 +26,7 @@ from pydantic import BaseModel
 
 from open_webui.constants import ERROR_MESSAGES
 from open_webui.graph.sources import (
+    forget_source,
     is_online,
     presence_monitor,
     set_abs_path,
@@ -219,6 +220,12 @@ async def _run_scan(source_id: str) -> None:
             pass
     except Exception:
         log.exception('scan_source failed source_id=%s', source_id)
+
+
+def _cancel_scan(source_id: str) -> None:
+    task = _scan_tasks.pop(source_id, None)
+    if task is not None and not task.done():
+        task.cancel()
 
 
 def _enqueue_scan(source_id: str) -> None:
@@ -617,6 +624,22 @@ async def get_sources(
         n = await count_assets_by_source(row['id'])
         out.append(_source_payload(row, asset_count=n))
     return out
+
+
+@router.delete('/sources/{source_id}')
+async def detach_source(
+    source_id: str,
+    user=Depends(get_verified_user),
+):
+    await _owned_source(source_id, user.id)
+    _cancel_scan(source_id)
+    from open_webui.graph._db import delete_source
+    from open_webui.graph.thumbs import delete_source_thumbs
+
+    n = await delete_source(source_id)
+    forget_source(source_id)
+    delete_source_thumbs(source_id)
+    return {'ok': True, 'source_id': source_id, 'removed_assets': n}
 
 
 @router.post('/sources/{source_id}/scan')

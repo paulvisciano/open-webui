@@ -378,6 +378,22 @@ class GraphStore {
     scanProgressStore.completeActive();
   }
 
+  async dropSource(sourceId: string): Promise<void> {
+    if (!sourceId) return;
+    await this.vanishThenRemove(sourceId);
+    this.sources = this.sources.filter((s) => s.id !== sourceId);
+    if (sourceId in this.sourceOnline) {
+      const nextOnline = { ...this.sourceOnline };
+      delete nextOnline[sourceId];
+      this.sourceOnline = nextOnline;
+    }
+    if (this.scanningSourceIds.has(sourceId)) {
+      const next = new Set(this.scanningSourceIds);
+      next.delete(sourceId);
+      this.scanningSourceIds = next;
+    }
+  }
+
   private async vanishThenRemove(sourceId: string): Promise<void> {
     if (!sourceId || this.vanishing.has(sourceId)) return;
     this.vanishing.add(sourceId);
