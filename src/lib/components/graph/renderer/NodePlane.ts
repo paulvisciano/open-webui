@@ -13,6 +13,9 @@ import {
   CHUNK_SIZE,
   DEPTH_FADE_END,
   DEPTH_FADE_START,
+  HALL_DEPTH_FADE_END,
+  HALL_DEPTH_FADE_START,
+  HALL_RENDER_DISTANCE_Z,
   INVIS_THRESHOLD,
   SEARCH_DIM,
   LOD_FULL_CHEBY,
@@ -78,6 +81,7 @@ export class NodePlane {
   private _inlineVideo: HTMLVideoElement | null = null;
   private _videoTexture: THREE.VideoTexture | null = null;
   private _stillMap: THREE.Texture | null = null;
+  private _roundMask: THREE.CanvasTexture | null = null;
 
   /**
    * @param node - the canvas node to render.
@@ -241,20 +245,23 @@ export class NodePlane {
       Math.abs(nodeChunkZ - camChunkZ),
     );
 
+    const onWall = this._node.yaw != null && this._node.yaw !== 0;
+    const renderDist = onWall ? HALL_RENDER_DISTANCE_Z : RENDER_DISTANCE;
+    const fadeStart = onWall ? HALL_DEPTH_FADE_START : DEPTH_FADE_START;
+    const fadeEnd = onWall ? HALL_DEPTH_FADE_END : DEPTH_FADE_END;
+
     const gridFade =
-      cheby <= RENDER_DISTANCE
+      cheby <= renderDist
         ? 1
-        : Math.max(0, 1 - (cheby - RENDER_DISTANCE) / Math.max(CHUNK_FADE_MARGIN, 0.0001));
+        : Math.max(0, 1 - (cheby - renderDist) / Math.max(CHUNK_FADE_MARGIN, 0.0001));
 
     const absDepth = Math.abs(cameraPos.z - nodeWorldZ);
     const depthFade =
-      absDepth <= DEPTH_FADE_START
+      absDepth <= fadeStart
         ? 1
-        : Math.max(0, 1 - (absDepth - DEPTH_FADE_START) / Math.max(DEPTH_FADE_END - DEPTH_FADE_START, 0.0001));
+        : Math.max(0, 1 - (absDepth - fadeStart) / Math.max(fadeEnd - fadeStart, 0.0001));
 
-    // Reference repo formula: opacity = min(gridFade, depthFade²). The squared
-    // depth term makes far planes fall off faster than grid distance alone.
-    let targetOpacity = Math.min(gridFade, depthFade * depthFade);
+    let targetOpacity = Math.min(gridFade, onWall ? depthFade : depthFade * depthFade);
     const matchIds = searchHighlight.matchIds;
     if (matchIds !== null && !isSearchMatch(matchIds, this._node.id)) {
       targetOpacity *= SEARCH_DIM;
@@ -303,8 +310,14 @@ export class NodePlane {
         }
         this._noteTexture = baked;
         this._material.map = baked;
+        if (this._node.kind === 'video' || this._node.kind === 'photo') {
+          this._material.transparent = true;
+          this._material.alphaTest = 0;
+          if (!this._inlineVideo) this._material.alphaMap = null;
+        }
       } catch {
         this._material.map = texture;
+        if (this._node.kind === 'video' || this._node.kind === 'photo') this._applyRoundMask();
       }
     } else {
       this._material.map = texture;
@@ -391,6 +404,13 @@ export class NodePlane {
     video.loop = true;
     video.crossOrigin = 'anonymous';
     video.muted = false;
+    const applyVideoAspect = () => {
+      if (video.videoWidth > 0 && video.videoHeight > 0) {
+        this._fitNaturalAspect(video.videoWidth, video.videoHeight);
+        this._applyRoundMask();
+      }
+    };
+    video.addEventListener('loadedmetadata', applyVideoAspect);
     void video.play().catch(() => {
       video.muted = true;
       void video.play().catch(() => {});
@@ -398,6 +418,7 @@ export class NodePlane {
     const tex = new THREE.VideoTexture(video);
     tex.colorSpace = THREE.SRGBColorSpace;
     this._material.map = tex;
+    this._applyRoundMask();
     this._material.needsUpdate = true;
     this._inlineVideo = video;
     this._videoTexture = tex;
@@ -417,6 +438,7 @@ export class NodePlane {
     if (this._stillMap) {
       this._material.map = this._stillMap;
       this._stillMap = null;
+      this._material.alphaMap = null;
       this._material.needsUpdate = true;
     }
   }
@@ -426,6 +448,10 @@ export class NodePlane {
     if (this._disposed) return;
     this.stopInline();
     this._disposed = true;
+    if (this._roundMask) {
+      this._roundMask.dispose();
+      this._roundMask = null;
+    }
     if (this._fullUrl && this._fullEvictCb) {
       textureCache.releaseFullRes(this._fullUrl, this._fullEvictCb);
       this._fullEvictCb = undefined;
@@ -811,7 +837,40 @@ export class NodePlane {
     return `${day} · ${d.getFullYear()}`;
   }
 
-  private _createVideoScreenTexture(source: THREE.Texture): THREE.CanvasTexture {
+  private _applyRoundMask(): void {
+    if (this._roundMask) {
+      this._roundMask.dispose();
+      this._roundMask = null;
+    }
+    const sx = Math.max(1, this._mesh.scale.x);
+    const sy = Math.max(1, this._mesh.scale.y);
+    const aspect = sx / sy;
+    const long = 1024;
+    const canvasW = aspect >= 1 ? long : Math.max(256, Math.round(long * aspect));
+    const canvasH = aspect >= 1 ? Math.max(256, Math.round(long / aspect)) : long;
+    const radius = Math.max(12, Math.round(Math.min(canvasW, canvasH) * 0.045));
+    const canvas = document.createElement('canvas');
+    canvas.width = canvasW;
+    canvas.height = canvasH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvasW, canvasH);
+    ctx.fillStyle = '#ffffff';
+    this._roundRect(ctx, 0.5, 0.5, canvasW - 1, canvasH - 1, radius);
+    ctx.fill();
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+    this._roundMask = tex;
+    this._material.alphaMap = tex;
+    this._material.transparent = true;
+    this._material.alphaTest = 0;
+    this._material.needsUpdate = true;
+  }
+
+  private _createVideoScreenTexture(source: THREE.Texture, withPlay = true): THREE.CanvasTexture {
     const imgSize = this._imageSize(source);
     const aspect = imgSize
       ? imgSize.w / imgSize.h
@@ -827,33 +886,29 @@ export class NodePlane {
     const ctx = canvas.getContext('2d');
     if (!ctx) return new THREE.CanvasTexture(canvas);
 
-    const bezel = Math.max(3, Math.round(Math.min(canvasW, canvasH) * 0.012));
-    ctx.fillStyle = '#090909';
-    ctx.fillRect(0, 0, canvasW, canvasH);
+    const radius = Math.round(Math.min(canvasW, canvasH) * 0.045);
+    ctx.clearRect(0, 0, canvasW, canvasH);
+    ctx.save();
+    this._roundRect(ctx, 0, 0, canvasW, canvasH, radius);
+    ctx.clip();
 
-    const ix = bezel;
-    const iy = bezel;
-    const iw = canvasW - bezel * 2;
-    const ih = canvasH - bezel * 2;
     const img = source.image as { width?: number; height?: number } | undefined;
     if (img && (img.width ?? 0) > 0 && (img.height ?? 0) > 0) {
       try {
-        ctx.drawImage(img as CanvasImageSource, ix, iy, iw, ih);
+        ctx.drawImage(img as CanvasImageSource, 0, 0, canvasW, canvasH);
       } catch {
         ctx.fillStyle = '#111';
-        ctx.fillRect(ix, iy, iw, ih);
+        ctx.fillRect(0, 0, canvasW, canvasH);
       }
     } else {
       ctx.fillStyle = '#111';
-      ctx.fillRect(ix, iy, iw, ih);
+      ctx.fillRect(0, 0, canvasW, canvasH);
     }
 
-    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(ix + 0.5, iy + 0.5, iw - 1, ih - 1);
-
-    const play = Math.round(Math.min(iw, ih) * 0.14);
-    this._drawPlayGlyph(ctx, ix + iw / 2, iy + ih / 2, play, 'rgba(255,255,255,0.92)', 'rgba(0,0,0,0.35)');
+    if (withPlay) {
+      const play = Math.round(Math.min(canvasW, canvasH) * 0.14);
+      this._drawPlayGlyph(ctx, canvasW / 2, canvasH / 2, play, 'rgba(255,255,255,0.92)', 'rgba(0,0,0,0.35)');
+    }
 
     const dateLabel = this._mediaDateLabel();
     if (dateLabel) {
@@ -862,90 +917,23 @@ export class NodePlane {
       ctx.textAlign = 'right';
       ctx.textBaseline = 'bottom';
       ctx.fillStyle = 'rgba(255,255,255,0.72)';
-      ctx.fillText(dateLabel.toUpperCase(), ix + iw - 10, iy + ih - 10);
+      ctx.fillText(dateLabel.toUpperCase(), canvasW - 14, canvasH - 14);
     }
+    ctx.restore();
 
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = false;
     texture.needsUpdate = true;
     return texture;
   }
 
   private _createMediaCaptionTexture(source: THREE.Texture, isVideo: boolean): THREE.CanvasTexture {
-    if (isVideo) return this._createVideoScreenTexture(source);
-    const imgSize = this._imageSize(source);
-    const aspect = imgSize
-      ? imgSize.w / imgSize.h
-      : this._mesh.scale.x > 0 && this._mesh.scale.y > 0
-        ? this._mesh.scale.x / this._mesh.scale.y
-        : 16 / 9;
-    const long = 1024;
-    const canvasW = aspect >= 1 ? long : Math.max(192, Math.round(long * aspect));
-    const canvasH = aspect >= 1 ? Math.max(192, Math.round(long / aspect)) : long;
-    const canvas = document.createElement('canvas');
-    canvas.width = canvasW;
-    canvas.height = canvasH;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return new THREE.CanvasTexture(canvas);
-
-    const minSide = Math.min(canvasW, canvasH);
-    const rail = Math.max(7, Math.round(minSide * 0.02));
-    const fillet = Math.max(1, Math.round(minSide * 0.0035));
-    const mat = Math.max(28, Math.round(minSide * 0.11));
-    const inset = rail + fillet + mat;
-    const innerW = canvasW - inset * 2;
-    const innerH = canvasH - inset * 2;
-    const pal = this._framePalette();
-
-    this._fillMolding(ctx, 0, 0, canvasW, canvasH, rail, pal.frame[0], pal.frame[1], pal.frame[2]);
-    ctx.fillStyle = pal.fillet;
-    ctx.fillRect(rail, rail, canvasW - rail * 2, canvasH - rail * 2);
-    ctx.fillStyle = pal.mat;
-    ctx.fillRect(rail + fillet, rail + fillet, canvasW - (rail + fillet) * 2, canvasH - (rail + fillet) * 2);
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(inset, inset, innerW, innerH);
-    ctx.clip();
-    const img = source.image as { width?: number; height?: number } | undefined;
-    const iw = img?.width ?? 0;
-    const ih = img?.height ?? 0;
-    if (img && iw > 0 && ih > 0) {
-      try {
-        ctx.drawImage(img as CanvasImageSource, inset, inset, innerW, innerH);
-      } catch {
-        ctx.fillStyle = '#1a1814';
-        ctx.fillRect(inset, inset, innerW, innerH);
-      }
-    } else {
-      ctx.fillStyle = '#1a1814';
-      ctx.fillRect(inset, inset, innerW, innerH);
-    }
-    ctx.restore();
-
-    ctx.strokeStyle = 'rgba(20,16,12,0.28)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(inset + 0.5, inset + 0.5, innerW - 1, innerH - 1);
-
-    const dateLabel = this._mediaDateLabel();
-    if (dateLabel) {
-      const dateFont = Math.max(11, Math.round(minSide * 0.022));
-      ctx.font = `400 ${dateFont}px ${FONT_DISPLAY}`;
-      ctx.textAlign = 'right';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = pal.caption;
-      ctx.fillText(
-        dateLabel,
-        canvasW - rail - fillet - 10,
-        canvasH - rail - fillet - mat / 2,
-      );
-    }
-
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    texture.needsUpdate = true;
-    return texture;
+    return this._createVideoScreenTexture(source, isVideo);
   }
+
 
   private _fillGlassCardStrokeOnly(
     ctx: CanvasRenderingContext2D,

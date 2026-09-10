@@ -13,6 +13,11 @@ export const CHUNK_SIZE = 160;
 /** Half-extent (in chunks) of the always-mounted ring around the camera. */
 export const RENDER_DISTANCE = 4;
 
+export const HALL_RENDER_DISTANCE_Z = 18;
+
+export const HALL_DEPTH_FADE_START = 1400;
+export const HALL_DEPTH_FADE_END = 2800;
+
 /** Extra ring of chunks beyond `RENDER_DISTANCE` that fades out smoothly. */
 export const CHUNK_FADE_MARGIN = 1;
 
@@ -185,14 +190,31 @@ export interface ChunkOffset {
  */
 export const CHUNK_OFFSETS: readonly ChunkOffset[] = (() => {
   const radius = RENDER_DISTANCE + CHUNK_FADE_MARGIN;
+  const seen = new Set<string>();
   const offsets: ChunkOffset[] = [];
+  const add = (dx: number, dy: number, dz: number) => {
+    const key = `${dx},${dy},${dz}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    offsets.push({
+      dx,
+      dy,
+      dz,
+      dist: Math.max(Math.abs(dx), Math.abs(dy), Math.abs(dz)),
+    });
+  };
   for (let dx = -radius; dx <= radius; dx++) {
     for (let dy = -radius; dy <= radius; dy++) {
       for (let dz = -radius; dz <= radius; dz++) {
-        const dist = Math.max(Math.abs(dx), Math.abs(dy), Math.abs(dz));
-        if (dist <= radius) {
-          offsets.push({ dx, dy, dz, dist });
-        }
+        add(dx, dy, dz);
+      }
+    }
+  }
+  const zR = HALL_RENDER_DISTANCE_Z;
+  for (let dx = -2; dx <= 2; dx++) {
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dz = -zR; dz <= zR; dz++) {
+        add(dx, dy, dz);
       }
     }
   }
