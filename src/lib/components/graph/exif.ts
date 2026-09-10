@@ -8,9 +8,13 @@ export const EXIF_DISPLAY_KEYS: Record<string, string> = {
 	camera: 'Camera',
 	date_taken_friendly: 'Date',
 	location: 'Location',
+	gps_location: 'Location',
+	friendly_location: 'Location',
+	place_name: 'Location',
 	lens: 'Lens',
 	f_number: 'f/',
 	iso: 'ISO',
+	focal_length_mm: 'Focal Length',
 	focal_length: 'Focal Length',
 	exposure_time: 'Exposure',
 	image_width: 'Width',
@@ -20,16 +24,73 @@ export const EXIF_DISPLAY_KEYS: Record<string, string> = {
 	orientation: 'Orientation'
 };
 
+export function formatExposureTime(raw: unknown): string {
+	if (raw == null || raw === '') return '';
+	const s = String(raw).trim().replace(/s$/i, '');
+	let seconds: number | null = null;
+	const frac = s.match(/^(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)$/);
+	if (frac) {
+		const n = Number(frac[1]);
+		const d = Number(frac[2]);
+		if (d) seconds = n / d;
+	} else {
+		const n = Number(s);
+		if (Number.isFinite(n)) seconds = n;
+	}
+	if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return String(raw).trim();
+	if (seconds >= 1) {
+		const shown = Number.isInteger(seconds) ? String(seconds) : seconds.toFixed(1).replace(/\.0$/, '');
+		return `${shown}s`;
+	}
+	return `1/${Math.max(1, Math.round(1 / seconds))}`;
+}
+
+export function formatFocalLength(raw: unknown): string {
+	if (raw == null || raw === '') return '';
+	const s = String(raw).trim();
+	if (/mm$/i.test(s)) return s;
+	const n = Number(s);
+	if (!Number.isFinite(n) || n <= 0) return s;
+	const shown = n >= 10 ? String(Math.round(n)) : String(n);
+	return `${shown}mm`;
+}
+
+export function formatAperture(raw: unknown): string {
+	if (raw == null || raw === '') return '';
+	const s = String(raw).trim();
+	if (/^f\/?/i.test(s)) return s.replace(/^f\/?/i, 'f/');
+	const n = Number(s);
+	if (!Number.isFinite(n) || n <= 0) return s;
+	const shown = Number.isInteger(n) ? String(n) : String(Math.round(n * 100) / 100);
+	return `f/${shown}`;
+}
+
+export function cameraLine(camera: string, lens = ''): string {
+	const cam = camera.trim();
+	const ln = lens.trim();
+	if (!ln) return cam;
+	if (!cam) return ln;
+	const camLower = cam.toLowerCase();
+	const lnLower = ln.toLowerCase();
+	if (lnLower.includes(camLower)) return cam;
+	if (/(back|front|wide|ultra.?wide|telephoto)\s+camera/i.test(ln)) return cam;
+	return cam;
+}
+
 export function formatExifRows(exif: Record<string, unknown>): ExifRow[] {
 	const rows: ExifRow[] = [];
+	const seen = new Set<string>();
 	for (const [key, displayLabel] of Object.entries(EXIF_DISPLAY_KEYS)) {
 		const val = exif[key];
 		if (val == null || val === '') continue;
-		const strVal = String(val);
-		rows.push({
-			label: displayLabel,
-			value: key === 'f_number' ? `f/${strVal}` : strVal
-		});
+		if (seen.has(displayLabel)) continue;
+		let value = String(val);
+		if (key === 'f_number') value = formatAperture(val);
+		else if (key === 'exposure_time') value = formatExposureTime(val);
+		else if (key === 'focal_length' || key === 'focal_length_mm') value = formatFocalLength(val);
+		if (!value) continue;
+		seen.add(displayLabel);
+		rows.push({ label: displayLabel, value });
 	}
 	return rows;
 }
@@ -79,18 +140,24 @@ export type PlaqueInfo = {
   tech: string;
 };
 
-export function plaqueFromExif(rows: ExifRow[], fallbackDate = ''): PlaqueInfo {
+export function plaqueFromExif(rows: ExifRow[], _fallbackDate = ''): PlaqueInfo {
   const pick = (label: string) => rows.find((r) => r.label === label)?.value ?? '';
-  const title = formatCapturedDate(pick('Date')) || fallbackDate;
   const location = pick('Location');
-  const camera = pick('Camera');
-  const lens = pick('Lens');
-  const focal = pick('Focal Length');
-  const f = pick('f/');
+  const camera = cameraLine(pick('Camera'), pick('Lens'));
+  const focal = formatFocalLength(pick('Focal Length'));
+  const f = formatAperture(pick('f/'));
   const iso = pick('ISO');
-  const exp = pick('Exposure');
-  const tech = [lens || focal, f, iso ? `ISO ${iso}` : '', exp].filter(Boolean).join(' · ');
-  return { title, location, camera, tech };
+  const exp = formatExposureTime(pick('Exposure'));
+  const seen = `${camera} ${pick('Lens')}`.toLowerCase();
+  const tech = [
+    focal && !seen.includes(focal.toLowerCase()) ? focal : '',
+    f && !seen.includes(f.toLowerCase()) ? f : '',
+    iso ? `ISO ${iso}` : '',
+    exp
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  return { title: location, location, camera, tech };
 }
 
 const cache = new Map<string, ExifRow[]>();
@@ -125,6 +192,9 @@ export function loadPhotoExif(
 				}
 				const resp = await fetch(photoExifUrl(fileSource));
 				if (resp.ok) raw = (await resp.json()) as Record<string, unknown>;
+			}
+			if (!raw.location && typeof properties?.location === 'string' && properties.location) {
+				raw = { ...raw, location: properties.location };
 			}
 			const rows = formatExifRows(raw ?? {});
 			cache.set(nodeId, rows);
