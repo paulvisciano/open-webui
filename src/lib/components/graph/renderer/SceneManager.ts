@@ -41,8 +41,8 @@ import {
 import { ChunkManager } from './ChunkManager';
 import type { NodePlane } from './NodePlane';
 import type { CanvasNode } from './types';
-import { parseNodeDate } from './Layout';
 import { textureCache } from '../services/TextureCache';
+import { getAssetFileUrl } from '$lib/apis/graph';
 
 /** Camera field of view in degrees. */
 const CAMERA_FOV = 60;
@@ -52,25 +52,6 @@ const CAMERA_NEAR = 0.1;
 const CAMERA_FAR_MIN = 2000;
 /** Near-black holographic canvas background (navy, matches FogExp2). */
 const BACKGROUND_COLOR = 0x05070c;
-/** Holographic cyan — matches `styles.css` `--color-cyber-cyan`. */
-const GLOBE_COLOR = 0x00d4ff;
-/** Sphere radius in world units. Small scenery globe in the field, not a HUD. */
-const GLOBE_RADIUS = 24;
-/** World Y — low-center in the field (not the mic orb). */
-const GLOBE_Y = -40;
-/** Parked world Z at the field origin; does not follow the camera. */
-const GLOBE_Z = 0;
-/** Radians per second idle spin around Y. */
-const GLOBE_SPIN = 0.1;
-/**
- * Floor-ring inner/outer radii (world units). Thin annuli in the XZ plane
- * under the globe; MeshBasicMaterial so FogExp2 still applies.
- */
-const FLOOR_RINGS: ReadonlyArray<readonly [number, number, number]> = [
-  [27, 29, 0.5],
-  [36, 38, 0.32],
-  [48, 50, 0.18],
-];
 /**
  * Top-level renderer façade. Construct with a container element, call
  * `setNodes` with a `CanvasNode[]` layout, then `start()`.
@@ -82,9 +63,6 @@ export class SceneManager {
   private readonly _scene: THREE.Scene;
   private readonly _sharedGeometry: THREE.PlaneGeometry;
   private readonly _chunkManager: ChunkManager;
-  /** Decorative wireframe globe + floor rings (scenery; not the mic orb). */
-  private readonly _globeRoot: THREE.Group;
-  private readonly _globe: THREE.LineSegments;
   private readonly _resizeObserver: ResizeObserver;
   private readonly _velocity = new THREE.Vector3();
   private readonly _targetVel = new THREE.Vector3();
@@ -202,6 +180,12 @@ export class SceneManager {
   onTimelineScroll?: (delta: number) => void;
 
   private _playingVideoId: string | null = null;
+  private _previewTick = 0;
+  private _previewPlayingId: string | null = null;
+  private _lastPreviewId: string | null = null;
+  private readonly _previewAt = new THREE.Vector3();
+  private readonly _previewFwd = new THREE.Vector3();
+  private readonly _previewTo = new THREE.Vector3();
 
   get playingVideoId(): string | null {
     return this._playingVideoId;
@@ -241,11 +225,6 @@ export class SceneManager {
 
     this._sharedGeometry = new THREE.PlaneGeometry(1, 1);
     this._chunkManager = new ChunkManager(this._scene, this._sharedGeometry);
-
-    const globe = this.createGlobe();
-    this._globeRoot = globe.root;
-    this._globe = globe.globe;
-    this._scene.add(this._globeRoot);
 
     this._resizeObserver = new ResizeObserver(() => this.onResize());
     this._resizeObserver.observe(container);
@@ -558,7 +537,7 @@ export class SceneManager {
     if (!node) return;
     const worldX = node.cellX * CHUNK_SIZE + node.localX;
     const worldZ = node.cellZ * CHUNK_SIZE + node.localZ;
-    const viewDist = this.viewDistForNode(node);
+    const viewDist = this.viewDistForNode(node, plane);
     const worldY = node.cellY * CHUNK_SIZE + node.localY;
     let targetX = worldX;
     let targetY = worldY;
@@ -573,17 +552,20 @@ export class SceneManager {
     this.beginFly(targetX, targetY, targetZ, 1600, yawTo, 0);
   }
 
-  private viewDistForNode(node: CanvasNode): number {
+  private viewDistForNode(node: CanvasNode, plane?: NodePlane): number {
     const vHalf = Math.tan((this._camera.fov * Math.PI) / 360);
     const aspect = Math.max(0.5, this._camera.aspect || 1);
-    const w = Math.max(1, node.width);
-    const h = Math.max(1, node.height);
-    const distH = h / 2 / (vHalf * 0.82);
-    const distW = w / 2 / (vHalf * aspect * 0.7);
-    return Math.min(120, Math.max(28, Math.max(distH, distW)));
+    const w = Math.max(1, plane?.mesh.scale.x ?? node.width);
+    const h = Math.max(1, plane?.mesh.scale.y ?? node.height);
+    const fillH = node.kind === 'video' ? 0.56 : 0.78;
+    const fillW = node.kind === 'video' ? 0.48 : 0.55;
+    const cap = node.kind === 'video' ? 280 : 120;
+    const distH = h / 2 / (vHalf * fillH);
+    const distW = w / 2 / (vHalf * aspect * fillW);
+    return Math.min(cap, Math.max(28, Math.max(distH, distW)));
   }
 
-  toggleInlineVideo(nodeId: string, url: string): void {
+  toggleInlineVideo(nodeId: string, url: string, opts?: { muted?: boolean }): void {
     if (this._disposed) return;
     const plane = this._chunkManager.findPlaneByNodeId(nodeId);
     if (!plane) return;
@@ -592,8 +574,9 @@ export class SceneManager {
       this._playingVideoId = null;
       return;
     }
+    this.stopHallwayPreview();
     this.stopInlineVideo();
-    plane.playInline(url);
+    plane.playInline(url, { muted: opts?.muted ?? false });
     this._playingVideoId = nodeId;
   }
 
@@ -603,9 +586,92 @@ export class SceneManager {
     this._playingVideoId = null;
   }
 
+  private stopHallwayPreview(): void {
+    const id = this._previewPlayingId;
+    if (!id) return;
+    this._previewPlayingId = null;
+    this._chunkManager.findPlaneByNodeId(id)?.stopInline();
+  }
+
+  private nearbyHallwayVideos(): { plane: NodePlane; along: number; dist: number; align: number }[] {
+    const cam = this._camera.position;
+    this._camera.getWorldDirection(this._previewFwd);
+    this._previewFwd.y = 0;
+    if (this._previewFwd.lengthSq() < 1e-6) this._previewFwd.set(0, 0, -1);
+    else this._previewFwd.normalize();
+    const ranked: { plane: NodePlane; along: number; dist: number; align: number }[] = [];
+    for (const plane of this._chunkManager.listMountedPlanes()) {
+      if (plane.node.kind !== 'video' || plane.disposed) continue;
+      plane.mesh.getWorldPosition(this._previewAt);
+      this._previewTo.set(this._previewAt.x - cam.x, 0, this._previewAt.z - cam.z);
+      const dist = this._previewTo.length();
+      if (dist < 12 || dist > 420) continue;
+      this._previewTo.multiplyScalar(1 / dist);
+      const align = this._previewFwd.dot(this._previewTo);
+      if (align < 0.42) continue;
+      const along = Math.abs(cam.z - this._previewAt.z);
+      ranked.push({ plane, along, dist, align });
+    }
+    ranked.sort((a, b) => b.align - a.align || a.dist - b.dist);
+    return ranked;
+  }
+
+  private startHallwayPreview(plane: NodePlane): void {
+    const id = plane.node.id;
+    this._previewPlayingId = id;
+    this._lastPreviewId = id;
+    plane.playInline(getAssetFileUrl(id), {
+      muted: true,
+      loop: false,
+      onEnded: () => {
+        if (this._previewPlayingId !== id) return;
+        this._previewPlayingId = null;
+        this.pickHallwayPreview();
+      },
+    });
+  }
+
+  private pickHallwayPreview(): void {
+    if (this._disposed) return;
+    if (this._playingVideoId) {
+      const focused = this._chunkManager.findPlaneByNodeId(this._playingVideoId);
+      if (focused) {
+        focused.mesh.getWorldPosition(this._previewAt);
+        if (Math.abs(this._basePos.z - this._previewAt.z) <= 200) return;
+      }
+      this.stopInlineVideo();
+    }
+    const nearby = this.nearbyHallwayVideos();
+    const nearest = nearby[0];
+    if (!nearest) {
+      this.stopHallwayPreview();
+      return;
+    }
+    const nearestId = nearest.plane.node.id;
+    if (this._previewPlayingId === nearestId && nearest.plane.isPlayingInline) {
+      nearest.plane.keepMuted();
+      return;
+    }
+    this.stopHallwayPreview();
+    this.startHallwayPreview(nearest.plane);
+    for (const plane of this._chunkManager.listMountedPlanes()) {
+      if (plane.node.kind !== 'video') continue;
+      if (plane.node.id === nearestId) continue;
+      if (plane.isPlayingInline) plane.stopInline();
+    }
+  }
+
+  private tickVideoPreviews(): void {
+    if (this._disposed) return;
+    this._previewTick += 1;
+    if (this._previewTick % 8 !== 0) return;
+    this.pickHallwayPreview();
+  }
+
   /** Return to corridor view: look down −Z, x back to 0, keep current z. */
   resetLook(): void {
     if (this._disposed) return;
+    this.stopHallwayPreview();
     this.stopInlineVideo();
     const z = Math.max(this._minCameraZ, Math.min(this._maxCameraZ, this._basePos.z));
     this.beginFly(0, 0, z, 1600, 0, 0);
@@ -701,7 +767,6 @@ export class SceneManager {
     this.unbindEvents();
     this._chunkManager.dispose();
     this.disposeGalleryHall();
-    this.disposeGlobe();
     this._sharedGeometry.dispose();
     this._renderer.dispose();
     if (this._renderer.domElement.parentNode === this._container) {
@@ -930,6 +995,9 @@ export class SceneManager {
     const right = new THREE.Mesh(wallGeo.clone(), wallMat.clone());
     right.position.set(wallX, 8, mid);
     right.rotation.y = -Math.PI / 2;
+    const end = new THREE.Mesh(new THREE.PlaneGeometry(wallX * 2, hallH), wallMat.clone());
+    end.name = 'galleryEnd';
+    end.position.set(0, 8, z0);
 
     const floorY = -hallH / 2 + 8;
     const ceilY = hallH / 2 + 8;
@@ -962,140 +1030,9 @@ export class SceneManager {
 
     this._hall = new THREE.Group();
     this._hall.name = 'galleryHall';
-    this._hall.add(left, right, floor, ceiling, stars);
-
-    const days = new Map<string, { z: number; count: number; date: Date }>();
-    for (const n of nodes) {
-      if (n.kind !== 'photo' && n.kind !== 'video') continue;
-      const p = n.properties ?? {};
-      const hasExif = p.date_taken_friendly ?? p.datetime_original ?? p.date_taken ?? p.taken_at;
-      if (hasExif == null || hasExif === '') continue;
-      const d = parseNodeDate({ id: n.id, labels: n.labels, properties: n.properties });
-      if (!d) continue;
-      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-      const wz = n.cellZ * CHUNK_SIZE + n.localZ;
-      const prev = days.get(key);
-      if (prev) {
-        prev.z += wz;
-        prev.count += 1;
-      } else {
-        days.set(key, { z: wz, count: 1, date: d });
-      }
-    }
-    const ticks = [...days.values()]
-      .map((agg) => ({ z: agg.z / agg.count, date: agg.date }))
-      .sort((a, b) => a.z - b.z);
-    const minGap = 200;
-    let lastZ = -Infinity;
-    for (const tick of ticks) {
-      if (tick.z - lastZ < minGap) continue;
-      lastZ = tick.z;
-      this._hall.add(this._makeFloorDateMarker(tick.date, tick.z, floorY, wallX));
-    }
+    this._hall.add(left, right, end, floor, ceiling, stars);
 
     this._scene.add(this._hall);
-  }
-
-  private _floorDateText(d: Date): string {
-    const months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
-    return `${months[d.getMonth()]} ${d.getDate()}  ·  ${d.getFullYear()}`;
-  }
-
-  private _makeFloorDateMarker(d: Date, z: number, floorY: number, _wallX: number): THREE.Group {
-    const text = this._floorDateText(d);
-    const canvas = document.createElement('canvas');
-    canvas.width = 768;
-    canvas.height = 128;
-    const ctx = canvas.getContext('2d');
-    const group = new THREE.Group();
-    if (ctx) {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.fillStyle = 'rgba(196,168,112,0.55)';
-      ctx.font = '500 44px "Fraunces", Georgia, serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      if ('letterSpacing' in ctx) {
-        (ctx as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = '0.16em';
-      }
-      ctx.fillText(text, canvas.width / 2, canvas.height / 2);
-    }
-    const tex = new THREE.CanvasTexture(canvas);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    const mat = new THREE.MeshBasicMaterial({
-      map: tex,
-      transparent: true,
-      depthWrite: false,
-      fog: true,
-      side: THREE.DoubleSide,
-    });
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(42, 7), mat);
-    mesh.position.set(0, floorY + 6, z);
-    group.add(mesh);
-    return group;
-  }
-
-  private createGlobe(): { root: THREE.Group; globe: THREE.LineSegments } {
-    const root = new THREE.Group();
-    root.position.set(0, GLOBE_Y, GLOBE_Z);
-    root.name = 'globeRoot';
-
-    const sphere = new THREE.SphereGeometry(GLOBE_RADIUS, 20, 12);
-    const wire = new THREE.WireframeGeometry(sphere);
-    sphere.dispose();
-    const globeMat = new THREE.LineBasicMaterial({
-      color: GLOBE_COLOR,
-      transparent: true,
-      opacity: 0.72,
-      fog: true,
-    });
-    const globe = new THREE.LineSegments(wire, globeMat);
-    globe.name = 'globe';
-    globe.rotation.x = 0.35;
-    const glowMat = new THREE.LineBasicMaterial({
-      color: GLOBE_COLOR,
-      transparent: true,
-      opacity: 0.22,
-      fog: true,
-    });
-    const glow = new THREE.LineSegments(wire.clone(), glowMat);
-    glow.name = 'globeGlow';
-    glow.scale.setScalar(1.045);
-    root.add(glow);
-    root.add(globe);
-
-    const ringY = -(GLOBE_RADIUS + 6);
-    for (const [inner, outer, opacity] of FLOOR_RINGS) {
-      const geo = new THREE.RingGeometry(inner, outer, 64, 1);
-      const mat = new THREE.MeshBasicMaterial({
-        color: GLOBE_COLOR,
-        transparent: true,
-        opacity,
-        side: THREE.DoubleSide,
-        depthWrite: false,
-        fog: true,
-      });
-      const ring = new THREE.Mesh(geo, mat);
-      ring.rotation.x = -Math.PI / 2;
-      ring.position.y = ringY;
-      ring.name = 'globeFloorRing';
-      root.add(ring);
-    }
-
-    return { root, globe };
-  }
-
-  private disposeGlobe(): void {
-    this._scene.remove(this._globeRoot);
-    this._globeRoot.traverse((obj) => {
-      const mesh = obj as THREE.Mesh | THREE.LineSegments;
-      mesh.geometry?.dispose();
-      const mat = mesh.material;
-      if (Array.isArray(mat)) {
-        for (const m of mat) m.dispose();
-      } else {
-        mat?.dispose();
-      }
-    });
   }
 
   /** Resizes renderer + camera aspect to the current container size. */
@@ -1140,13 +1077,10 @@ export class SceneManager {
 
     if (this._skyTime) this._skyTime.value = now * 0.001;
 
-    this._globe.rotation.y += GLOBE_SPIN * (deltaMs / 1000);
-    const glow = this._globeRoot.getObjectByName('globeGlow');
-    if (glow) glow.rotation.y = this._globe.rotation.y;
-
     const velMag = this._velocity.length();
     this._chunkManager.update(this._basePos, velMag);
     this.tickVanish();
+    this.tickVideoPreviews();
 
     const cx = Math.floor(this._basePos.x / CHUNK_SIZE);
     const cy = Math.floor(this._basePos.y / CHUNK_SIZE);

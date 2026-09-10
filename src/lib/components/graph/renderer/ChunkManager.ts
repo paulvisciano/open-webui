@@ -124,6 +124,14 @@ export class ChunkManager {
    * Returns the meshes of all currently mounted chunk planes for raycasting.
    * Fresh array each call — the mounted set changes as the camera moves.
    */
+  listMountedPlanes(): NodePlane[] {
+    const planes: NodePlane[] = [];
+    for (const chunk of this._mounted.values()) {
+      for (const plane of chunk.planes) planes.push(plane);
+    }
+    return planes;
+  }
+
   getPickableMeshes(): THREE.Mesh[] {
     const meshes: THREE.Mesh[] = [];
     for (const chunk of this._mounted.values()) {
