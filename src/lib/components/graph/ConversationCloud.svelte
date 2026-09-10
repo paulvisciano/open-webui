@@ -5,30 +5,21 @@
 	import { graphStore } from './stores/graph.svelte';
 	import { isSearchMatch } from './search-match';
 	import { SEARCH_DIM } from './renderer/constants';
-
-	type Cloud = {
-		chatId: string;
-		title: string;
-		meta: string;
-		cx: number;
-		cy: number;
-		scale: number;
-		z: number;
-		dist: number;
-		lod: 'compact';
-	};
+	import type { ConversationCard } from './conversation-card';
 
 	let {
 		sceneManager,
 		onselectconversation,
-		hidden = false
+		hidden = false,
+		previewCards
 	}: {
 		sceneManager?: SceneManager;
 		onselectconversation: (id: string) => void;
 		hidden?: boolean;
+		previewCards?: ConversationCard[];
 	} = $props();
 
-	let clouds = $state<Cloud[]>([]);
+	let clouds = $state<ConversationCard[]>([]);
 	let layerEl: HTMLDivElement | undefined = $state();
 	let raf = 0;
 	let lastKey = '';
@@ -79,7 +70,7 @@
 
 		const cam = sm.cameraPosition;
 		const seen = new Set<string>();
-		const next: Cloud[] = [];
+		const next: ConversationCard[] = [];
 		for (const id of sm.getVisibleNodeIds()) {
 			if (seen.has(id)) continue;
 			seen.add(id);
@@ -110,7 +101,7 @@
 		}
 
 		next.sort((a, b) => a.dist - b.dist);
-		const kept: Cloud[] = [];
+		const kept: ConversationCard[] = [];
 		for (const c of next) {
 			const hits = kept.some((k) => {
 				const dx = Math.abs(c.cx - k.cx);
@@ -133,8 +124,17 @@
 		clouds = kept;
 	}
 
+	$effect(() => {
+		if (previewCards) clouds = previewCards;
+	});
+
 	onMount(() => {
 		conversationOverlay.active = true;
+		if (previewCards) {
+			return () => {
+				conversationOverlay.active = false;
+			};
+		}
 		const el = layerEl;
 		const onWheel = (e: WheelEvent) => {
 			e.preventDefault();

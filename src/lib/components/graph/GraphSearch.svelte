@@ -17,10 +17,14 @@
 
 	let {
 		open = $bindable(false),
-		onselect
+		onselect,
+		listChats = getChatList,
+		searchChats = getChatListBySearchText
 	}: {
 		open?: boolean;
 		onselect: (chatId: string) => void;
+		listChats?: typeof getChatList;
+		searchChats?: typeof getChatListBySearchText;
 	} = $props();
 
 	let inputEl: HTMLInputElement | undefined = $state();
@@ -100,8 +104,8 @@
 			while (page <= 25) {
 				const rows = (
 					trimmed
-						? await getChatListBySearchText(t, trimmed, page)
-						: await getChatList(t, page)
+						? await searchChats(t, trimmed, page)
+						: await listChats(t, page)
 				) ?? [];
 				if (gen !== chatGen) return;
 				if (!Array.isArray(rows) || rows.length === 0) break;

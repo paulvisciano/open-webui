@@ -9,6 +9,17 @@
 - **Typography** — Inter for UI/body, Fraunces for titles and nav, JetBrains Mono for code, editors, notebooks, and graph meta.
 - **Local HTTPS** — `start-all.sh` / `stop-all.sh` bring up llama-server, backend, Vite, and related services with local certs. Vite in dev talks to `https://<host>:8080`.
 
+## Graph page — design, Storybook, tests
+
+`/graph` is the knowledge-graph canvas: conversation plaques, search palette, voice orb, processing dock, and a side inspector for the selected chat.
+
+- **Open Design** prototypes live in project `open-webui-graph`. Pull those into the overlay components; do not restyle `GraphPage` ad hoc.
+- **Storybook** (graph UI only): `npm run storybook`. Stories cover `VoiceWaveform`, `GraphSearch`, and `ConversationCloud`. `ProcessingDock` and `NodeOverlay` are skipped — they are wired to `SceneManager` / WebGL, and we do not mock the Three.js renderer.
+- **Tests**: `npm run test:frontend` (Vitest). Includes existing unit tests plus graph interaction tests (card click → `onselectconversation`, search row → `onselect` + close, waveform modes, canvas dismiss).
+- **Pre-push hook**: this repo uses `core.hooksPath=.githooks` (local config only). Enable with `git config --local core.hooksPath .githooks`. `.githooks/pre-push` runs `npm run test:frontend` and blocks the push on failure.
+
+**Conversation click vs canvas dismiss:** clicking a plaque opens the inspector. Clicking empty canvas closes it. The same `pointerup` that selected a conversation must not close the panel it just opened (`skipCanvasDismiss` / `shouldDismissChatPanel`).
+
 ![GitHub stars](https://img.shields.io/github/stars/open-webui/open-webui?style=social)
 ![GitHub forks](https://img.shields.io/github/forks/open-webui/open-webui?style=social)
 ![GitHub watchers](https://img.shields.io/github/watchers/open-webui/open-webui?style=social)
