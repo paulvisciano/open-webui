@@ -67,6 +67,11 @@ export function assetToKgNode(
 
 type Raw = Record<string, unknown>;
 
+export function isTrashSource(source: Pick<GraphSource, 'name' | 'lastAbsPath'>): boolean {
+  if (/trash/i.test(source.name)) return true;
+  return /(?:^|\/)\.?trash\/?$/i.test(source.lastAbsPath.replace(/\\/g, '/'));
+}
+
 export function toGraphSource(raw: Raw | GraphSource | null | undefined): GraphSource {
   const r = (raw ?? {}) as Raw;
   return {
