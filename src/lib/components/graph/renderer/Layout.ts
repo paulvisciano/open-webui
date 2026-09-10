@@ -347,6 +347,48 @@ function monthKey(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
+function readNodeLocation(node: KGNode | undefined): string | null {
+  if (!node) return null;
+  const p = node.properties ?? {};
+  const loc = p.location ?? p.location_city;
+  return typeof loc === 'string' && loc.trim() ? loc.trim() : null;
+}
+
+function medianNumber(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+function modeString(values: string[]): string | null {
+  if (values.length === 0) return null;
+  const counts = new Map<string, number>();
+  let best = values[0];
+  let bestN = 0;
+  for (const v of values) {
+    const n = (counts.get(v) ?? 0) + 1;
+    counts.set(v, n);
+    if (n > bestN) {
+      best = v;
+      bestN = n;
+    }
+  }
+  return best;
+}
+
+function fallbackTimeForBucketKey(key: string, now: Date): number {
+  if (key === 'today') return now.getTime();
+  if (key === 'yesterday') {
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 12, 0, 0).getTime();
+  }
+  const ym = /^(\d{4})-(\d{2})$/.exec(key);
+  if (ym) return new Date(Number(ym[1]), Number(ym[2]) - 1, 15, 12, 0, 0).getTime();
+  const ymd = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key);
+  if (ymd) return new Date(Number(ymd[1]), Number(ymd[2]) - 1, Number(ymd[3]), 12, 0, 0).getTime();
+  return now.getTime();
+}
+
 // ---------------------------------------------------------------------------
 // Cluster band assignment (ported hubMap pattern)
 // ---------------------------------------------------------------------------
@@ -446,6 +488,10 @@ interface TimePlan {
   bucketLabel: Map<string, string>;
   /** Dense bucket index → bucket key (for date-indicator lookups). */
   indexToBucket: string[];
+  /** Dense bucket index → median timestamp (ms) of nodes in that bucket. */
+  indexToTime: number[];
+  /** Dense bucket index → most common EXIF/node location, if any. */
+  indexToLocation: (string | null)[];
   /** Bucket key → bucket index (reverse of indexToBucket). */
   bucketIndex: Map<string, number>;
   /** Special day-level bucket keys for today/yesterday, or null if not present. */
@@ -507,8 +553,27 @@ function buildTimePlan(nodes: KGNode[], edges: KGEdge[]): TimePlan {
   };
 
   const bucketKeys = new Set<string>();
-  for (const d of renderableDate.values()) {
-    bucketKeys.add(bucketKeyOf(d));
+  const timesByKey = new Map<string, number[]>();
+  const locsByKey = new Map<string, string[]>();
+  const nodeById = new Map(nodes.map((n) => [n.id, n]));
+  for (const [id, d] of renderableDate) {
+    const key = bucketKeyOf(d);
+    bucketKeys.add(key);
+    let times = timesByKey.get(key);
+    if (!times) {
+      times = [];
+      timesByKey.set(key, times);
+    }
+    times.push(d.getTime());
+    const loc = readNodeLocation(nodeById.get(id));
+    if (loc) {
+      let locs = locsByKey.get(key);
+      if (!locs) {
+        locs = [];
+        locsByKey.set(key, locs);
+      }
+      locs.push(loc);
+    }
   }
   const sortedBuckets = Array.from(bucketKeys).sort((a, b) => {
     const sa = a === todayKey ? todayMonthKey + '~1' : a === yesterdayKey ? yesterdayMonthKey + '~0' : a;
@@ -591,10 +656,17 @@ function buildTimePlan(nodes: KGNode[], edges: KGEdge[]): TimePlan {
     fallbackIdx++;
   }
 
+  const indexToTime = indexToBucket.map((key) => {
+    return medianNumber(timesByKey.get(key) ?? []) ?? fallbackTimeForBucketKey(key, now);
+  });
+  const indexToLocation = indexToBucket.map((key) => modeString(locsByKey.get(key) ?? []));
+
   return {
     cellZOf,
     bucketLabel,
     indexToBucket,
+    indexToTime,
+    indexToLocation,
     bucketIndex,
     todayKey: bucketKeys.has(todayKey) ? todayKey : null,
     yesterdayKey: bucketKeys.has(yesterdayKey) ? yesterdayKey : null,
@@ -686,18 +758,24 @@ export interface TimeIndex {
   readonly indexToLabel: readonly string[];
   /** Dense bucket index → raw bucket key (e.g. "2026-07", "today", "yesterday"). */
   readonly indexToBucket: readonly string[];
+  /** Dense bucket index → median timestamp (ms). Index 0 is oldest. */
+  readonly indexToTime: readonly number[];
+  /** Dense bucket index → most common location string, if any. */
+  readonly indexToLocation: readonly (string | null)[];
 }
 
 /**
  * Build a time-only index for the date indicator overlay. Returns the same
  * bucket ordering as `buildCanvasLayout` without the cost of computing
- * clusters/depth. Index 0 is the newest bucket.
+ * clusters/depth. Index 0 is the oldest bucket; the last index is newest.
  */
 export function buildTimeIndex(nodes: KGNode[], edges: KGEdge[]): TimeIndex {
   const plan = buildTimePlan(nodes, edges);
   return {
     indexToLabel: plan.indexToBucket.map((k) => plan.bucketLabel.get(k) ?? k),
     indexToBucket: plan.indexToBucket,
+    indexToTime: plan.indexToTime,
+    indexToLocation: plan.indexToLocation,
   };
 }
 
@@ -1023,5 +1101,18 @@ export function buildCanvasLayout(
     };
   }
 
+  return out;
+}
+
+export function wallTimeSamplesFromCanvas(
+  nodes: CanvasNode[]
+): { t: number; z: number }[] {
+  const out: { t: number; z: number }[] = [];
+  for (const n of nodes) {
+    if (n.yaw == null || n.yaw === 0) continue;
+    const d = parseNodeDate({ id: n.id, labels: n.labels, properties: n.properties });
+    if (!d) continue;
+    out.push({ t: d.getTime(), z: n.cellZ * CHUNK_SIZE + n.localZ });
+  }
   return out;
 }
