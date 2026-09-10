@@ -9,6 +9,7 @@
 	import {
 		browsePath,
 		attachSource,
+		detachSource,
 		startScan
 	} from '$lib/apis/graph';
 	import type { GraphBrowseEntry } from '$lib/apis/graph';
@@ -26,6 +27,7 @@
 	import { scanProgressStore, countsFromScanResponse } from './stores/scan-progress.svelte';
 	import type { KGNode } from './constants';
 	import { createSheetDrag, type SheetSnap } from './composables/use-sheet-drag';
+	import { CANVAS_DISMISS_DRAG_PX, shouldDismissChatPanel } from './canvas-dismiss';
 
 	const i18n: Writable<i18nType> = getContext('i18n');
 
@@ -87,6 +89,7 @@
 	let browseLoading = $state(false);
 	let browseError = $state('');
 	let attaching = $state(false);
+	let detachingId = $state('');
 	const displayedSources = $derived.by(() =>
 		graphStore.sources.map((s) => ({
 			...s,
@@ -172,9 +175,27 @@
 		}
 	};
 
+	const removeFolderFromGraph = async (sourceId: string) => {
+		if (!sourceId || detachingId) return;
+		detachingId = sourceId;
+		try {
+			await detachSource(graphToken(), sourceId);
+			await graphStore.dropSource(sourceId);
+			toast.success('Removed from graph. Files on disk were not deleted.');
+		} catch (err) {
+			console.error('[graph] detach folder failed', err);
+			toast.error(folderErrText(err, 'Could not remove folder'));
+		} finally {
+			detachingId = '';
+		}
+	};
+
 	// ── Conversation selection ───────────────────────────────────────
 	const openChat = async (chatId: string) => {
 		if (!chatId) return;
+		// Same pointerup that selected this conversation also bubbles to the
+		// canvas dismiss handler — skip that dismiss so the panel stays open.
+		skipCanvasDismiss = true;
 		showSidebar.set(false);
 		chatLoading = true;
 		selectedChatId = chatId;
@@ -383,12 +404,14 @@
 	let pendingSeedPrompt = $state<string>('');
 
 	let panelClickStart: { x: number; y: number } | null = null;
+	let skipCanvasDismiss = false;
 
 	const handleCanvasPointerDown = (e: PointerEvent) => {
+		skipCanvasDismiss = false;
 		const target = e.target as HTMLElement;
 		if (
 			target.closest(
-				'.graph-folder-hud, .graph-search-host, .graph-search-scrim, .graph-folder-sheet, .graph-folder-backdrop, .graph-menu-btn, .chat-collapsed-orb-host, .chat-side-panel'
+				'.graph-folder-hud, .graph-search-host, .graph-search-scrim, .graph-folder-sheet, .graph-folder-backdrop, .graph-menu-btn, .chat-collapsed-orb-host, .chat-side-panel, .video-wall-hud, .graph-clock, .flip-cal-dock'
 			)
 		)
 			return;
@@ -397,12 +420,16 @@
 
 	const handleCanvasPointerUp = (e: PointerEvent) => {
 		if (!panelClickStart) return;
-		const dx = Math.abs(e.clientX - panelClickStart.x);
-		const dy = Math.abs(e.clientY - panelClickStart.y);
+		const dx = e.clientX - panelClickStart.x;
+		const dy = e.clientY - panelClickStart.y;
 		panelClickStart = null;
-		if (dx >= 6 || dy >= 6) return;
+		if (Math.abs(dx) >= CANVAS_DISMISS_DRAG_PX || Math.abs(dy) >= CANVAS_DISMISS_DRAG_PX) return;
+		const skip = skipCanvasDismiss;
+		skipCanvasDismiss = false;
 		if ($showSidebar) showSidebar.set(false);
-		if (showChatPanel) closeChatPanel();
+		if (shouldDismissChatPanel({ skipCanvasDismiss: skip, panelOpen: showChatPanel, dx, dy })) {
+			closeChatPanel();
+		}
 	};
 
 	const handleKeydown = (e: KeyboardEvent) => {
@@ -521,6 +548,21 @@
 						{:else if !source.online}
 							<span class="graph-source-label">Offline</span>
 						{/if}
+						<button
+							type="button"
+							class="graph-source-remove"
+							aria-label="Remove {source.name || source.lastAbsPath || source.id} from graph"
+							title="Remove from graph (keeps files on disk)"
+							disabled={detachingId === source.id}
+							onclick={(e) => {
+								e.stopPropagation();
+								void removeFolderFromGraph(source.id);
+							}}
+						>
+							<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+								<path d="M6 6l12 12M18 6L6 18" />
+							</svg>
+						</button>
 					</li>
 				{/each}
 			</ul>
@@ -638,22 +680,19 @@
 
 		<GraphSearch bind:open={graphSearchOpen} onselect={openChat} />
 		<div class="graph-toolbar">
-			{#if corridorDate}
-				<button
-					type="button"
-					class="graph-toolbar-date"
-					class:open={corridorTimelineOpen}
-					aria-label="Navigate to date"
-					aria-expanded={corridorTimelineOpen}
-					data-testid="timeline-bar"
-					onclick={() => (corridorTimelineOpen = !corridorTimelineOpen)}
-				>
-					<span>{corridorDate}</span>
-					<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-						<path d="M6 15l6-6 6 6" />
-					</svg>
-				</button>
-			{/if}
+			<button
+				type="button"
+				class="graph-toolbar-date"
+				class:open={corridorTimelineOpen}
+				aria-label="Navigate to"
+				aria-expanded={corridorTimelineOpen}
+				data-testid="timeline-bar"
+				onclick={() => (corridorTimelineOpen = !corridorTimelineOpen)}
+			>
+				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<path d="M6 15l6-6 6 6" />
+				</svg>
+			</button>
 			<button
 				type="button"
 				class="graph-toolbar-search"
@@ -944,6 +983,36 @@
 	.graph-source-row.is-offline .graph-source-label {
 		color: #8a7d6a;
 	}
+	.graph-source-remove {
+		flex-shrink: 0;
+		margin-left: auto;
+		width: 22px;
+		height: 22px;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0;
+		border: 0;
+		border-radius: 4px;
+		background: transparent;
+		color: #8a7d6a;
+		cursor: pointer;
+	}
+	.graph-source-remove svg {
+		width: 11px;
+		height: 11px;
+	}
+	.graph-source-remove:hover:not(:disabled) {
+		color: #efe6d2;
+		background: oklch(40% 0.04 30 / 35%);
+	}
+	.graph-source-remove:disabled {
+		opacity: 0.4;
+		cursor: default;
+	}
+	.graph-source-row:has(.graph-source-label) .graph-source-remove {
+		margin-left: 4px;
+	}
 	@keyframes source-pulse {
 		0%, 100% { opacity: 1; }
 		50% { opacity: 0.35; }
@@ -1199,28 +1268,21 @@
 	}
 
 	.graph-toolbar-date {
+		width: 44px;
+		height: 44px;
+		padding: 0;
+		border: 0;
+		border-radius: 50%;
+		background: transparent;
+		color: oklch(82% 0.14 210);
 		display: flex;
 		align-items: center;
-		gap: 6px;
-		height: 44px;
-		padding: 0 12px 0 14px;
-		border: 0;
-		border-radius: 100px;
-		background: transparent;
-		color: oklch(92% 0.02 210);
-		font-family: var(--font-mono, 'JetBrains Mono', ui-monospace, monospace);
-		font-size: 12px;
-		font-weight: 500;
-		letter-spacing: 0.1em;
-		text-transform: uppercase;
+		justify-content: center;
 		cursor: pointer;
-		white-space: nowrap;
 	}
 	.graph-toolbar-date svg {
-		width: 14px;
-		height: 14px;
-		color: oklch(82% 0.14 210);
-		flex-shrink: 0;
+		width: 18px;
+		height: 18px;
 		transition: transform 0.2s ease;
 	}
 	.graph-toolbar-date.open svg {

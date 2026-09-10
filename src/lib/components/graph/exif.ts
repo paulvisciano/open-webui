@@ -72,6 +72,27 @@ export function compactExifLine(rows: ExifRow[]): string {
   return [date, loc].filter((v): v is string => Boolean(v)).join(' · ');
 }
 
+export type PlaqueInfo = {
+  title: string;
+  location: string;
+  camera: string;
+  tech: string;
+};
+
+export function plaqueFromExif(rows: ExifRow[], fallbackDate = ''): PlaqueInfo {
+  const pick = (label: string) => rows.find((r) => r.label === label)?.value ?? '';
+  const title = formatCapturedDate(pick('Date')) || fallbackDate;
+  const location = pick('Location');
+  const camera = pick('Camera');
+  const lens = pick('Lens');
+  const focal = pick('Focal Length');
+  const f = pick('f/');
+  const iso = pick('ISO');
+  const exp = pick('Exposure');
+  const tech = [lens || focal, f, iso ? `ISO ${iso}` : '', exp].filter(Boolean).join(' · ');
+  return { title, location, camera, tech };
+}
+
 const cache = new Map<string, ExifRow[]>();
 const inflight = new Map<string, Promise<ExifRow[]>>();
 

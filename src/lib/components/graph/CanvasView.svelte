@@ -8,15 +8,28 @@
   import { textureCache } from './services/TextureCache';
   import { SceneManager } from './renderer/SceneManager';
   import { TIME_BUCKET_SPACING, CHUNK_SIZE, INITIAL_CAMERA_Z } from './renderer/constants';
-  import { buildCanvasLayout, buildTimeIndex } from './renderer/Layout';
+  import { buildCanvasLayout, buildTimeIndex, wallTimeSamplesFromCanvas } from './renderer/Layout';
   import type { TimeIndex } from './renderer/Layout';
   import { usePan, type PanCustomEvent, useComposedGesture, pinchComposition, type PinchCustomEvent, type GestureCallback, useSwipe, type SwipeCustomEvent } from 'svelte-gestures';
   import NodeOverlay from './NodeOverlay.svelte';
   import ConversationCloud from './ConversationCloud.svelte';
   import ProcessingOverlay from './ProcessingOverlay.svelte';
   import ProcessingDock from './ProcessingDock.svelte';
+  import GraphClock from './GraphClock.svelte';
+  import { corridorClockRef } from './corridor-clock-ref';
+  import {
+    bucketIndexFromMs,
+    collapseWallSamples,
+    formatHudDate,
+    fractionalIndexToCameraZ,
+    nodeTimeMs,
+    viewInstantFromCameraZ,
+    viewInstantFromWallZ,
+    zForTime,
+  } from './time-travel';
   import type { CanvasNode } from './renderer/types';
-  import { compactExifLine, dateFromProperties, loadPhotoExif, peekExif } from './exif';
+  import { dateFromProperties, loadPhotoExif, peekExif, plaqueFromExif, type PlaqueInfo } from './exif';
+  import { getAssetFileUrl } from '$lib/apis/graph';
 
   /** Default pinch-zoom sensitivity. The KG config store exposed this via a
    *  settings drawer; OWUI has no such UI yet so we use a fixed constant. */
@@ -57,35 +70,90 @@
   let hoveredNodeId = $state<string | null>(null);
   let tooltipX = $state(0);
   let tooltipY = $state(0);
+  let playingVideoId = $state<string | null>(null);
+  let videoHud = $state<{
+    id: string;
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  let videoHudPinned = $state(false);
   let hoveredKind = $derived(hoveredNodeId ? sceneManager?.getCanvasNode(hoveredNodeId)?.kind ?? null : null);
   let hoverTooltip = $derived(
-    hoveredKind === 'photo' ? 'Click to view image'
-      : hoveredKind === 'conversation' ? 'Click to view convo'
-      : hoveredKind === 'video' ? 'Click to view video'
+    hoveredKind === 'conversation' ? 'Click to view convo'
       : hoveredKind === 'audio' ? 'Click to play audio'
       : hoveredKind === 'document' || hoveredKind === 'pdf' ? 'Click to view document'
-      : 'Click to view details'
+      : hoveredKind && hoveredKind !== 'photo' && hoveredKind !== 'video' ? 'Click to view details'
+      : ''
   );
-  let hoverExifLine = $state('');
+  let hoverPlaque = $state<PlaqueInfo | null>(null);
+  let photoPlaqueRect = $state<{ left: number; top: number; width: number; height: number } | null>(null);
+  let lightbox = $state<{
+    url: string;
+    kind: 'photo' | 'video';
+    alt: string;
+    origin: { left: number; top: number; width: number; height: number } | null;
+    leaving: boolean;
+  } | null>(null);
+  let lightboxMediaEl: HTMLElement | undefined = $state();
+  let lightboxLeaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  let plaquePos = $derived.by(() => {
+    const rect = photoPlaqueRect;
+    if (!rect) return null;
+    const gap = 16;
+    const w = 240;
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 1200;
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
+    const right = rect.left + rect.width;
+    const spaceRight = vw - right;
+    const spaceLeft = rect.left;
+    let left = spaceRight >= Math.max(spaceLeft, 96) ? right + gap : rect.left - w - gap;
+    left = Math.max(12, Math.min(left, vw - w - 12));
+    if (left < right && left + w > rect.left) {
+      left = spaceRight >= spaceLeft ? Math.min(right + gap, vw - w - 12) : Math.max(12, rect.left - w - gap);
+    }
+    let top = rect.top + Math.max(24, rect.height * 0.55);
+    top = Math.max(12, Math.min(top, vh - 168));
+    return { left, top };
+  });
 
   $effect(() => {
     const id = hoveredNodeId;
     const kind = hoveredKind;
     if (!id || (kind !== 'photo' && kind !== 'video')) {
-      hoverExifLine = '';
+      hoverPlaque = null;
+      photoPlaqueRect = null;
       return;
     }
     const kg = graphStore.nodes.find((n) => n.id === id);
     const fallback = dateFromProperties(kg?.properties);
+    const apply = (rows: ReturnType<typeof peekExif>) => {
+      hoverPlaque = plaqueFromExif(rows ?? [], fallback);
+    };
     const cached = peekExif(id);
     if (cached) {
-      hoverExifLine = compactExifLine(cached) || fallback;
-      return;
+      apply(cached);
+    } else {
+      hoverPlaque = plaqueFromExif([], fallback);
+      loadPhotoExif(id, kg?.properties).then((rows) => {
+        if (hoveredNodeId === id) apply(rows);
+      });
     }
-    hoverExifLine = fallback;
-    loadPhotoExif(id, kg?.properties).then((rows) => {
-      if (hoveredNodeId === id) hoverExifLine = compactExifLine(rows) || fallback;
+  });
+
+  $effect(() => {
+    const box = lightbox;
+    const el = lightboxMediaEl;
+    if (!box || box.leaving || !el) return;
+    const reduced = typeof window !== 'undefined'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduced || !box.origin) return;
+    const raf = requestAnimationFrame(() => {
+      requestAnimationFrame(() => morphLightbox(false));
     });
+    return () => cancelAnimationFrame(raf);
   });
 
   let timeIndex = $state<TimeIndex | null>(null);
@@ -109,6 +177,120 @@
     selectedNodeId = null;
     selectedCanvasNode = null;
     overlayOrigin = null;
+  }
+
+  function syncVideoHud(id: string | null): void {
+    const sm = sceneManager;
+    if (!id || !sm) {
+      if (!videoHudPinned && !playingVideoId) videoHud = null;
+      return;
+    }
+    const rect = sm.getPlaneScreenRect(id);
+    if (!rect || rect.width < 32 || rect.height < 32) {
+      if (!playingVideoId && !videoHudPinned) videoHud = null;
+      return;
+    }
+    if (!playingVideoId && id !== playingVideoId && rect.width < 160 && !videoHudPinned) {
+      videoHud = null;
+      return;
+    }
+    videoHud = { id, ...rect };
+  }
+
+  function setClockFocus(id: string | null): void {
+    if (!id) {
+      corridorClockRef.focusMs = null;
+      return;
+    }
+    const kg = graphStore.nodes.find((n) => n.id === id);
+    corridorClockRef.focusMs = nodeTimeMs(kg?.properties ?? null);
+  }
+
+  function focusVideoOnWall(id: string): void {
+    const sm = sceneManager;
+    if (!sm) return;
+    sm.flyToNode(id);
+    galleryFocus = true;
+    lastUserNavAt = Date.now();
+    setClockFocus(id);
+    syncVideoHud(id);
+    const started = Date.now();
+    const tick = () => {
+      syncVideoHud(id);
+      if (Date.now() - started < 1700) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+
+  function toggleWallPlayback(id: string): void {
+    const sm = sceneManager;
+    if (!sm) return;
+    sm.toggleInlineVideo(id, getAssetFileUrl(id));
+    playingVideoId = sm.playingVideoId;
+    syncVideoHud(id);
+  }
+
+  function morphLightbox(towardOrigin: boolean): void {
+    const el = lightboxMediaEl;
+    const origin = lightbox?.origin;
+    if (!el || !origin || origin.width < 8 || origin.height < 8) return;
+    const final = el.getBoundingClientRect();
+    if (final.width < 8 || final.height < 8) return;
+    const dx = origin.left - final.left;
+    const dy = origin.top - final.top;
+    const sx = origin.width / final.width;
+    const sy = origin.height / final.height;
+    el.style.transformOrigin = 'top left';
+    if (towardOrigin) {
+      el.style.transition = 'transform 0.48s cubic-bezier(0.4, 0, 0.2, 1), border-radius 0.48s ease';
+      el.style.transform = `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`;
+      el.style.borderRadius = '14px';
+    } else {
+      el.style.transition = 'none';
+      el.style.transform = `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`;
+      el.style.borderRadius = '14px';
+      void el.offsetWidth;
+      el.style.transition = 'transform 0.72s cubic-bezier(0.16, 1.12, 0.32, 1), border-radius 0.72s ease';
+      el.style.transform = 'none';
+      el.style.borderRadius = '10px';
+    }
+  }
+
+  function openLightbox(id: string): void {
+    const sm = sceneManager;
+    const cn = sm?.getCanvasNode(id);
+    const kg = graphStore.nodes.find((n) => n.id === id);
+    const isVideo = cn?.kind === 'video' || kg?.properties?.kind === 'video';
+    if (isVideo) {
+      sm?.stopInlineVideo();
+      playingVideoId = null;
+      videoHud = null;
+    }
+    if (lightboxLeaveTimer) {
+      clearTimeout(lightboxLeaveTimer);
+      lightboxLeaveTimer = null;
+    }
+    lightbox = {
+      url: getAssetFileUrl(id),
+      kind: isVideo ? 'video' : 'photo',
+      alt: dateFromProperties(kg?.properties) || (isVideo ? 'Video' : 'Photo'),
+      origin: sm?.getPlaneScreenRect(id) ?? photoPlaqueRect,
+      leaving: false,
+    };
+  }
+
+  function closeLightbox(): void {
+    if (!lightbox || lightbox.leaving) return;
+    lightbox = { ...lightbox, leaving: true };
+    morphLightbox(true);
+    lightboxLeaveTimer = setTimeout(() => {
+      lightboxLeaveTimer = null;
+      lightbox = null;
+    }, 500);
+  }
+
+  function maximizeVideo(id: string): void {
+    openLightbox(id);
   }
 
   function navigateToNode(nodeId: string): void {
@@ -143,9 +325,15 @@
           onselectconversation(nodeId);
           return;
         }
+        const isVideo = cn?.kind === 'video' || kg?.properties?.kind === 'video';
+        if (isVideo) {
+          focusVideoOnWall(nodeId);
+          return;
+        }
         if (!galleryFocus) {
           sm.flyToNode(nodeId);
           galleryFocus = true;
+          setClockFocus(nodeId);
           return;
         }
         const nodeYaw = cn?.yaw ?? 0;
@@ -154,6 +342,12 @@
         if (yawDelta > 0.4) {
           sm.flyToNode(nodeId);
           galleryFocus = true;
+          setClockFocus(nodeId);
+          return;
+        }
+        const isPhoto = cn?.kind === 'photo' || kg?.properties?.kind === 'photo';
+        if (isPhoto || isVideo) {
+          openLightbox(nodeId);
           return;
         }
         overlayOrigin = sm.getPlaneScreenRect(nodeId);
@@ -161,15 +355,38 @@
         selectedCanvasNode = cn ?? null;
       } else {
         galleryFocus = false;
+        playingVideoId = null;
+        videoHud = null;
+        setClockFocus(null);
         sm.resetLook();
         clearSelection();
       }
     };
     sm.onHoverNode = (nodeId) => {
       hoveredNodeId = nodeId;
+      const kind = nodeId ? sm.getCanvasNode(nodeId)?.kind : null;
+      if (nodeId && kind === 'video') {
+        syncVideoHud(nodeId);
+        photoPlaqueRect = null;
+      } else if (playingVideoId) {
+        syncVideoHud(playingVideoId);
+        photoPlaqueRect = null;
+      } else if (!videoHudPinned) {
+        videoHud = null;
+        if (nodeId && kind === 'photo') {
+          const rect = sm.getPlaneScreenRect(nodeId);
+          photoPlaqueRect = rect && rect.width >= 140 ? rect : null;
+        } else {
+          photoPlaqueRect = null;
+        }
+      }
     };
     sm.onChunkChange = (_cx, _cy, cz) => {
-      updateDateLabel(cz);
+      updateDateLabel(cz * CHUNK_SIZE);
+    };
+    sm.onCameraZ = (z) => {
+      if (!selectedNodeId) corridorClockRef.focusMs = null;
+      updateDateLabel(z);
     };
     sm.onDoubleTap = (x, y) => {
       handleDoubleTap(x, y);
@@ -252,9 +469,7 @@
     sceneManager?.dashAlongLook();
   }
 
-  function updateDateLabel(camChunkZ: number): void {
-    // Don't overwrite the bucket/date while the user is scrubbing the timeline
-    // or while we're restoring from a dismiss.
+  function updateDateLabel(worldZ: number): void {
     if (timelineScrubbing) return;
     if (!timeIndex || timeIndex.indexToLabel.length === 0) {
       currentBucketIdx = -1;
@@ -262,22 +477,21 @@
       updatePinchBounds(-1);
       return;
     }
+    const nowMs = Date.now();
     const labels = timeIndex.indexToLabel;
-    const bucketIdx = Math.round(camChunkZ / TIME_BUCKET_SPACING);
-    if (bucketIdx < 0) {
-      currentBucketIdx = 0;
-      dateLabel = labels[0];
-      updatePinchBounds(0);
-      return;
-    }
-    if (bucketIdx >= labels.length) {
-      currentBucketIdx = labels.length - 1;
-      dateLabel = labels[labels.length - 1];
-      updatePinchBounds(labels.length - 1);
-      return;
-    }
+    const wall = corridorClockRef.wallTimeline;
+    const instant =
+      wall && wall.length > 0
+        ? (viewInstantFromWallZ(worldZ, wall, nowMs, null) ??
+          viewInstantFromCameraZ(worldZ, timeIndex.indexToTime, timeIndex.indexToLocation, nowMs, null))
+        : viewInstantFromCameraZ(worldZ, timeIndex.indexToTime, timeIndex.indexToLocation, nowMs, null);
+    const bucketIdx = Math.max(
+      0,
+      Math.min(labels.length - 1, bucketIndexFromMs(instant.ms, timeIndex.indexToBucket, nowMs))
+    );
     currentBucketIdx = bucketIdx;
-    dateLabel = labels[bucketIdx];
+    const liveLabel = labels[labels.length - 1] ?? 'Today';
+    dateLabel = formatHudDate(instant.ms, instant.live, liveLabel);
     updatePinchBounds(bucketIdx);
   }
 
@@ -297,7 +511,10 @@
     if (!sceneManager || !timeIndex) return;
     const n = timeIndex.indexToLabel.length;
     if (bucketIdx < 0 || bucketIdx >= n) return;
-    const targetZ = bucketIdx * TIME_BUCKET_SPACING * CHUNK_SIZE + INITIAL_CAMERA_Z;
+    const wall = corridorClockRef.wallTimeline;
+    const t = timeIndex.indexToTime[bucketIdx];
+    const wallZ = wall && wall.length > 0 ? zForTime(t, wall) : null;
+    const targetZ = wallZ ?? fractionalIndexToCameraZ(bucketIdx);
     sceneManager.flyTo(targetZ);
     galleryFocus = false;
     if (closeOnFly) timelineOpen = false;
@@ -483,11 +700,11 @@
       graphStore.sourceOnline ?? {},
     );
     timeIndex = buildTimeIndex(graphStore.nodes, graphStore.edges);
+    corridorClockRef.wallTimeline = collapseWallSamples(wallTimeSamplesFromCanvas(nodes));
     sceneManager.setNodes(nodes);
     lastAppliedAt = Date.now();
     if (timeIndex.indexToLabel.length > 0) {
-      const startZ = Math.floor(sceneManager.camera.position.z / 160);
-      updateDateLabel(startZ);
+      updateDateLabel(sceneManager.basePosZ);
     }
   }
 
@@ -508,6 +725,10 @@
     const rect = containerEl.getBoundingClientRect();
     tooltipX = e.clientX - rect.left;
     tooltipY = e.clientY - rect.top;
+    if (hoveredNodeId && hoveredKind === 'photo' && sceneManager && !lightbox) {
+      const plane = sceneManager.getPlaneScreenRect(hoveredNodeId);
+      photoPlaqueRect = plane && plane.width >= 140 ? plane : null;
+    }
   }
 
   /** Initial graph fetch — loads nodes/edges via the OWUI graph API and
@@ -582,12 +803,20 @@
       clearTimeout(timelineCloseTimer);
       timelineCloseTimer = null;
     }
+    if (lightboxLeaveTimer) {
+      clearTimeout(lightboxLeaveTimer);
+      lightboxLeaveTimer = null;
+    }
     containerEl?.removeEventListener('pointermove', onContainerPointerMove);
     graphStore.setVanishHandler(null);
     searchHighlight.matchIds = null;
     sceneManager?.stop();
     sceneManager?.dispose();
     sceneManager = undefined;
+    corridorClockRef.scene = null;
+    corridorClockRef.timeIndex = null;
+    corridorClockRef.focusMs = null;
+    corridorClockRef.wallTimeline = null;
     if (typeof window !== 'undefined') {
       delete (window as any).__sceneManager;
       delete (window as any).__graphTextureCount;
@@ -710,12 +939,20 @@
   });
 
   let isEmpty = $derived(graphStore.nodes.length === 0);
+
+  $effect(() => {
+    corridorClockRef.scene = sceneManager ?? null;
+    corridorClockRef.timeIndex = timeIndex;
+  });
  </script>
  
+  <svelte:window onkeydown={(e) => { if (e.key === 'Escape' && lightbox) closeLightbox(); }} />
   <div bind:this={containerEl} class="canvas-container" data-testid="graph-canvas"
     {...useComposedGesture(canvasGesture, { onpinch: handlePinch })}
     {...useSwipe(handleSwipe, () => ({ timeframe: 400, minSwipeDistance: 40, touchAction: 'none' }))}
   ></div>
+
+  <GraphClock ontoggle={toggleTimeline} />
  
 {#if isEmpty}
   <div class="empty-state">
@@ -736,12 +973,81 @@
   </div>
 {/if}
 
-{#if hoveredNodeId && !selectedNodeId}
+{#if hoveredNodeId && !selectedNodeId && !lightbox && hoverTooltip}
   <div class="hover-tooltip show" style="left: {tooltipX + 14}px; top: {tooltipY + 14}px;" data-od-id="hover-tooltip">
       {hoverTooltip}
-      {#if hoverExifLine}
-        <span class="hover-exif">{hoverExifLine}</span>
-      {/if}
+  </div>
+{/if}
+
+{#if hoverPlaque && plaquePos && !lightbox && !selectedNodeId && (hoverPlaque.title || hoverPlaque.location || hoverPlaque.camera || hoverPlaque.tech)}
+  <aside
+    class="museum-plaque"
+    style="left: {plaquePos.left}px; top: {plaquePos.top}px"
+  >
+    {#if hoverPlaque.title}
+      <div class="plaque-title">{hoverPlaque.title}</div>
+    {/if}
+    {#if hoverPlaque.location}
+      <div class="plaque-loc">{hoverPlaque.location}</div>
+    {/if}
+    {#if hoverPlaque.camera}
+      <div class="plaque-camera">{hoverPlaque.camera}</div>
+    {/if}
+    {#if hoverPlaque.tech}
+      <div class="plaque-tech">{hoverPlaque.tech}</div>
+    {/if}
+  </aside>
+{/if}
+
+{#if lightbox}
+  <div class="lightbox" class:is-leaving={lightbox.leaving} role="presentation" onclick={closeLightbox}>
+    {#if lightbox.kind === 'video'}
+      <video bind:this={lightboxMediaEl} class="lightbox-media" src={lightbox.url} controls autoplay onclick={(e) => e.stopPropagation()}></video>
+    {:else}
+      <img bind:this={lightboxMediaEl} class="lightbox-media" src={lightbox.url} alt={lightbox.alt} onclick={(e) => e.stopPropagation()} />
+    {/if}
+    <button type="button" class="lightbox-close" aria-label="Close" onclick={closeLightbox}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+{/if}
+
+{#if videoHud && !selectedNodeId}
+  <div
+    class="video-wall-hud"
+    class:is-playing={playingVideoId === videoHud.id}
+    style="left: {videoHud.left}px; top: {videoHud.top}px; width: {videoHud.width}px; height: {videoHud.height}px"
+    onpointerenter={() => (videoHudPinned = true)}
+    onpointerleave={() => (videoHudPinned = false)}
+  >
+    <div class="video-wall-bar">
+      <button
+        type="button"
+        class="video-wall-btn"
+        aria-label={playingVideoId === videoHud.id ? 'Pause' : 'Play'}
+        onclick={(e) => {
+          e.stopPropagation();
+          toggleWallPlayback(videoHud.id);
+        }}
+      >
+        {#if playingVideoId === videoHud.id}
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+        {:else}
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5.5v13l11-6.5L8 5.5Z"/></svg>
+        {/if}
+      </button>
+      <button
+        type="button"
+        class="video-wall-btn"
+        aria-label="Maximize"
+        onclick={(e) => {
+          e.stopPropagation();
+          maximizeVideo(videoHud.id);
+        }}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M9 3H5a2 2 0 0 0-2 2v4M15 3h4a2 2 0 0 1 2 2v4M9 21H5a2 2 0 0 1-2-2v-4M15 21h4a2 2 0 0 0 2-2v-4"/></svg>
+      </button>
+    </div>
   </div>
 {/if}
 
@@ -936,14 +1242,144 @@
     transition: opacity 0.12s ease;
   }
   .hover-tooltip.show { opacity: 1; }
-  .hover-exif {
+
+  .video-wall-hud {
+    position: fixed;
+    z-index: 22;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding: 12px;
+    pointer-events: none;
+    box-sizing: border-box;
+  }
+  .video-wall-bar {
+    pointer-events: auto;
+    display: flex;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 999px;
+    background: oklch(16% 0.015 255 / 58%);
+    backdrop-filter: blur(16px) saturate(1.4);
+    -webkit-backdrop-filter: blur(16px) saturate(1.4);
+    box-shadow: 0 0 0 1px oklch(50% 0.03 255 / 12%);
+  }
+  .video-wall-btn {
+    width: 36px;
+    height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0;
+    border-radius: 999px;
+    background: oklch(92% 0.01 85 / 12%);
+    color: oklch(96% 0.01 85);
+    cursor: pointer;
+  }
+  .video-wall-btn svg {
+    width: 16px;
+    height: 16px;
+  }
+  .video-wall-btn:hover {
+    background: oklch(82% 0.14 210 / 28%);
+  }
+  .museum-plaque {
+    position: absolute;
+    z-index: 24;
+    width: 240px;
+    max-width: calc(100vw - 24px);
+    padding: 12px 16px 14px;
+    border-radius: 10px;
+    background: oklch(12% 0.02 85 / 88%);
+    border: 1px solid oklch(82% 0.08 85 / 22%);
+    box-shadow:
+      0 12px 32px oklch(0% 0 0 / 45%),
+      0 0 0 1px oklch(50% 0.03 85 / 10%);
+    backdrop-filter: blur(20px) saturate(1.3);
+    -webkit-backdrop-filter: blur(20px) saturate(1.3);
+    pointer-events: none;
+    color: oklch(92% 0.02 85);
+    animation: plaque-in 0.28s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  @keyframes plaque-in {
+    from { opacity: 0; transform: translateX(10px); }
+    to { opacity: 1; transform: none; }
+  }
+  .plaque-title {
+    font-family: var(--font-display);
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: oklch(96% 0.02 85);
+  }
+  .plaque-loc {
+    margin-top: 2px;
+    font-family: var(--font-body);
+    font-size: 12px;
+    color: oklch(78% 0.03 85 / 85%);
+  }
+  .plaque-camera {
+    margin-top: 10px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
-    letter-spacing: 0.1em;
-    color: var(--canvas-accent);
-    opacity: 1;
-    max-width: 28rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    color: oklch(82% 0.14 210);
+  }
+  .plaque-tech {
+    margin-top: 3px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    color: oklch(72% 0.02 85 / 80%);
+  }
+
+  .lightbox {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: oklch(4% 0.01 260 / 92%);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    transition: background 0.45s ease, opacity 0.45s ease;
+  }
+  .lightbox.is-leaving {
+    background: oklch(4% 0.01 260 / 0%);
+    pointer-events: none;
+  }
+  .lightbox-media {
+    max-width: 94vw;
+    max-height: 94vh;
+    border-radius: 10px;
+    box-shadow: 0 24px 80px oklch(0% 0 0 / 55%);
+    will-change: transform;
+  }
+  .lightbox-close {
+    position: absolute;
+    top: calc(16px + env(safe-area-inset-top, 0px));
+    right: calc(16px + env(safe-area-inset-right, 0px));
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border: 1px solid oklch(82% 0.14 210 / 28%);
+    border-radius: 50%;
+    background: oklch(10% 0.02 255 / 82%);
+    color: oklch(92% 0.02 210);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+  }
+  .lightbox-close svg {
+    width: 16px;
+    height: 16px;
+  }
+  .lightbox-close:hover {
+    background: oklch(82% 0.14 210 / 18%);
   }
 
   .navigate-scrim {
