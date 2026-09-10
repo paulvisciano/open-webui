@@ -952,7 +952,7 @@
     {...useSwipe(handleSwipe, () => ({ timeframe: 400, minSwipeDistance: 40, touchAction: 'none' }))}
   ></div>
 
-  <GraphClock ontoggle={toggleTimeline} />
+  <GraphClock ontoggle={toggleTimeline} open={timelineOpen} />
  
 {#if isEmpty}
   <div class="empty-state">

@@ -682,19 +682,6 @@
 		<div class="graph-toolbar">
 			<button
 				type="button"
-				class="graph-toolbar-date"
-				class:open={corridorTimelineOpen}
-				aria-label="Navigate to"
-				aria-expanded={corridorTimelineOpen}
-				data-testid="timeline-bar"
-				onclick={() => (corridorTimelineOpen = !corridorTimelineOpen)}
-			>
-				<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-					<path d="M6 15l6-6 6 6" />
-				</svg>
-			</button>
-			<button
-				type="button"
 				class="graph-toolbar-search"
 				data-testid="graph-search"
 				aria-label="Search"
@@ -1265,31 +1252,6 @@
 			0 8px 28px oklch(0% 0 0 / 45%),
 			0 0 0 1px oklch(50% 0.03 255 / 10%);
 		pointer-events: auto;
-	}
-
-	.graph-toolbar-date {
-		width: 44px;
-		height: 44px;
-		padding: 0;
-		border: 0;
-		border-radius: 50%;
-		background: transparent;
-		color: oklch(82% 0.14 210);
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		cursor: pointer;
-	}
-	.graph-toolbar-date svg {
-		width: 18px;
-		height: 18px;
-		transition: transform 0.2s ease;
-	}
-	.graph-toolbar-date.open svg {
-		transform: rotate(180deg);
-	}
-	.graph-toolbar-date:hover {
-		background: oklch(82% 0.14 210 / 12%);
 	}
 
 	.graph-toolbar-search {
