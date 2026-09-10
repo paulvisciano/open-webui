@@ -205,6 +205,7 @@ const WALL_CELL_X_RIGHT = 1;
 const WALL_YAW_LEFT = Math.PI / 2;
 const WALL_YAW_RIGHT = -Math.PI / 2;
 const WALL_PITCH_Y = 88;
+const CONV_PITCH_Y = 68;
 const WALL_PITCH_Z = 260;
 const WALL_TILE_W = 64;
 const WALL_ROWS = 2;
@@ -1038,10 +1039,11 @@ export function buildCanvasLayout(
       const row = grid.y;
       cellX = side === 'R' ? WALL_CELL_X_RIGHT : WALL_CELL_X_LEFT;
       localX = CHUNK_SIZE / 2;
+      const pitchY = kind === 'conversation' ? CONV_PITCH_Y : WALL_PITCH_Y;
       localY =
         (grid.span ?? 1) >= WALL_ROWS
           ? 0
-          : (row - (meta.rows - 1) / 2) * WALL_PITCH_Y;
+          : (row - (meta.rows - 1) / 2) * pitchY;
       const worldZ = grid.worldZ;
       cellZ = Math.floor(worldZ / CHUNK_SIZE);
       localZ = worldZ - cellZ * CHUNK_SIZE;
@@ -1078,8 +1080,16 @@ export function buildCanvasLayout(
           height = colH;
         }
       } else if (kind === 'conversation') {
-        width = WALL_TILE_W * 1.12;
-        height = WALL_TILE_W * 0.7;
+        const u = seededRandom(seed + 7);
+        const v = seededRandom(seed + 11);
+        const wiggle = seededRandom(seed + 13);
+        if (u < 0.65) {
+          height = CONV_PITCH_Y * (0.9 + v * 0.06);
+          width = height * (0.72 + wiggle * 0.1);
+        } else {
+          width = WALL_TILE_W * (1.18 + v * 0.22);
+          height = CONV_PITCH_Y * (0.74 + wiggle * 0.08);
+        }
       } else if (typeof pw === 'number' && typeof ph === 'number' && pw > 0 && ph > 0) {
         const aspect = pw / ph;
         if (aspect >= 1) {
@@ -1098,8 +1108,16 @@ export function buildCanvasLayout(
       height = base;
       width = Math.round(base * aspect);
     } else if (kind === 'conversation') {
-      width = 210;
-      height = 124;
+      const u = seededRandom(seed + 7);
+      const v = seededRandom(seed + 11);
+      const wiggle = seededRandom(seed + 13);
+      if (u < 0.65) {
+        height = 158 + v * 22;
+        width = height * (0.68 + wiggle * 0.12);
+      } else {
+        width = 196 + v * 28;
+        height = width * (0.66 + wiggle * 0.1);
+      }
     } else if (kind === 'document') {
       width = 156;
       height = 172;

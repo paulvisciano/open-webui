@@ -58,7 +58,7 @@ const GLASS_GLOW = 'rgba(0,212,255,0.28)';
  * use a flat colored material.
  */
 export class NodePlane {
-  private readonly _node: CanvasNode;
+  private _node: CanvasNode;
   private readonly _mesh: THREE.Mesh;
   private readonly _material: THREE.MeshBasicMaterial;
   /** Start at 0 so remount / first spawn lerps in via `OPACITY_LERP`. */
@@ -98,14 +98,7 @@ export class NodePlane {
       side: THREE.DoubleSide,
     });
     this._mesh = new THREE.Mesh(sharedGeometry, this._material);
-    this._mesh.scale.set(node.width, node.height, 1);
-    this._mesh.position.set(node.localX, node.localY, node.localZ);
-    this._mesh.rotation.y = node.yaw ?? 0;
-    const yaw = node.yaw ?? 0;
-    const proud = node.kind === 'video' ? 8.2 : 2.4;
-    if (yaw > 0.2) this._mesh.position.x += proud;
-    else if (yaw < -0.2) this._mesh.position.x -= proud;
-    this._mesh.userData.nodeId = node.id;
+    this._applyPose(node);
     this._material.opacity = 0;
     this._mesh.visible = false;
     this._material.depthWrite = false;
@@ -117,21 +110,7 @@ export class NodePlane {
       this._thumbUrl = node.imageUrl;
       this._fullUrl = node.fullUrl;
     } else if (textureSource === 'text' && node.textContent) {
-      const isConv = this._node.kind === 'conversation';
-      const isActive = isConv && this._node.properties?.isActive === true;
-      const isStreaming = isConv && this._node.properties?.isStreaming === true;
-      const tex = isConv
-        ? this._createConversationTexture(false, isActive, isStreaming)
-        : this._createTextTexture(node.textContent);
-      this._noteTexture = tex;
-      this._material.map = tex;
-      // A colored material tint MULTIPLIES the texture (color * map.rgb).
-      // Reset to white so the baked texture renders at full brightness.
-      this._material.color.set(0xffffff);
-      this._material.needsUpdate = true;
-      if (isConv) {
-        this._hoverTexture = this._createConversationTexture(true, isActive, isStreaming);
-      }
+      this._bakeTextTextures();
     }
   }
 
@@ -175,6 +154,21 @@ export class NodePlane {
     this._vanishing = true;
     this._vanishStartMs = performance.now();
     this._vanishFrom = this._currentOpacity;
+  }
+
+  /**
+   * Keep a reused plane in sync with a new layout node. Conversations
+   * rebake their plaque when title/status changes so the wall updates
+   * without disposing the mesh (which would fade in from 0).
+   */
+  syncFrom(node: CanvasNode): void {
+    if (this._disposed) return;
+    const prevKey = this._contentKey(this._node);
+    this._node = node;
+    this._applyPose(node);
+    if (node.kind === 'conversation' && prevKey !== this._contentKey(node)) {
+      this._bakeTextTextures();
+    }
   }
 
   setHovered(hovered: boolean): void {
@@ -502,12 +496,60 @@ export class NodePlane {
     }
   }
 
+  private _applyPose(node: CanvasNode): void {
+    this._mesh.scale.set(node.width, node.height, 1);
+    this._mesh.position.set(node.localX, node.localY, node.localZ);
+    this._mesh.rotation.y = node.yaw ?? 0;
+    const yaw = node.yaw ?? 0;
+    const proud = node.kind === 'video' ? 8.2 : 2.4;
+    if (yaw > 0.2) this._mesh.position.x += proud;
+    else if (yaw < -0.2) this._mesh.position.x -= proud;
+    this._mesh.userData.nodeId = node.id;
+  }
+
+  private _contentKey(node: CanvasNode): string {
+    const p = node.properties ?? {};
+    return [
+      node.textContent ?? '',
+      p.name ?? '',
+      p.title ?? '',
+      p.isActive === true ? '1' : '0',
+      p.isStreaming === true ? '1' : '0',
+    ].join('\0');
+  }
+
+  private _bakeTextTextures(): void {
+    const isConv = this._node.kind === 'conversation';
+    const isActive = isConv && this._node.properties?.isActive === true;
+    const isStreaming = isConv && this._node.properties?.isStreaming === true;
+    if (this._noteTexture) {
+      this._noteTexture.dispose();
+      this._noteTexture = undefined;
+    }
+    if (this._hoverTexture) {
+      this._hoverTexture.dispose();
+      this._hoverTexture = undefined;
+    }
+    const tex = isConv
+      ? this._createConversationTexture(false, isActive, isStreaming)
+      : this._createTextTexture(this._node.textContent ?? '');
+    this._noteTexture = tex;
+    this._material.map = tex;
+    this._material.color.set(0xffffff);
+    this._material.needsUpdate = true;
+    if (isConv) {
+      this._hoverTexture = this._createConversationTexture(true, isActive, isStreaming);
+      if (this._hovered) this._material.map = this._hoverTexture;
+    }
+  }
+
   private _createConversationTexture(hovered: boolean, isActive = false, isStreaming = false): THREE.CanvasTexture {
     const aspect = this._node.width > 0 && this._node.height > 0
       ? this._node.width / this._node.height
-      : 210 / 124;
-    const canvasH = 768;
-    const canvasW = Math.max(192, Math.round(canvasH * aspect));
+      : 3 / 4;
+    const long = 1024;
+    const canvasW = aspect >= 1 ? long : Math.max(256, Math.round(long * aspect));
+    const canvasH = aspect >= 1 ? Math.max(256, Math.round(long / aspect)) : long;
     const canvas = document.createElement('canvas');
     canvas.width = canvasW;
     canvas.height = canvasH;
@@ -517,58 +559,135 @@ export class NodePlane {
     }
 
     const p = this._node.properties ?? {};
-    const title = (p.name as string) ?? (p.title as string) ?? this._node.textContent?.split('\n')[0] ?? this._node.id;
+    const title = String(
+      (p.name as string) ?? (p.title as string) ?? this._node.textContent?.split('\n')[0] ?? this._node.id,
+    ).trim();
+    const excerptRaw = [p.excerpt, p.summary, p.description]
+      .find((v): v is string => typeof v === 'string' && v.trim().length > 0)
+      ?.trim() ?? '';
+    const excerpt = excerptRaw && excerptRaw.toLowerCase() !== title.toLowerCase() ? excerptRaw : '';
     const createdAt = typeof p.createdAt === 'number'
       ? p.createdAt
       : typeof p.created_at === 'number'
         ? p.created_at
         : null;
-    const dateLabel = createdAt !== null
-      ? this._formatCardDate(createdAt)
-      : '';
+    const dateLabel = createdAt !== null ? this._formatCardDate(createdAt) : '';
+    const status = isStreaming ? 'THINKING' : isActive ? 'ACTIVE' : '';
 
-    const wood = Math.max(10, Math.round(canvasW * 0.045));
-    const gilt = Math.max(2, Math.round(canvasW * 0.01));
-    ctx.fillStyle = '#3d2818';
-    ctx.fillRect(0, 0, canvasW, canvasH);
-    ctx.fillStyle = '#c4a056';
+    const pal = this._framePalette();
+    const [hi, lo, mid] = pal.frame;
+    const wood = Math.max(16, Math.round(Math.min(canvasW, canvasH) * 0.058));
+    this._fillMolding(ctx, 0, 0, canvasW, canvasH, wood, hi, lo, mid);
+    this._grainWoodRing(ctx, 0, 0, canvasW, canvasH, wood);
+
+    const giltW = Math.max(3, Math.round(wood * 0.22));
+    const gilt = hovered || isActive || isStreaming ? pal.giltHover : pal.gilt;
+    ctx.fillStyle = gilt;
     ctx.fillRect(wood, wood, canvasW - wood * 2, canvasH - wood * 2);
-    ctx.fillStyle = hovered || isActive || isStreaming ? '#f7efe0' : '#f3ead6';
-    const inner = wood + gilt;
-    ctx.fillRect(inner, inner, canvasW - inner * 2, canvasH - inner * 2);
 
-    const padX = inner + Math.round(canvasW * 0.06);
-    const maxTextWidth = canvasW - padX * 2;
-    const scale = canvasH / 420;
+    const inner = wood + giltW;
+    const paperX = inner;
+    const paperY = inner;
+    const paperW = canvasW - inner * 2;
+    const paperH = canvasH - inner * 2;
+    ctx.fillStyle = pal.mat;
+    ctx.fillRect(paperX, paperY, paperW, paperH);
+    if (hovered || isActive || isStreaming) {
+      ctx.fillStyle = 'rgba(255, 248, 230, 0.32)';
+      ctx.fillRect(paperX, paperY, paperW, paperH);
+    }
+    this._grainPaper(ctx, paperX, paperY, paperW, paperH, this._hashSeed(this._node.id));
 
-    const glyphFont = Math.max(13, Math.round(14 * scale));
-    const glyphY = inner + Math.round(18 * scale);
-    ctx.font = `500 ${glyphFont}px ${FONT_DISPLAY}`;
-    ctx.fillStyle = '#8a6a3a';
+    ctx.strokeStyle = pal.fillet;
+    ctx.globalAlpha = 0.55;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(paperX + 0.5, paperY + 0.5, paperW - 1, paperH - 1);
+    ctx.globalAlpha = 1;
+
+    const rebate = ctx.createLinearGradient(paperX, paperY, paperX, paperY + Math.round(paperH * 0.08));
+    rebate.addColorStop(0, 'rgba(28, 16, 8, 0.22)');
+    rebate.addColorStop(1, 'rgba(28, 16, 8, 0)');
+    ctx.fillStyle = rebate;
+    ctx.fillRect(paperX, paperY, paperW, Math.round(paperH * 0.08));
+    const rebateL = ctx.createLinearGradient(paperX, paperY, paperX + Math.round(paperW * 0.06), paperY);
+    rebateL.addColorStop(0, 'rgba(28, 16, 8, 0.16)');
+    rebateL.addColorStop(1, 'rgba(28, 16, 8, 0)');
+    ctx.fillStyle = rebateL;
+    ctx.fillRect(paperX, paperY, Math.round(paperW * 0.06), paperH);
+
+    const padX = paperX + Math.round(paperW * 0.09);
+    const maxTextWidth = paperW - Math.round(paperW * 0.18);
+    const capH = Math.max(48, Math.round(paperH * 0.12));
+    const capY = paperY + paperH - capH;
+    const artwork = excerpt || title;
+    const artworkTop = paperY + Math.round(paperH * 0.08);
+    const artworkBot = capY - Math.round(paperH * 0.03);
+    const artworkH = Math.max(48, artworkBot - artworkTop);
+    const lineGap = 1.12;
+    const words = artwork.split(/\s+/).filter(Boolean);
+    const longest = words.reduce((a, b) => (a.length >= b.length ? a : b), 'Ag');
+
+    let fontLo = Math.max(28, Math.round(paperW * 0.07));
+    let fontHi = Math.min(Math.round(artworkH * 0.46), Math.round(paperW * 0.32));
+    let titleFont = fontLo;
     ctx.textBaseline = 'top';
     ctx.textAlign = 'left';
-    this._setLetterSpacing(ctx, `${Math.round(0.2 * glyphFont)}px`);
-    ctx.fillText(isStreaming ? 'THINKING' : isActive ? 'ACTIVE' : 'CONVERSATION', padX, glyphY);
-    this._setLetterSpacing(ctx, '0px');
-
-    const titleFont = Math.max(26, Math.round(30 * scale));
-    const titleY = glyphY + glyphFont + Math.round(12 * scale);
-    ctx.font = `500 ${titleFont}px ${FONT_DISPLAY}`;
-    ctx.fillStyle = '#24180f';
-    this._setLetterSpacing(ctx, `${Math.round(-0.02 * titleFont)}px`);
-    const titleLineH = Math.round(titleFont * 1.22);
-    this._drawWrapped(ctx, title, padX, titleY, maxTextWidth, titleLineH, 2);
-    this._setLetterSpacing(ctx, '0px');
-
-    if (dateLabel) {
-      const dateFont = Math.max(13, Math.round(14 * scale));
-      const dateY = titleY + titleLineH * 2 + Math.round(10 * scale);
-      ctx.font = `500 ${dateFont}px ${FONT_DISPLAY}`;
-      ctx.fillStyle = '#8a6a3a';
-      this._setLetterSpacing(ctx, `${Math.round(0.08 * dateFont)}px`);
-      ctx.fillText(dateLabel.toUpperCase(), padX, Math.min(dateY, canvasH - inner - dateFont - 8));
-      this._setLetterSpacing(ctx, '0px');
+    for (let i = 0; i < 14; i++) {
+      const fontMid = Math.round((fontLo + fontHi) / 2);
+      if (fontMid <= fontLo) break;
+      ctx.font = `500 ${fontMid}px ${FONT_DISPLAY}`;
+      this._setLetterSpacing(ctx, `${Math.round(-0.03 * fontMid)}px`);
+      const fitLines = Math.max(2, Math.min(6, Math.floor(artworkH / (fontMid * lineGap))));
+      const overflow = ctx.measureText(longest).width > maxTextWidth;
+      const fitCount = this._countWrapped(ctx, artwork, maxTextWidth, fitLines);
+      const fitH = fitCount * fontMid * lineGap;
+      if (!overflow && fitH <= artworkH && fitCount > 0) {
+        titleFont = fontMid;
+        fontLo = fontMid;
+      } else {
+        fontHi = fontMid;
+      }
     }
+    this._setLetterSpacing(ctx, '0px');
+
+    ctx.font = `500 ${titleFont}px ${FONT_DISPLAY}`;
+    this._setLetterSpacing(ctx, `${Math.round(-0.03 * titleFont)}px`);
+    const titleLineH = Math.round(titleFont * lineGap);
+    const maxLines = Math.max(2, Math.min(6, Math.floor(artworkH / titleLineH)));
+    const lines = Math.max(1, this._countWrapped(ctx, artwork, maxTextWidth, maxLines));
+    const blockH = lines * titleLineH;
+    const titleY = artworkTop + Math.max(0, Math.round((artworkH - blockH) / 2));
+    ctx.fillStyle = '#24180f';
+    this._drawWrapped(ctx, artwork, padX, titleY, maxTextWidth, titleLineH, maxLines);
+    this._setLetterSpacing(ctx, '0px');
+
+    ctx.strokeStyle = pal.caption;
+    ctx.globalAlpha = 0.4;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padX, capY);
+    ctx.lineTo(paperX + paperW - (padX - paperX), capY);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    const metaFont = Math.max(15, Math.round(Math.min(paperW, paperH) * 0.034));
+    const metaY = capY + Math.round((capH - metaFont) / 2);
+    ctx.font = `500 ${metaFont}px ${FONT_MONO}`;
+    ctx.fillStyle = pal.caption;
+    this._setLetterSpacing(ctx, `${Math.round(0.14 * metaFont)}px`);
+    const captionLeft = excerpt ? title : dateLabel;
+    if (captionLeft) {
+      ctx.textAlign = 'left';
+      ctx.fillText(captionLeft.toUpperCase(), padX, metaY, maxTextWidth * 0.62);
+    }
+    const captionRight = [status, excerpt ? dateLabel : ''].filter(Boolean).join('  ·  ');
+    if (captionRight) {
+      ctx.textAlign = 'right';
+      ctx.fillStyle = status ? pal.gilt : pal.caption;
+      ctx.fillText(captionRight.toUpperCase(), paperX + paperW - (padX - paperX), metaY, maxTextWidth * 0.42);
+    }
+    this._setLetterSpacing(ctx, '0px');
+    ctx.textAlign = 'left';
 
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
@@ -632,13 +751,15 @@ export class NodePlane {
     mat: string;
     fillet: string;
     caption: string;
+    gilt: string;
+    giltHover: string;
   } {
     const palettes = [
-      { frame: ['#3a3a3a', '#080808', '#161616'] as [string, string, string], mat: '#f6f3ec', fillet: '#111', caption: '#6a6458' },
-      { frame: ['#4a3428', '#160e08', '#2a1c14'] as [string, string, string], mat: '#f4ead8', fillet: '#1a120c', caption: '#6e5c44' },
-      { frame: ['#c8b08a', '#6a5438', '#8e7350'] as [string, string, string], mat: '#f7f2e8', fillet: '#3a2c1c', caption: '#7a6a50' },
-      { frame: ['#d2c09a', '#7a6840', '#a89068'] as [string, string, string], mat: '#f8f4ea', fillet: '#5a4a2c', caption: '#7a6c50' },
-      { frame: ['#efeae2', '#b4aca0', '#d0c8bc'] as [string, string, string], mat: '#e6e0d4', fillet: '#8a8278', caption: '#6a645c' },
+      { frame: ['#7a4a2c', '#241008', '#4a2818'] as [string, string, string], mat: '#f3e6d0', fillet: '#1a0e08', caption: '#6e4c32', gilt: '#d4a84a', giltHover: '#e8c468' },
+      { frame: ['#3a3a3a', '#080808', '#181818'] as [string, string, string], mat: '#f7f1e6', fillet: '#111', caption: '#6a6458', gilt: '#c4a056', giltHover: '#e0c878' },
+      { frame: ['#d2ae6a', '#6a4818', '#9a7038'] as [string, string, string], mat: '#f8f0dc', fillet: '#3a2c14', caption: '#7a5a28', gilt: '#e0c070', giltHover: '#f0d890' },
+      { frame: ['#e8dcc8', '#8a7a64', '#c4b49a'] as [string, string, string], mat: '#f4ece0', fillet: '#8a8278', caption: '#6a645c', gilt: '#9a8060', giltHover: '#c4b496' },
+      { frame: ['#7a2c32', '#28080c', '#4a1418'] as [string, string, string], mat: '#f4e6d4', fillet: '#22080c', caption: '#6e3c38', gilt: '#c49a5a', giltHover: '#e0b878' },
     ];
     return palettes[this._hashSeed(this._node.id) % palettes.length];
   }
@@ -793,6 +914,29 @@ export class NodePlane {
     ctx.lineWidth = 1;
     ctx.strokeRect(x + 0.5, y + 0.5, w - 1, t);
     ctx.strokeRect(x + 0.5, y + 0.5, t, h - 1);
+    ctx.restore();
+  }
+
+  private _grainPaper(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    seed: number,
+  ): void {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x, y, w, h);
+    ctx.clip();
+    const count = Math.min(1600, Math.max(400, Math.floor((w * h) / 320)));
+    for (let i = 0; i < count; i++) {
+      const n = this._hashNoise(seed + i * 17);
+      const m = this._hashNoise(seed + i * 41 + 9);
+      ctx.globalAlpha = 0.035 + n * 0.06;
+      ctx.fillStyle = n > 0.55 ? '#3a2414' : '#fffaf0';
+      ctx.fillRect(x + m * w, y + n * h, 1.15, 1.15);
+    }
     ctx.restore();
   }
 
@@ -990,6 +1134,29 @@ export class NodePlane {
     if ('letterSpacing' in ctx) {
       (ctx as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = value;
     }
+  }
+
+  private _countWrapped(
+    ctx: CanvasRenderingContext2D,
+    text: string,
+    maxWidth: number,
+    maxLines: number,
+  ): number {
+    const words = text.split(/\s+/).filter(Boolean);
+    if (words.length === 0 || maxLines <= 0) return 0;
+    let line = '';
+    let lines = 1;
+    for (let i = 0; i < words.length; i++) {
+      const candidate = line ? `${line} ${words[i]}` : words[i];
+      if (ctx.measureText(candidate).width <= maxWidth) {
+        line = candidate;
+        continue;
+      }
+      if (lines >= maxLines) return maxLines;
+      lines++;
+      line = words[i];
+    }
+    return lines;
   }
 
   /** Word-wrap helper for the conversation card. Draws up to `maxLines` lines,

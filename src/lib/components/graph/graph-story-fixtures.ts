@@ -31,6 +31,7 @@ export const PREVIEW_CARDS: ConversationCard[] = [
 	{
 		chatId: 'chat-trip',
 		title: 'Trip planning',
+		excerpt: 'Flights into Lisbon the first week of May, then train south.',
 		meta: 'Mar 12 · 2024',
 		cx: 220,
 		cy: 180,

@@ -24,9 +24,18 @@ export const conversationProvider: NodeKindProvider = {
 	buildCanvasFields(node: KGNode, _ctx: BuildCtx): Partial<CanvasNode> {
 		const np = node.properties ?? {};
 		const title = (np.name as string) ?? (np.title as string) ?? node.id;
-		const createdAt = typeof np.createdAt === 'number' ? np.createdAt : null;
+		const createdAt =
+			typeof np.createdAt === 'number'
+				? np.createdAt
+				: typeof np.created_at === 'number'
+					? np.created_at
+					: null;
 		const dateLabel = createdAt !== null ? formatConversationDate(createdAt) : '';
+		const excerpt = [np.excerpt, np.summary, np.description]
+			.find((v): v is string => typeof v === 'string' && v.trim().length > 0)
+			?.trim();
 		const lines = [title];
+		if (excerpt && excerpt.toLowerCase() !== String(title).toLowerCase()) lines.push(excerpt);
 		if (dateLabel) lines.push(dateLabel);
 		return { textContent: lines.join('\n') };
 	},

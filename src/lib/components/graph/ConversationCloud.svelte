@@ -53,6 +53,14 @@
 		return `${day} · ${d.getFullYear()}`;
 	}
 
+	function cardExcerpt(properties: Record<string, unknown>, title: string): string {
+		const raw = [properties.excerpt, properties.summary, properties.description]
+			.find((v): v is string => typeof v === 'string' && v.trim().length > 0)
+			?.trim();
+		if (!raw || raw.toLowerCase() === title.toLowerCase()) return '';
+		return raw;
+	}
+
 	function tick(): void {
 		conversationOverlay.active = true;
 		const sm = sceneManager;
@@ -84,13 +92,15 @@
 			const dist = Math.hypot(world.x - cam.x, world.y - cam.y, world.z - cam.z);
 			const scale = Math.max(0.34, Math.min(1.08, 420 / Math.max(dist, 90)));
 			if (scale < 0.36) continue;
+			const title =
+				(cn.properties?.name as string) ??
+				(cn.properties?.title as string) ??
+				'Conversation';
 			next.push({
 				chatId: id,
-				title:
-					(cn.properties?.name as string) ??
-					(cn.properties?.title as string) ??
-					'Conversation',
+				title,
 				meta: formatMeta(cn.properties ?? {}),
+				excerpt: cardExcerpt(cn.properties ?? {}, title),
 				cx: screen.x,
 				cy: screen.y,
 				scale,
@@ -106,8 +116,8 @@
 			const hits = kept.some((k) => {
 				const dx = Math.abs(c.cx - k.cx);
 				const dy = Math.abs(c.cy - k.cy);
-				const ox = (220 * c.scale + 220 * k.scale) / 2 - dx;
-				const oy = (118 * c.scale + 118 * k.scale) / 2 - dy;
+				const ox = (176 * c.scale + 176 * k.scale) / 2 - dx;
+				const oy = (228 * c.scale + 228 * k.scale) / 2 - dy;
 				return ox > 8 && oy > 8;
 			});
 			if (!hits) kept.push(c);
@@ -179,10 +189,16 @@
 			onmousemove={onCardMove}
 			onmouseleave={() => (tipOn = false)}
 		>
-			<span class="month-glyph">Conversation</span>
-			<span class="month-title">{c.title}</span>
-			{#if c.meta}
-				<time class="month-meta">{c.meta}</time>
+			<span class="month-title">{c.excerpt || c.title}</span>
+			{#if c.meta || c.excerpt}
+				<span class="month-caption">
+					{#if c.excerpt}
+						<span class="month-caption-title">{c.title}</span>
+					{/if}
+					{#if c.meta}
+						<time class="month-meta">{c.meta}</time>
+					{/if}
+				</span>
 			{/if}
 		</button>
 	{/each}
@@ -218,11 +234,11 @@
 		pointer-events: auto;
 		touch-action: none;
 		box-sizing: border-box;
-		width: 220px;
-		min-height: 118px;
-		padding: 14px 16px 12px;
-		border: 7px solid #3d2818;
-		border-radius: 2px;
+		width: 176px;
+		min-height: 228px;
+		padding: 22px 18px 14px;
+		border: 10px solid #2a1c14;
+		border-radius: 1px;
 		display: flex;
 		flex-direction: column;
 		align-items: flex-start;
@@ -230,57 +246,83 @@
 		cursor: pointer;
 		color: #2a1c12;
 		background:
-			linear-gradient(180deg, rgba(255, 255, 255, 0.18), transparent 42%),
-			#f3ead6;
+			linear-gradient(180deg, rgba(40, 24, 12, 0.12), transparent 14%),
+			linear-gradient(90deg, rgba(40, 24, 12, 0.08), transparent 10%),
+			linear-gradient(180deg, rgba(255, 248, 230, 0.22), transparent 40%),
+			#f4ead8;
 		box-shadow:
-			inset 0 0 0 1px #c4a056,
-			0 10px 28px rgba(0, 0, 0, 0.42);
+			inset 0 0 0 3px #c4a056,
+			inset 0 0 0 4px #1a120c,
+			0 14px 32px rgba(0, 0, 0, 0.48);
 	}
 
 	.month-card:hover {
+		background:
+			linear-gradient(180deg, rgba(40, 24, 12, 0.1), transparent 14%),
+			linear-gradient(90deg, rgba(40, 24, 12, 0.06), transparent 10%),
+			linear-gradient(180deg, rgba(255, 248, 230, 0.38), transparent 40%),
+			#f7efe0;
 		box-shadow:
-			inset 0 0 0 1px #e0c878,
-			0 14px 32px rgba(0, 0, 0, 0.5);
+			inset 0 0 0 3px #e0c878,
+			inset 0 0 0 4px #1a120c,
+			0 18px 36px rgba(0, 0, 0, 0.55);
 	}
 
 	.month-card.search-hit {
 		box-shadow:
-			inset 0 0 0 1px #e8d48a,
+			inset 0 0 0 3px #e8d48a,
+			inset 0 0 0 4px #1a120c,
 			0 0 0 1px rgba(196, 160, 86, 0.45),
-			0 14px 32px rgba(0, 0, 0, 0.5);
-	}
-
-	.month-glyph {
-		font-family: 'Fraunces', Georgia, serif;
-		font-size: 0.58rem;
-		letter-spacing: 0.2em;
-		text-transform: uppercase;
-		color: #8a6a3a;
-		margin-bottom: 8px;
+			0 18px 36px rgba(0, 0, 0, 0.55);
 	}
 
 	.month-title {
 		font-family: 'Fraunces', Georgia, serif;
-		font-size: 1.08rem;
+		font-size: 1.28rem;
 		font-weight: 500;
-		line-height: 1.28;
-		letter-spacing: -0.02em;
+		line-height: 1.16;
+		letter-spacing: -0.03em;
 		color: #24180f;
+		flex: 1;
 		display: -webkit-box;
-		-webkit-line-clamp: 2;
-		line-clamp: 2;
+		-webkit-line-clamp: 5;
+		line-clamp: 5;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
 	}
 
+	.month-caption {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: 8px;
+		width: 100%;
+		margin-top: 12px;
+		padding-top: 10px;
+		border-top: 1px solid rgba(110, 92, 68, 0.28);
+	}
+
+	.month-caption-title {
+		font-family: 'JetBrains Mono', ui-monospace, monospace;
+		font-size: 0.58rem;
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+		color: #6e5c44;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		min-width: 0;
+	}
+
 	.month-meta {
 		display: block;
-		margin-top: 8px;
-		font-family: 'Fraunces', Georgia, serif;
-		font-size: 0.68rem;
-		letter-spacing: 0.08em;
+		margin-left: auto;
+		font-family: 'JetBrains Mono', ui-monospace, monospace;
+		font-size: 0.58rem;
+		letter-spacing: 0.14em;
 		text-transform: uppercase;
-		color: #8a6a3a;
+		color: #6e5c44;
+		white-space: nowrap;
 	}
 
 	.hover-tooltip {

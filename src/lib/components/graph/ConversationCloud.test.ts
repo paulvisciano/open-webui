@@ -17,4 +17,18 @@ describe('ConversationCloud', () => {
 		await fireEvent.click(getByRole('button', { name: /Trip planning/ }));
 		expect(onselectconversation).toHaveBeenCalledWith('chat-trip');
 	});
+
+	it('treats the title as the artwork and drops the conversation kicker', () => {
+		const { getByRole, queryByText } = render(ConversationCloud, {
+			props: {
+				hidden: false,
+				previewCards: PREVIEW_CARDS,
+				onselectconversation: vi.fn()
+			}
+		});
+
+		expect(queryByText('Conversation')).toBeNull();
+		expect(getByRole('button', { name: /Recipe notes/ })).toBeTruthy();
+		expect(getByRole('button', { name: /Flights into Lisbon/ })).toBeTruthy();
+	});
 });

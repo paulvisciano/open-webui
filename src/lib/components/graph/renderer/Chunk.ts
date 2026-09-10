@@ -113,6 +113,7 @@ export class Chunk {
         prev.node.imageUrl === node.imageUrl &&
         prev.node.fullUrl === node.fullUrl
       ) {
+        prev.syncFrom(node);
         next.push(prev);
       } else {
         if (prev) {
