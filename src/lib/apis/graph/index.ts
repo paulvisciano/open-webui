@@ -267,6 +267,14 @@ const appendAuthToken = (url: URL): string => {
 	return url.toString();
 };
 
+export const getChatFileUrl = (fileId: string) => {
+	const url = new URL(
+		`${WEBUI_API_BASE_URL}/files/${encodeURIComponent(fileId)}/content`,
+		window.location.origin
+	);
+	return appendAuthToken(url);
+};
+
 export const getAssetThumbUrl = (id: string, w: number = 512) => {
 	const url = new URL(
 		`${WEBUI_API_BASE_URL}/graph/assets/${encodeURIComponent(assetPathId(id))}/thumb`,

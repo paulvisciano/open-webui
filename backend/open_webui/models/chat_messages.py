@@ -933,6 +933,25 @@ class ChatMessageTable:
             result = await db.execute(stmt)
             return {row.user_id: row.count for row in result.all()}
 
+    async def get_message_counts_by_chat_ids(
+        self,
+        chat_ids: list[str],
+        db: Optional[AsyncSession] = None,
+    ) -> dict[str, int]:
+        if not chat_ids:
+            return {}
+        async with get_async_db_context(db) as db:
+            stmt = (
+                select(ChatMessage.chat_id, func.count(ChatMessage.id).label('count'))
+                .where(
+                    ChatMessage.chat_id.in_(chat_ids),
+                    ChatMessage.role.in_(('user', 'assistant')),
+                )
+                .group_by(ChatMessage.chat_id)
+            )
+            result = await db.execute(stmt)
+            return {row.chat_id: int(row.count) for row in result.all()}
+
     async def get_message_count_by_chat(
         self,
         start_date: Optional[int] = None,

@@ -33,6 +33,7 @@ from open_webui.graph.sources import (
     set_online,
 )
 from open_webui.internal.db import get_async_session
+from open_webui.models.chat_messages import ChatMessages
 from open_webui.models.chats import Chats
 from open_webui.services import lightrag_service
 from open_webui.utils.auth import get_verified_user
@@ -243,7 +244,7 @@ def _enqueue_scan(source_id: str) -> None:
     task.add_done_callback(_clear)
 
 
-def _chat_to_kgnode(chat) -> dict:
+def _chat_to_kgnode(chat, message_count: int = 0, images: list | None = None) -> dict:
     """Convert a ChatTitleIdResponse (or row) to the KGNode format the frontend expects.
 
     KGNode shape: ``{ id, labels, properties }`` where ``labels`` is a list of
@@ -257,6 +258,9 @@ def _chat_to_kgnode(chat) -> dict:
         'title': title,
         'created_at': created_at,
         'updated_at': updated_at,
+        'message_count': int(message_count or 0),
+        'image_count': len(images or []),
+        'images': images or [],
     }
 
     pinned = getattr(chat, 'pinned', None)
@@ -280,6 +284,31 @@ def _chat_to_kgnode(chat) -> dict:
         'labels': ['Conversation'],
         'properties': properties,
     }
+
+
+async def _conversation_nodes_for_user(
+    user_id: str,
+    db: AsyncSession,
+    *,
+    skip: int = 0,
+    limit: int = 500,
+    filter: dict | None = None,
+) -> list[dict]:
+    chats = await Chats.get_chat_list_by_user_id(
+        user_id,
+        include_archived=False,
+        filter=filter,
+        skip=skip,
+        limit=limit,
+        db=db,
+    )
+    chat_ids = [chat.id for chat in chats]
+    counts = await ChatMessages.get_message_counts_by_chat_ids(chat_ids, db=db)
+    images_by_chat = await Chats.get_image_files_by_chat_ids(chat_ids, db=db)
+    return [
+        _chat_to_kgnode(chat, counts.get(chat.id, 0), images_by_chat.get(chat.id, []))
+        for chat in chats
+    ]
 
 
 async def _get_lightrag_nodes_edges() -> tuple[list[dict], list[dict]]:
@@ -340,15 +369,7 @@ async def get_graph(
     edges: list[dict] = []
 
     try:
-        chats = await Chats.get_chat_list_by_user_id(
-            user.id,
-            include_archived=False,
-            skip=0,
-            limit=500,
-            db=db,
-        )
-        for chat in chats:
-            nodes.append(_chat_to_kgnode(chat))
+        nodes.extend(await _conversation_nodes_for_user(user.id, db))
     except Exception as exc:
         log.warning('Failed to load conversations for graph: %s', exc)
 
@@ -373,14 +394,7 @@ async def get_conversations(
     which is what the frontend conversation provider expects.
     """
     try:
-        chats = await Chats.get_chat_list_by_user_id(
-            user.id,
-            include_archived=False,
-            skip=0,
-            limit=500,
-            db=db,
-        )
-        return [_chat_to_kgnode(chat) for chat in chats]
+        return await _conversation_nodes_for_user(user.id, db)
     except Exception as exc:
         log.exception('Failed to load conversations: %s', exc)
         raise HTTPException(
@@ -691,14 +705,7 @@ async def get_canvas(
 
     conversations: list[dict] = []
     try:
-        chats = await Chats.get_chat_list_by_user_id(
-            user.id,
-            include_archived=False,
-            skip=0,
-            limit=500,
-            db=db,
-        )
-        conversations = [_chat_to_kgnode(chat) for chat in chats]
+        conversations = await _conversation_nodes_for_user(user.id, db)
     except Exception as exc:
         log.warning('Failed to load conversations for canvas: %s', exc)
 

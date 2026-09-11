@@ -2642,6 +2642,40 @@ class ChatTable:
         except Exception:
             return None
 
+    async def get_image_files_by_chat_ids(
+        self, chat_ids: list[str], db: AsyncSession | None = None
+    ) -> dict[str, list[dict]]:
+        if not chat_ids:
+            return {}
+        from open_webui.models.files import File
+
+        async with get_async_db_context(db) as session:
+            result = await session.execute(
+                select(ChatFile.chat_id, File.id, File.filename, File.meta, File.created_at)
+                .join(File, File.id == ChatFile.file_id)
+                .where(ChatFile.chat_id.in_(chat_ids))
+                .order_by(ChatFile.created_at.asc())
+            )
+            rows = result.all()
+
+        grouped: dict[str, list[dict]] = {chat_id: [] for chat_id in chat_ids}
+        for chat_id, file_id, filename, meta, created_at in rows:
+            meta_dict = meta if isinstance(meta, dict) else {}
+            content_type = meta_dict.get('content_type')
+            name = filename or meta_dict.get('name') or ''
+            is_image = isinstance(content_type, str) and content_type.startswith('image/')
+            if not is_image and not re.search(r'\.(png|jpe?g|gif|webp|heic|bmp|svg)$', str(name), re.I):
+                continue
+            grouped.setdefault(chat_id, []).append(
+                {
+                    'id': file_id,
+                    'filename': name,
+                    'content_type': content_type if isinstance(content_type, str) else 'image/*',
+                    'created_at': created_at,
+                }
+            )
+        return grouped
+
     async def get_chat_files_by_chat_id_and_message_id(
         self, chat_id: str, message_id: str, db: AsyncSession | None = None
     ) -> list[ChatFileModel]:
