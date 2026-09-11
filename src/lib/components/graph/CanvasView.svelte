@@ -36,7 +36,7 @@
 
   /** Default pinch-zoom sensitivity. The KG config store exposed this via a
    *  settings drawer; OWUI has no such UI yet so we use a fixed constant. */
-  const DEFAULT_PINCH_SENSITIVITY = 4.8;
+  const DEFAULT_PINCH_SENSITIVITY = 7.2;
 
   let loadError = $state<string | null>(null);
   let loaded = $state(false);
@@ -541,18 +541,6 @@
   function handleInspectKey(e: KeyboardEvent): void {
     if (e.key === 'Escape' && lightbox) {
       closeLightbox();
-      return;
-    }
-    if (timelineOpen) return;
-    const target = e.target as HTMLElement | null;
-    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
-    if (!lightbox && !focusedNodeId) return;
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
-      e.preventDefault();
-      stepWall(1);
-    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
-      e.preventDefault();
-      stepWall(-1);
     }
   }
 

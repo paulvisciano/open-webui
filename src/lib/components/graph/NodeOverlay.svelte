@@ -937,14 +937,6 @@
         } else {
           handleClose();
         }
-      } else if (e.key === 'ArrowLeft') {
-        e.preventDefault();
-        e.stopPropagation();
-        navigateByOffset(-1);
-      } else if (e.key === 'ArrowRight') {
-        e.preventDefault();
-        e.stopPropagation();
-        navigateByOffset(1);
       }
     }
     window.addEventListener('keydown', onKeydown);
