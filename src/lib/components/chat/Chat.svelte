@@ -125,8 +125,10 @@
 	import XMark from '../icons/XMark.svelte';
 	import GarbageBin from '../icons/GarbageBin.svelte';
 	import Pencil from '../icons/Pencil.svelte';
+	import Share from '../icons/Share.svelte';
 	import EmbeddedChatHistoryDropdown from './EmbeddedChatHistoryDropdown.svelte';
 	import InputVariablesModal from './MessageInput/InputVariablesModal.svelte';
+	import ShareChatModal from './ShareChatModal.svelte';
 
 	export let chatIdProp = '';
 	export let embedded = false;
@@ -325,8 +327,19 @@
 	$: contextUsage = getContextUsage() ?? (contextCompactionEnabled ? serverContextUsage : null);
 	$: embeddedHeaderTitle = embeddedTitle || $chatTitle || $i18n.t('Chat');
 	$: embeddedChatId = $chatId || chatIdProp;
+	$: canShareEmbedded =
+		!!embeddedChatId &&
+		!!history?.currentId &&
+		!readOnly &&
+		!$temporaryChatEnabled &&
+		($user?.role === 'admin' || ($user?.permissions?.chat?.share ?? true));
+	$: embeddedHeaderBtnClass = $mobile
+		? 'embedded-header-btn inline-flex size-11 items-center justify-center rounded-md text-gray-500 transition hover:text-gray-900 dark:hover:text-white'
+		: 'embedded-header-btn inline-flex items-center justify-center rounded-md p-2 text-gray-500 transition hover:text-gray-900 dark:hover:text-white';
+	$: embeddedHeaderIconClass = $mobile ? 'size-5' : 'size-4';
 
 	let renamingEmbedded = false;
+	let showShareChatModal = false;
 	let embeddedRenameDraft = '';
 	let embeddedRenameInput: HTMLInputElement | undefined;
 
@@ -4240,6 +4253,10 @@
 
 <audio id="audioElement" style="display: none;"></audio>
 
+{#if embedded}
+	<ShareChatModal bind:show={showShareChatModal} chatId={embeddedChatId} />
+{/if}
+
 {#if getChatVariablesForm(selectedModelIds, chatVariables, $models).conflicts.length > 0}
 	<Modal bind:show={showChatVariablesModal} size="md">
 		<div>
@@ -4370,7 +4387,9 @@
 					<FilesOverlay show={dragged} />
 					{#if embedded}
 						<div
-							class="h-10 shrink-0 flex items-center justify-between gap-2 border-b border-gray-50/80 px-3 text-gray-700 dark:border-gray-850/40 dark:text-gray-200"
+							class="embedded-chat-header {$mobile
+								? 'h-12'
+								: 'h-10'} shrink-0 flex items-center justify-between gap-2 border-b border-gray-50/80 px-3 text-gray-700 dark:border-gray-850/40 dark:text-gray-200"
 						>
 							<div class="flex min-w-0 items-center gap-2">
 								{#if renamingEmbedded}
@@ -4404,12 +4423,12 @@
 									/>
 								{/if}
 							</div>
-							<div class="flex items-center gap-1">
+							<div class="flex items-center gap-0.5">
 							{#if embeddedChatId}
 								<Tooltip content={$i18n.t('Rename')} placement="bottom">
 									<button
 										type="button"
-										class="rounded-md p-2 text-gray-500 transition hover:text-gray-900 dark:hover:text-white"
+										class={embeddedHeaderBtnClass}
 										on:click={async (e) => {
 											e.preventDefault();
 											e.stopPropagation();
@@ -4417,7 +4436,23 @@
 										}}
 										aria-label={$i18n.t('Rename')}
 									>
-										<Pencil className="size-4" strokeWidth="1.5" />
+										<Pencil className={embeddedHeaderIconClass} strokeWidth="1.5" />
+									</button>
+								</Tooltip>
+							{/if}
+							{#if canShareEmbedded}
+								<Tooltip content={$i18n.t('Share')} placement="bottom">
+									<button
+										type="button"
+										class={embeddedHeaderBtnClass}
+										on:click={(e) => {
+											e.preventDefault();
+											e.stopPropagation();
+											showShareChatModal = !showShareChatModal;
+										}}
+										aria-label={$i18n.t('Share')}
+									>
+										<Share className={embeddedHeaderIconClass} strokeWidth="1.5" />
 									</button>
 								</Tooltip>
 							{/if}
@@ -4425,7 +4460,7 @@
 								<Tooltip content={$i18n.t('Delete')} placement="bottom">
 									<button
 										type="button"
-										class="rounded-md p-2 text-gray-500 transition hover:text-gray-900 dark:hover:text-white"
+										class={embeddedHeaderBtnClass}
 										on:click={async (e) => {
 											e.preventDefault();
 											e.stopPropagation();
@@ -4436,14 +4471,14 @@
 										}}
 										aria-label={$i18n.t('Delete')}
 									>
-										<GarbageBin className="size-4" strokeWidth="1.5" />
+										<GarbageBin className={embeddedHeaderIconClass} strokeWidth="1.5" />
 									</button>
 								</Tooltip>
 							{/if}
 								<Tooltip content={$i18n.t('Close')} placement="bottom">
 									<button
 										type="button"
-										class="rounded-md p-2 text-gray-500 transition hover:text-gray-900 dark:hover:text-white"
+										class={embeddedHeaderBtnClass}
 										on:click={(e) => {
 											e.preventDefault();
 											e.stopPropagation();
@@ -4451,7 +4486,7 @@
 										}}
 										aria-label={$i18n.t('Close')}
 									>
-										<XMark className="size-4" strokeWidth="2" />
+										<XMark className={embeddedHeaderIconClass} strokeWidth="2" />
 									</button>
 								</Tooltip>
 							</div>
