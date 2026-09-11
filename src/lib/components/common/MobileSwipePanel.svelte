@@ -10,6 +10,7 @@
 	export let open = false;
 	export let enabled = false;
 	export let width = 245;
+	export let side: 'left' | 'right' = 'left';
 	export let onOpenChange: (open: boolean) => void = () => {};
 
 	let mounted = false;
@@ -33,8 +34,9 @@
 	$: panelWidth = width || 245;
 	$: progress = enabled ? Math.max(0, Math.min(1, swipeProgress)) : 1;
 	$: visible = open || (enabled && mounted);
+	$: panelOffset = side === 'right' ? (1 - progress) * 100 : (progress - 1) * 100;
 	$: panelStyle = enabled
-		? `transform: translateX(${(progress - 1) * 100}%); transition: ${
+		? `transform: translateX(${panelOffset}%); transition: ${
 				settling ? `transform ${SETTLE_MS}ms cubic-bezier(0.22, 1, 0.36, 1)` : 'none'
 			};`
 		: '';
@@ -178,7 +180,11 @@
 		const x = touch.clientX;
 
 		if (!open) {
-			if (x < UNSAFE_EDGE) {
+			if (side === 'right') {
+				if (typeof window === 'undefined' || x < window.innerWidth - UNSAFE_EDGE * 4) {
+					return;
+				}
+			} else if (x < UNSAFE_EDGE) {
 				return;
 			}
 
@@ -219,8 +225,11 @@
 				return;
 			}
 
-			if ((direction === 'open' && dx > 0) || (direction === 'close' && dx < 0)) {
-				swipeProgress = Math.max(0, Math.min(1, startProgress + dx / panelWidth));
+			const opening = side === 'right' ? dx < 0 : dx > 0;
+			const closing = side === 'right' ? dx > 0 : dx < 0;
+			if ((direction === 'open' && opening) || (direction === 'close' && closing)) {
+				const delta = (side === 'right' ? -dx : dx) / panelWidth;
+				swipeProgress = Math.max(0, Math.min(1, startProgress + delta));
 			}
 
 			if (absX < SWIPE_SLOP && absY < SWIPE_SLOP) {
@@ -249,7 +258,8 @@
 		lastX = touch.clientX;
 		lastTime = now;
 
-		swipeProgress = Math.max(0, Math.min(1, startProgress + dx / panelWidth));
+		const delta = (side === 'right' ? -dx : dx) / panelWidth;
+		swipeProgress = Math.max(0, Math.min(1, startProgress + delta));
 	};
 
 	const onTouchEnd = () => {
@@ -264,7 +274,10 @@
 
 		let shouldOpen = direction === 'open' ? swipeProgress > 0.35 : swipeProgress > 0.65;
 
-		if (velocity > FLICK_VELOCITY) {
+		if (side === 'right') {
+			if (velocity < -FLICK_VELOCITY) shouldOpen = true;
+			else if (velocity > FLICK_VELOCITY) shouldOpen = false;
+		} else if (velocity > FLICK_VELOCITY) {
 			shouldOpen = true;
 		} else if (velocity < -FLICK_VELOCITY) {
 			shouldOpen = false;

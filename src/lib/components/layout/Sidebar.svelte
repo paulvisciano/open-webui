@@ -901,7 +901,8 @@
 <MobileSwipePanel
 	open={$showSidebar}
 	enabled={$mobile}
-	width={$sidebarWidth}
+	width={isGraphPage && $mobile ? 420 : $sidebarWidth}
+	side={isGraphPage ? 'right' : 'left'}
 	onOpenChange={(open) => showSidebar.set(open)}
 	let:visible
 	let:progress
@@ -1135,25 +1136,31 @@
 			inert={!$showSidebar}
 			class="h-screen max-h-[100dvh] min-h-screen select-none {$mobile
 				? visible
-					? 'bg-gray-50 dark:bg-gray-950 z-50'
+					? 'bg-gray-50 dark:bg-gray-950 z-[60]'
 					: 'bg-transparent z-0 pointer-events-none'
-				: `bg-gray-50 dark:bg-gray-950 z-50 ${$showSidebar ? '' : 'pointer-events-none'}`} {$isApp
+				: `bg-gray-50 dark:bg-gray-950 z-50 ${$showSidebar ? '' : 'pointer-events-none'}`} {$isApp &&
+			!isGraphPage
 				? `ml-[4.5rem] md:ml-0 `
 				: $mobile
 					? ''
 					: ''} shrink-0 text-gray-700 dark:text-gray-300 text-[0.8125rem] leading-5 fixed top-0 {isGraphPage
 				? 'right-0 graph-sidebar'
-				: 'left-0'} overflow-x-hidden {isGraphPage ? 'flex-none w-0 min-w-0' : ''}
+				: 'left-0'} overflow-x-hidden {isGraphPage && !$mobile ? 'flex-none w-0 min-w-0' : ''}
         "
 			style={$mobile
-				? panelStyle
+				? isGraphPage
+					? `left: 0; right: 0; width: 100%; max-width: 100vw; ${panelStyle}`
+					: panelStyle
 				: isGraphPage
 					? `width: var(--sidebar-width); transform: translateX(${$showSidebar ? '0' : '100%'}); transition: transform 250ms cubic-bezier(0.22, 1, 0.36, 1);`
 					: `width: ${$showSidebar ? 'var(--sidebar-width)' : '0'}; transition: width 250ms cubic-bezier(0.22, 1, 0.36, 1);`}
 			data-state={$showSidebar}
 		>
 			<div
-				class=" my-auto flex flex-col justify-between h-screen max-h-[100dvh] w-[var(--sidebar-width)] overflow-x-hidden scrollbar-hidden z-50 {isGraphPage
+				class=" my-auto flex flex-col justify-between h-screen max-h-[100dvh] overflow-x-hidden scrollbar-hidden z-50 {isGraphPage &&
+				$mobile
+					? 'w-full min-w-0'
+					: 'w-[var(--sidebar-width)]'} {isGraphPage
 					? 'border-s'
 					: 'border-e'} border-gray-50 dark:border-gray-850/30"
 			>
@@ -1789,6 +1796,19 @@
 		#sidebar {
 			will-change: transform;
 			touch-action: pan-y;
+		}
+
+		:global(.graph-sidebar) {
+			left: 0 !important;
+			right: 0 !important;
+			width: 100% !important;
+			max-width: 100vw !important;
+			min-width: 0 !important;
+		}
+
+		:global(.graph-sidebar > div) {
+			width: 100% !important;
+			min-width: 0 !important;
 		}
 	}
 
