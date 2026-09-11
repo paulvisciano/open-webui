@@ -72,7 +72,9 @@
 
 	let voiceActive = $state(false);
 	let voiceStarting = $state(false);
+	let voiceChatVisible = $state(false);
 	let voiceService = $state<VoiceCallService | null>(null);
+	const voiceHidesChat = $derived(voiceActive && !voiceChatVisible);
 	let voiceChatApi: {
 		eventTarget: EventTarget;
 		submitPrompt: (content: string, opts?: Record<string, any>) => Promise<any>;
@@ -227,6 +229,7 @@
 			await voiceService.stop();
 			voiceService = null;
 			voiceActive = false;
+			voiceChatVisible = false;
 		}
 		orbOptionsOpen = false;
 		voiceStarting = true;
@@ -255,8 +258,12 @@
 		try {
 			if (!continueChat) {
 				await startNewChat();
+				voiceChatVisible = false;
 			} else if (!showChatPanel) {
 				await startNewChat();
+				voiceChatVisible = false;
+			} else {
+				voiceChatVisible = true;
 			}
 			await tick();
 			if (!voiceChatApi) {
@@ -287,6 +294,7 @@
 			await audioContext.close();
 			voiceService = null;
 			voiceActive = false;
+			voiceChatVisible = false;
 		} finally {
 			voiceStarting = false;
 		}
@@ -296,11 +304,19 @@
 		await voiceService?.stop();
 		voiceService = null;
 		voiceActive = false;
-		showChatPanel = false;
+		voiceChatVisible = false;
+	};
+
+	const toggleVoiceChatPanel = () => {
+		if (!voiceActive) return;
+		voiceChatVisible = !voiceChatVisible;
 	};
 
 	const closeChatPanel = () => {
-		if (voiceActive) return;
+		if (voiceActive) {
+			voiceChatVisible = false;
+			return;
+		}
 		showChatPanel = false;
 		sheetSnap = 'peek';
 		graphStore.setActiveConversation('');
@@ -453,7 +469,11 @@
 		}
 		if (e.key === 'Escape' && showChatPanel) {
 			if (voiceActive) {
-				endVoiceChat();
+				if (voiceChatVisible) {
+					voiceChatVisible = false;
+				} else {
+					endVoiceChat();
+				}
 			} else {
 				closeChatPanel();
 			}
@@ -493,6 +513,7 @@
 <div
 	class="graph-page absolute inset-0 flex w-full h-screen max-h-[100dvh] overflow-hidden max-w-full"
 	class:is-inspecting={inspecting}
+	class:voice-chat-open={voiceActive && voiceChatVisible}
 >
 	<div
 		class="absolute inset-0"
@@ -711,6 +732,16 @@
 							mode={voiceService?.speaking ? 'user' : voiceService?.assistantSpeaking ? 'assistant' : 'idle'}
 						/>
 					</div>
+					<button
+						class="voice-ctrl {voiceChatVisible ? 'on' : ''}"
+						onclick={toggleVoiceChatPanel}
+						aria-label={voiceChatVisible ? 'Hide conversation' : 'Show conversation'}
+						aria-pressed={voiceChatVisible}
+					>
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.087.16 2.185.283 3.293.369V21l4.184-4.183a1.14 1.14 0 0 1 .778-.332 48.294 48.294 0 0 0 5.83-.399c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z"/>
+						</svg>
+					</button>
 					<button class="voice-stop" onclick={endVoiceChat} aria-label="Stop">Stop</button>
 				{:else}
 					<div class="voice-pulse" aria-hidden="true"></div>
@@ -791,15 +822,15 @@
 			</button>
 	</div>
 
-	{#if showChatPanel && $mobile && !voiceActive}
+	{#if showChatPanel && $mobile && !voiceHidesChat}
 		<button type="button" class="chat-sheet-backdrop" aria-label="Close conversation" onclick={closeChatPanel}></button>
 	{/if}
 
 	{#if showChatPanel}
 		<div
 			bind:this={chatSheetEl}
-			class="chat-side-panel graph-chat-panel flex flex-col z-30 {voiceActive ? 'voice-hide' : ''} {$mobile ? 'chat-sheet' : ''} {sheetSnap === 'full' ? 'sheet-expanded' : ''}"
-			style={voiceActive
+			class="chat-side-panel graph-chat-panel flex flex-col z-30 {voiceHidesChat ? 'voice-hidden' : ''} {$mobile ? 'chat-sheet' : ''} {sheetSnap === 'full' ? 'sheet-expanded' : ''}"
+			style={voiceHidesChat
 				? 'display: none;'
 				: $mobile
 					? ''
@@ -850,6 +881,16 @@
 	.graph-page.is-inspecting .graph-menu-btn {
 		opacity: 0;
 		pointer-events: none;
+	}
+
+	.graph-page.voice-chat-open .graph-toolbar {
+		z-index: 60;
+	}
+
+	@media (min-width: 768px) {
+		.graph-page.voice-chat-open .voice-stage {
+			right: min(480px, 40vw);
+		}
 	}
 
 	.graph-menu-btn {
@@ -1630,6 +1671,11 @@
 	.voice-ctrl.muted {
 		background: oklch(62% 0.2 18 / 80%);
 		color: white;
+	}
+	.voice-ctrl.on {
+		border-color: oklch(82% 0.14 210 / 45%);
+		background: oklch(82% 0.14 210 / 16%);
+		color: oklch(90% 0.02 210);
 	}
 	.voice-ctrl.end-call:hover {
 		background: oklch(62% 0.2 18 / 80%);
