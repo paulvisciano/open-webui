@@ -414,7 +414,7 @@
 
 			{#if edit !== true && !(message?.meta?.internal === true && message?.meta?.type === 'subagent') && !(message?.meta?.internal === true && message?.meta?.type === 'timer')}
 				<div
-					class=" flex {($settings?.chatBubble ?? true)
+					class="buttons flex {($settings?.chatBubble ?? true)
 						? 'justify-end'
 						: 'items-center'}  text-gray-600 dark:text-gray-500"
 				>
@@ -725,3 +725,19 @@
 		</div>
 	</div>
 </div>
+
+<style>
+	@media (max-width: 767px) {
+		.buttons :global(button) {
+			min-width: 44px;
+			min-height: 44px;
+			padding: 10px;
+			touch-action: manipulation;
+		}
+
+		.buttons :global(svg) {
+			width: 1.25rem;
+			height: 1.25rem;
+		}
+	}
+</style>

@@ -1667,4 +1667,18 @@
 		-ms-overflow-style: none; /* IE and Edge */
 		scrollbar-width: none; /* Firefox */
 	}
+
+	@media (max-width: 767px) {
+		.buttons :global(button) {
+			min-width: 44px;
+			min-height: 44px;
+			padding: 10px;
+			touch-action: manipulation;
+		}
+
+		.buttons :global(svg) {
+			width: 1.25rem;
+			height: 1.25rem;
+		}
+	}
 </style>
