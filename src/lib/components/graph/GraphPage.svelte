@@ -431,7 +431,7 @@
 		const target = e.target as HTMLElement;
 		if (
 			target.closest(
-				'.graph-search-host, .graph-search-scrim, .graph-folder-sheet, .graph-folder-backdrop, .graph-menu-btn, .graph-toolbar, .graph-toolbar-search, .chat-collapsed-orb-host, .chat-side-panel, .video-wall-hud, .graph-clock, .flip-cal-dock'
+				'.graph-search-host, .graph-search-scrim, .graph-folder-sheet, .graph-folder-backdrop, .graph-menu-btn, .graph-toolbar, .graph-toolbar-search, .chat-collapsed-orb-host, .chat-side-panel, .video-wall-hud, .graph-clock, .flip-cal-dock, .flip-cal-wrap'
 			)
 		)
 			return;
@@ -533,8 +533,12 @@
 				type="button"
 				id="sidebar-toggle-button"
 				class="graph-menu-btn"
+				data-sidebar-no-gesture
 				aria-label="Open menu"
-				onclick={() => {
+				onpointerdown={(e) => e.stopPropagation()}
+				onpointerup={(e) => e.stopPropagation()}
+				onclick={(e) => {
+					e.stopPropagation();
 					showChatPanel = false;
 					showSidebar.set(true);
 				}}
@@ -706,7 +710,7 @@
 		{/if}
 
 		<GraphSearch bind:open={graphSearchOpen} onselect={openChat} />
-		<div class="graph-toolbar">
+		<div class="graph-toolbar" data-sidebar-no-gesture>
 		{#if voiceStarting || (voiceActive && voiceService)}
 			<div class="voice-dock">
 				{#if voiceService}
@@ -802,7 +806,12 @@
 						onmouseenter={() => { orbCancelClose(); orbOptionsOpen = true; }}
 						onmouseleave={orbScheduleClose}
 					>
-						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+						<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+							<ellipse cx="12" cy="8.2" rx="6.1" ry="6.4" />
+							<path d="M6.4 9.1c.4 4.1 2.5 6.5 5.6 6.5s5.2-2.4 5.6-6.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
+							<rect x="11.15" y="15.2" width="1.7" height="4.4" rx="0.4" />
+							<rect x="8.1" y="19.4" width="7.8" height="1.6" rx="0.5" />
+						</svg>
 					</div>
 				</div>
 		</div>
@@ -812,6 +821,7 @@
 				type="button"
 				class="graph-toolbar-search"
 				data-testid="graph-search"
+				data-sidebar-no-gesture
 				aria-label="Search"
 				onclick={() => (graphSearchOpen = true)}
 			>
@@ -878,7 +888,11 @@
 </div>
 
 <style>
-	.graph-page.is-inspecting .graph-menu-btn {
+	.graph-page.is-inspecting .graph-menu-btn,
+	.graph-page.is-inspecting .graph-toolbar,
+	.graph-page.is-inspecting .graph-toolbar-search,
+	.graph-page.is-inspecting :global(.flip-cal-wrap),
+	.graph-page.is-inspecting :global(.stick-hud) {
 		opacity: 0;
 		pointer-events: none;
 	}
@@ -888,6 +902,9 @@
 	}
 
 	@media (min-width: 768px) {
+		.graph-page.voice-chat-open .graph-toolbar {
+			right: calc(min(480px, 40vw) + 12px);
+		}
 		.graph-page.voice-chat-open .voice-stage {
 			right: min(480px, 40vw);
 		}
@@ -898,9 +915,9 @@
 		top: calc(20px + env(safe-area-inset-top, 0px));
 		right: 0.7rem;
 		z-index: 50;
-		transition: opacity 0.4s ease;
-		width: 40px;
-		height: 40px;
+		transition: opacity 0.9s cubic-bezier(0.22, 1, 0.36, 1) 0.12s;
+		width: 44px;
+		height: 44px;
 		display: flex;
 		align-items: center;
 		justify-content: center;
@@ -1266,61 +1283,90 @@
 
 	.graph-toolbar {
 		position: absolute;
-		left: 50%;
-		right: auto;
+		left: auto;
+		right: calc(16px + 44px + 12px + 118px + 12px + env(safe-area-inset-right, 0px));
 		bottom: calc(0.95rem + env(safe-area-inset-bottom, 0px));
-		transform: translateX(-50%);
+		transform: none;
 		z-index: 41;
 		display: flex;
 		flex-direction: row;
 		align-items: center;
-		gap: 6px;
-		padding: 6px;
-		border-radius: 100px;
-		background: oklch(10% 0.02 255 / 82%);
-		backdrop-filter: blur(24px) saturate(1.5);
-		-webkit-backdrop-filter: blur(24px) saturate(1.5);
-		border: 1px solid oklch(82% 0.14 210 / 28%);
-		box-shadow:
-			0 8px 28px oklch(0% 0 0 / 45%),
-			0 0 0 1px oklch(50% 0.03 255 / 10%);
+		gap: 0;
+		padding: 0;
+		border-radius: 0;
+		background: transparent;
+		backdrop-filter: none;
+		border: 0;
+		box-shadow: none;
 		pointer-events: auto;
-		transition: opacity 0.4s ease;
+		transition: opacity 0.95s cubic-bezier(0.22, 1, 0.36, 1) 0.08s;
 	}
 
 	.graph-toolbar-search {
 		position: absolute;
-		right: calc(16px + 114px + 12px + env(safe-area-inset-right, 0px));
+		right: calc(16px + env(safe-area-inset-right, 0px));
 		bottom: calc(0.95rem + env(safe-area-inset-bottom, 0px));
 		z-index: 41;
 		width: 44px;
 		height: 44px;
 		padding: 0;
-		border: 1px solid oklch(82% 0.14 210 / 28%);
+		border: 0;
 		border-radius: 50%;
-		background: oklch(10% 0.02 255 / 82%);
-		backdrop-filter: blur(24px) saturate(1.5);
-		-webkit-backdrop-filter: blur(24px) saturate(1.5);
+		color: #2a1c12;
+		background:
+			linear-gradient(145deg, #f3e2b0 0%, #d4b45c 16%, #8d6b2c 48%, #c4a056 78%, #5c4518 100%);
 		box-shadow:
-			0 8px 28px oklch(0% 0 0 / 45%),
-			0 0 0 1px oklch(50% 0.03 255 / 10%);
-		color: oklch(82% 0.14 210);
+			inset 0 1px 0 rgba(255, 248, 220, 0.45),
+			inset 0 -1px 0 rgba(40, 24, 12, 0.45),
+			0 10px 22px rgba(0, 0, 0, 0.48);
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		cursor: pointer;
+		transition: opacity 0.9s cubic-bezier(0.22, 1, 0.36, 1) 0.04s, filter 0.2s, transform 0.2s;
+	}
+	.graph-toolbar-search::before {
+		content: '';
+		position: absolute;
+		inset: 5px;
+		border-radius: 50%;
+		background:
+			linear-gradient(180deg, rgba(255, 248, 230, 0.4), transparent 40%),
+			#f4ead8;
+		box-shadow: inset 0 0 0 1px #c4a056;
+		pointer-events: none;
 	}
 	.graph-toolbar-search svg {
-		width: 20px;
-		height: 20px;
+		position: relative;
+		z-index: 1;
+		width: 18px;
+		height: 18px;
+		stroke: #2a1c12;
 	}
 	.graph-toolbar-search:hover {
-		background: oklch(82% 0.14 210 / 12%);
-		border-color: oklch(82% 0.14 210 / 40%);
+		filter: brightness(1.08);
+		transform: translateY(-1px);
 	}
-	@media (max-width: 640px) {
+	.graph-toolbar-search:hover::before {
+		background:
+			linear-gradient(180deg, rgba(255, 248, 230, 0.55), transparent 40%),
+			#f7efe0;
+	}
+	@media (max-width: 767px) {
+		.graph-toolbar {
+			left: calc(50% - 51px - 12px - 48px);
+			right: auto;
+			transform: none;
+		}
 		.graph-toolbar-search {
-			right: calc(16px + 96px + 12px + env(safe-area-inset-right, 0px));
+			left: calc(16px + env(safe-area-inset-left, 0px));
+			right: auto;
+			width: 48px;
+			height: 48px;
+		}
+		.graph-toolbar-search svg {
+			width: 22px;
+			height: 22px;
 		}
 	}
 
@@ -1339,16 +1385,25 @@
 	}
 
 	.graph-toolbar .chat-orb {
-		background: transparent;
-		border-color: transparent;
-		box-shadow: none;
+		background:
+			radial-gradient(circle at 32% 28%, #ffffff 0%, #e8e8e8 16%, #b0b0b0 38%, #7a7a7a 62%, #3a3a3a 100%);
+		border: 1px solid #8d8d8d;
+		box-shadow:
+			inset 0 2px 3px rgba(255, 255, 255, 0.75),
+			inset 0 -4px 8px rgba(0, 0, 0, 0.45),
+			0 10px 20px rgba(0, 0, 0, 0.5);
+		color: #1a1a1a;
 	}
 	.graph-toolbar .chat-orb:hover,
 	.graph-toolbar .chat-collapsed-orb:hover .chat-orb {
-		transform: none;
-		background: oklch(82% 0.14 210 / 12%);
-		border-color: transparent;
-		box-shadow: none;
+		transform: scale(1.06);
+		background:
+			radial-gradient(circle at 32% 28%, #ffffff 0%, #f2f2f2 14%, #c8c8c8 36%, #8a8a8a 62%, #404040 100%);
+		border-color: #c0c0c0;
+		box-shadow:
+			inset 0 2px 3px rgba(255, 255, 255, 0.85),
+			inset 0 -4px 8px rgba(0, 0, 0, 0.4),
+			0 12px 24px rgba(0, 0, 0, 0.55);
 	}
 
 	.chat-collapsed-orb {
@@ -1408,6 +1463,23 @@
 			0 0 96px oklch(82% 0.14 210 / 12%),
 			0 16px 48px oklch(0% 0 0 / 60%);
 		transform: scale(1.08);
+	}
+	.graph-toolbar .chat-orb::before {
+		content: '';
+		position: absolute;
+		inset: 7px;
+		border-radius: 50%;
+		border: 0;
+		animation: none;
+		background: repeating-linear-gradient(
+			180deg,
+			rgba(20, 20, 20, 0.28) 0 1px,
+			transparent 1px 2.5px
+		);
+		opacity: 0.55;
+		pointer-events: none;
+		-webkit-mask-image: radial-gradient(circle, #000 62%, transparent 63%);
+		mask-image: radial-gradient(circle, #000 62%, transparent 63%);
 	}
 	.chat-orb::before {
 		content: '';
@@ -1520,12 +1592,63 @@
 	.graph-chat-panel :global(#note-chat-container) {
 		background: transparent;
 	}
+	.graph-chat-panel :global(.embedded-chat-header),
 	.graph-chat-panel :global(.h-10.shrink-0) {
 		position: relative;
 		z-index: 2;
 		border-color: oklch(82% 0.14 210 / 14%) !important;
 		background: oklch(8% 0.02 260);
 		color: oklch(90% 0.005 250);
+	}
+
+	.chat-sheet :global(.embedded-chat-header) {
+		min-height: 3.25rem;
+	}
+
+	.chat-sheet :global(.embedded-chat-header .font-display) {
+		min-height: 44px;
+	}
+
+	.chat-sheet :global(.embedded-header-btn) {
+		width: 44px;
+		height: 44px;
+		padding: 0;
+		touch-action: manipulation;
+	}
+
+	.chat-sheet :global(.embedded-header-btn svg) {
+		width: 22px;
+		height: 22px;
+	}
+
+	.chat-sheet :global(.buttons button) {
+		min-width: 44px;
+		min-height: 44px;
+		padding: 10px;
+		touch-action: manipulation;
+	}
+
+	.chat-sheet :global(.buttons svg) {
+		width: 20px;
+		height: 20px;
+	}
+
+	.chat-sheet :global(#input-menu-button),
+	.chat-sheet :global(#voice-input-button),
+	.chat-sheet :global(#chat-variables-button) {
+		width: 44px;
+		height: 44px;
+		min-width: 44px;
+		min-height: 44px;
+		padding: 0;
+		touch-action: manipulation;
+	}
+
+	.chat-sheet :global(#input-menu-button svg),
+	.chat-sheet :global(#voice-input-button svg),
+	.chat-sheet :global(#chat-variables-button svg) {
+		width: 22px;
+		height: 22px;
 	}
 	.chat-sheet-backdrop {
 		position: absolute;

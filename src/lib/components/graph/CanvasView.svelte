@@ -1411,7 +1411,7 @@
   .lightbox {
     position: fixed;
     inset: 0;
-    z-index: 80;
+    z-index: 120;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1419,7 +1419,7 @@
     background: oklch(4% 0.01 260 / 92%);
     backdrop-filter: blur(16px);
     -webkit-backdrop-filter: blur(16px);
-    transition: background 0.45s ease, opacity 0.45s ease;
+    transition: background 0.8s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.8s cubic-bezier(0.22, 1, 0.36, 1);
   }
   .lightbox.is-leaving {
     background: oklch(4% 0.01 260 / 0%);
@@ -1427,7 +1427,12 @@
   }
   @media (max-width: 720px) {
     .lightbox {
-      padding: 24px 16px 168px;
+      padding: calc(12px + env(safe-area-inset-top, 0px)) 12px calc(12px + env(safe-area-inset-bottom, 0px));
+    }
+    .lightbox-media {
+      max-width: 100%;
+      max-height: 100%;
+      border-radius: 0;
     }
   }
   .lightbox-media {
@@ -1508,6 +1513,16 @@
   @keyframes overlay-fade-in {
     from { opacity: 0; }
     to { opacity: 1; }
+  }
+
+  @media (max-width: 767px) {
+    .navigate-popover {
+      left: 50%;
+      right: auto;
+      transform: translateX(-50%);
+      bottom: calc(0.95rem + 132px + env(safe-area-inset-bottom, 0px));
+      width: min(240px, calc(100vw - 112px));
+    }
   }
 
   /* ── Timeline pill (collapsed date label, always visible) ── */
