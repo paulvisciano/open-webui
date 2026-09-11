@@ -31,11 +31,12 @@
   import { dateFromProperties, loadPhotoExif, peekExif, plaqueFromExif, type PlaqueInfo } from './exif';
   import { wallNeighborId } from './renderer/wall-nav';
   import { hoverCaption } from './hover-caption';
-  import { getAssetFileUrl } from '$lib/apis/graph';
+  import { getAssetFileUrl, getChatFileUrl } from '$lib/apis/graph';
+  import { isChatImageNode } from './renderer/Layout';
 
   /** Default pinch-zoom sensitivity. The KG config store exposed this via a
    *  settings drawer; OWUI has no such UI yet so we use a fixed constant. */
-  const DEFAULT_PINCH_SENSITIVITY = 2.6;
+  const DEFAULT_PINCH_SENSITIVITY = 4.8;
 
   let loadError = $state<string | null>(null);
   let loaded = $state(false);
@@ -305,6 +306,20 @@
     }
   }
 
+  function mediaFileUrl(id: string): string {
+    const kg = graphStore.nodes.find((n) => n.id === id);
+    if (isChatImageNode(kg ?? { id })) {
+      const fileId =
+        typeof kg?.properties?.file_id === 'string'
+          ? kg.properties.file_id
+          : id.startsWith('chatfile:')
+            ? id.slice('chatfile:'.length)
+            : id;
+      return getChatFileUrl(fileId);
+    }
+    return getAssetFileUrl(id);
+  }
+
   function openLightbox(id: string): void {
     const sm = sceneManager;
     const cn = sm?.getCanvasNode(id);
@@ -323,7 +338,7 @@
     focusedNodeId = id;
     lightbox = {
       nodeId: id,
-      url: getAssetFileUrl(id),
+      url: mediaFileUrl(id),
       kind: isVideo ? 'video' : 'photo',
       alt: dateFromProperties(kg?.properties) || (isVideo ? 'Video' : 'Photo'),
       origin: sm?.getPlaneScreenRect(id) ?? photoPlaqueRect,
