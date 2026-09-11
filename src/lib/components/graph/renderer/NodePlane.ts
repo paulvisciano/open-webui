@@ -17,7 +17,6 @@ import {
   HALL_DEPTH_FADE_START,
   HALL_RENDER_DISTANCE_Z,
   INVIS_THRESHOLD,
-  SEARCH_DIM,
   LOD_FULL_CHEBY,
   LOD_FULL_DEPTH,
   LOD_FULL_DEPTH_HYSTERESIS,
@@ -29,8 +28,6 @@ import { getProvider } from './NodeKindProvider';
 import './providers'; // side-effect: registers all providers so getProvider works
 import { isChatImageNode } from './Layout';
 import type { CanvasNode } from './types';
-import { searchHighlight } from './search-highlight-flag';
-import { isSearchMatch } from '../search-match';
 
 /** Lerp factor for smoothing current opacity toward the per-frame target. */
 const OPACITY_LERP = 0.18;
@@ -260,10 +257,6 @@ export class NodePlane {
         : Math.max(0, 1 - (absDepth - fadeStart) / Math.max(fadeEnd - fadeStart, 0.0001));
 
     let targetOpacity = Math.min(gridFade, onWall ? depthFade : depthFade * depthFade);
-    const matchIds = searchHighlight.matchIds;
-    if (matchIds !== null && !isSearchMatch(matchIds, this._node.id)) {
-      targetOpacity *= SEARCH_DIM;
-    }
 
     this._currentOpacity += (targetOpacity - this._currentOpacity) * OPACITY_LERP;
 

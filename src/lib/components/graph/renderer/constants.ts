@@ -69,17 +69,11 @@ export const ZOOM_FACTOR_MAX = 2.0;
 /** Divisor for basePos.z → zoomFactor. */
 export const ZOOM_FACTOR_DIVISOR = 50;
 
-/** Oposity below which a plane is considered invisible (mesh.visible = false). */
-export const INVIS_THRESHOLD = 0.01;
+  /** Oposity below which a plane is considered invisible (mesh.visible = false). */
+  export const INVIS_THRESHOLD = 0.01;
 
-/**
- * Opacity multiplier for nodes that miss the active canvas search.
- * Matches keep their depth/grid fade; empty query leaves this unused.
- */
-export const SEARCH_DIM = 0.18;
-
-/**
- * Source-offline vanish duration (ms). Ease-out cubic on mesh opacity.
+  /**
+   * Source-offline vanish duration (ms). Ease-out cubic on mesh opacity.
  * Band is 400–700ms; 550 sits in the middle and stays frame-rate stable
  * unlike the per-frame `OPACITY_LERP` used for camera/chunk fade-in.
  */

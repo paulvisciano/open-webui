@@ -4,7 +4,6 @@
 	import { conversationOverlay } from './renderer/conversation-overlay-flag';
 	import { graphStore } from './stores/graph.svelte';
 	import { isSearchMatch } from './search-match';
-	import { SEARCH_DIM } from './renderer/constants';
 	import type { ConversationCard } from './conversation-card';
 
 	let {
@@ -38,11 +37,6 @@
 		void graphStore.searchQuery;
 		return graphStore.searchMatchIds;
 	});
-
-	function searchOpacity(id: string): number {
-		if (matchIds === null) return 1;
-		return isSearchMatch(matchIds, id) ? 1 : SEARCH_DIM;
-	}
 
 	function formatMeta(properties: Record<string, unknown>): string {
 		const raw = properties.createdAt ?? properties.created_at;
@@ -184,7 +178,7 @@
 			type="button"
 			class="month-card"
 			class:search-hit={isSearchMatch(matchIds, c.chatId)}
-			style="left: {c.cx}px; top: {c.cy}px; z-index: {c.z}; opacity: {searchOpacity(c.chatId)}; transform: translate(-50%, -50%) scale({c.scale});"
+			style="left: {c.cx}px; top: {c.cy}px; z-index: {c.z}; transform: translate(-50%, -50%) scale({c.scale});"
 			onclick={() => onselectconversation(c.chatId)}
 			onmousemove={onCardMove}
 			onmouseleave={() => (tipOn = false)}
