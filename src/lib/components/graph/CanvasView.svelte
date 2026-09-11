@@ -393,24 +393,25 @@
           return;
         }
         const isVideo = cn?.kind === 'video' || kg?.properties?.kind === 'video';
+        const isPhoto = cn?.kind === 'photo' || kg?.properties?.kind === 'photo';
         if (isVideo) {
+          if (focusedNodeId === nodeId) {
+            openLightbox(nodeId);
+            return;
+          }
           focusVideoOnWall(nodeId);
+          return;
+        }
+        if (isPhoto) {
+          if (focusedNodeId === nodeId) {
+            openLightbox(nodeId);
+            return;
+          }
+          focusMediaOnWall(nodeId);
           return;
         }
         if (!galleryFocus) {
           focusMediaOnWall(nodeId);
-          return;
-        }
-        const nodeYaw = cn?.yaw ?? 0;
-        let yawDelta = Math.abs(nodeYaw - sm.lookYaw);
-        if (yawDelta > Math.PI) yawDelta = Math.abs(yawDelta - 2 * Math.PI);
-        if (yawDelta > 0.4) {
-          focusMediaOnWall(nodeId);
-          return;
-        }
-        const isPhoto = cn?.kind === 'photo' || kg?.properties?.kind === 'photo';
-        if (isPhoto || isVideo) {
-          openLightbox(nodeId);
           return;
         }
         overlayOrigin = sm.getPlaneScreenRect(nodeId);
