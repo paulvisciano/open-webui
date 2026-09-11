@@ -215,8 +215,30 @@ const CONV_AISLE_X = 90;
 const CONV_HELIX_Y = 120;
 const CONV_PITCH_Z = 220;
 const CONV_GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+const CONV_ASPECT_MIN = 1.4;
+const CONV_ASPECT_SPAN = 0.16;
+const CONV_HEIGHT_MIN = 70;
+const CONV_HEIGHT_MAX = 108;
+const CONV_LENGTH_REF = 64;
 
 const WALL_KINDS = new Set(['photo', 'pdf', 'document', 'video', 'audio']);
+const CLUSTER_PITCH_Y = 78;
+const CLUSTER_PITCH_Z = 98;
+const CLUSTER_COL_SPAN = 2;
+const CLUSTER_SLOTS: ReadonlyArray<readonly [number, number]> = [
+  [-0.78, 1.1],
+  [0.84, 1.16],
+  [-1.22, 0.26],
+  [1.26, -0.2],
+  [-0.72, -1.12],
+  [0.88, -1.04],
+  [0.08, 1.28],
+  [-0.06, -1.26],
+  [-1.32, 1.08],
+  [1.34, 1.12],
+  [-1.3, -1.1],
+  [1.36, -1.06],
+];
 
 /** True if the node belongs on the library wall, not the conversation cluster. */
 export function isLibraryWallNode(
@@ -226,6 +248,25 @@ export function isLibraryWallNode(
   if (kind === 'conversation') return false;
   if (isLocalAssetNode(node)) return true;
   return WALL_KINDS.has(kind);
+}
+
+export function isChatImageNode(node: {
+  id?: string;
+  properties?: Record<string, unknown>;
+}): boolean {
+  if ((node.id ?? '').startsWith('chatfile:')) return true;
+  return node.properties?.chat_image === true;
+}
+
+function conversationIdOf(node: { properties?: Record<string, unknown> }): string | null {
+  const cid = node.properties?.conversation_id;
+  return typeof cid === 'string' && cid.length > 0 ? cid : null;
+}
+
+function conversationImageCount(props?: Record<string, unknown>): number {
+  const raw = props?.image_count ?? props?.imageCount;
+  if (typeof raw === 'number' && Number.isFinite(raw)) return Math.max(0, raw);
+  return Array.isArray(props?.images) ? props.images.length : 0;
 }
 
 /**
@@ -283,6 +324,24 @@ function hashStr(s: string): number {
 function seededRandom(seed: number): number {
   const x = Math.sin(seed * 9999) * 10000;
   return x - Math.floor(x);
+}
+
+function conversationMessageCount(props?: Record<string, unknown>): number {
+  const raw = props?.message_count ?? props?.messageCount;
+  return typeof raw === 'number' && Number.isFinite(raw) ? Math.max(0, raw) : 0;
+}
+
+function conversationPlaneSize(
+  props: Record<string, unknown> | undefined,
+  seed: number,
+  heightMin: number,
+  heightMax: number,
+): { width: number; height: number } {
+  const count = conversationMessageCount(props);
+  const t = Math.min(1, Math.log2(1 + count) / Math.log2(1 + CONV_LENGTH_REF));
+  const height = heightMin + (heightMax - heightMin) * t;
+  const aspect = CONV_ASPECT_MIN + seededRandom(seed + 13) * CONV_ASPECT_SPAN;
+  return { width: height * aspect, height };
 }
 
 /**
@@ -859,7 +918,8 @@ export function buildCanvasLayout(
   // Photos and conversations pack onto left/right walls by time.
   // gridPosOf stores (col along Z, row along Y).
   // Nodes can appear in multiple buckets, so keys include cellZ.
-  const gridPosOf = new Map<string, { x: number; y: number; worldZ: number; span: number }>();
+  type WallSlot = { x: number; y: number; worldZ: number; span: number; localY?: number };
+  const gridPosOf = new Map<string, WallSlot>();
   const wallMetaOf = new Map<string, { cols: number; rows: number }>();
   const wallSideOf = new Map<string, 'L' | 'R'>();
   const convPosOf = new Map<string, { x: number; y: number; worldZ: number }>();
@@ -876,48 +936,112 @@ export function buildCanvasLayout(
   }
   wallNodes.sort((a, b) => (parseNodeDate(a)?.getTime() ?? 0) - (parseNodeDate(b)?.getTime() ?? 0));
 
+  const photosByConvo = new Map<string, KGNode[]>();
+  for (const n of wallNodes) {
+    if (classifyKind(n) !== 'photo') continue;
+    const cid = conversationIdOf(n);
+    if (!cid) continue;
+    const arr = photosByConvo.get(cid);
+    if (arr) arr.push(n);
+    else photosByConvo.set(cid, [n]);
+  }
+  const clusteredConvIds = new Set<string>();
+  for (const n of wallNodes) {
+    if (classifyKind(n) !== 'conversation') continue;
+    if ((photosByConvo.get(n.id)?.length ?? 0) > 0) clusteredConvIds.add(n.id);
+  }
+
   type WallCell = { node: KGNode; row: number; span: number };
-  const columns: WallCell[][] = [];
+  type WallSegment =
+    | { type: 'column'; cells: WallCell[] }
+    | { type: 'cluster'; convo: KGNode; photos: KGNode[] };
+
+  const segments: WallSegment[] = [];
   let pendingPhotos: KGNode[] = [];
   let pendingConvos: KGNode[] = [];
   const flushPhotos = () => {
     while (pendingPhotos.length) {
       const slice = pendingPhotos.splice(0, WALL_ROWS);
-      columns.push(slice.map((node, row) => ({ node, row, span: 1 })));
+      segments.push({
+        type: 'column',
+        cells: slice.map((node, row) => ({ node, row, span: 1 })),
+      });
     }
   };
   const flushConvos = () => {
     while (pendingConvos.length) {
       const slice = pendingConvos.splice(0, WALL_ROWS);
-      columns.push(slice.map((node, row) => ({ node, row, span: 1 })));
+      segments.push({
+        type: 'column',
+        cells: slice.map((node, row) => ({ node, row, span: 1 })),
+      });
     }
   };
+  const placed = new Set<string>();
   for (const n of wallNodes) {
+    if (placed.has(n.id)) continue;
     const kind = classifyKind(n);
-    if (kind === 'video') {
+    const convoId = conversationIdOf(n);
+    if (kind === 'conversation' && clusteredConvIds.has(n.id)) {
       flushConvos();
       flushPhotos();
-      columns.push([{ node: n, row: 0, span: WALL_ROWS }]);
+      const photos = photosByConvo.get(n.id) ?? [];
+      segments.push({ type: 'cluster', convo: n, photos });
+      placed.add(n.id);
+      for (const p of photos) placed.add(p.id);
+    } else if (kind === 'photo' && convoId && clusteredConvIds.has(convoId)) {
+      continue;
+    } else if (kind === 'video') {
+      flushConvos();
+      flushPhotos();
+      segments.push({ type: 'column', cells: [{ node: n, row: 0, span: WALL_ROWS }] });
+      placed.add(n.id);
     } else if (kind === 'conversation') {
       flushPhotos();
       pendingConvos.push(n);
+      placed.add(n.id);
     } else {
       flushConvos();
       pendingPhotos.push(n);
+      placed.add(n.id);
     }
   }
   flushConvos();
   flushPhotos();
 
   const sideCols = { L: 0, R: 0 };
-  for (let col = 0; col < columns.length; col++) {
-    const side: 'L' | 'R' = col % 2 === 0 ? 'L' : 'R';
-    const wallCol = Math.floor(col / 2);
-    const worldZ = wallCol * WALL_PITCH_Z;
-    sideCols[side] = wallCol + 1;
-    for (const cell of columns[col]) {
-      gridPosOf.set(cell.node.id, { x: wallCol, y: cell.row, worldZ, span: cell.span });
-      wallSideOf.set(cell.node.id, side);
+  for (let i = 0; i < segments.length; i++) {
+    const side: 'L' | 'R' = i % 2 === 0 ? 'L' : 'R';
+    const seg = segments[i];
+    if (seg.type === 'column') {
+      const wallCol = sideCols[side];
+      const worldZ = wallCol * WALL_PITCH_Z;
+      sideCols[side] += 1;
+      for (const cell of seg.cells) {
+        gridPosOf.set(cell.node.id, { x: wallCol, y: cell.row, worldZ, span: cell.span });
+        wallSideOf.set(cell.node.id, side);
+      }
+    } else {
+      const wallCol = sideCols[side];
+      const worldZ = wallCol * WALL_PITCH_Z + CLUSTER_PITCH_Z;
+      sideCols[side] += CLUSTER_COL_SPAN;
+      gridPosOf.set(seg.convo.id, { x: wallCol, y: 0, worldZ, span: WALL_ROWS, localY: 0 });
+      wallSideOf.set(seg.convo.id, side);
+      for (let p = 0; p < seg.photos.length; p++) {
+        const [dz, dy] = CLUSTER_SLOTS[p % CLUSTER_SLOTS.length];
+        const layer = 1 + Math.floor(p / CLUSTER_SLOTS.length) * 0.55;
+        const photo = seg.photos[p];
+        const jx = (seededRandom(hashStr(photo.id) + 3) - 0.5) * 0.16;
+        const jy = (seededRandom(hashStr(photo.id) + 9) - 0.5) * 0.14;
+        gridPosOf.set(photo.id, {
+          x: wallCol,
+          y: 0,
+          worldZ: worldZ + (dz + jx) * CLUSTER_PITCH_Z * layer,
+          span: 1,
+          localY: (dy + jy) * CLUSTER_PITCH_Y,
+        });
+        wallSideOf.set(photo.id, side);
+      }
     }
   }
   wallMetaOf.set('L', { cols: sideCols.L, rows: WALL_ROWS });
@@ -1041,9 +1165,11 @@ export function buildCanvasLayout(
       localX = CHUNK_SIZE / 2;
       const pitchY = kind === 'conversation' ? CONV_PITCH_Y : WALL_PITCH_Y;
       localY =
-        (grid.span ?? 1) >= WALL_ROWS
-          ? 0
-          : (row - (meta.rows - 1) / 2) * pitchY;
+        grid.localY !== undefined
+          ? grid.localY
+          : (grid.span ?? 1) >= WALL_ROWS
+            ? 0
+            : (row - (meta.rows - 1) / 2) * pitchY;
       const worldZ = grid.worldZ;
       cellZ = Math.floor(worldZ / CHUNK_SIZE);
       localZ = worldZ - cellZ * CHUNK_SIZE;
@@ -1080,16 +1206,16 @@ export function buildCanvasLayout(
           height = colH;
         }
       } else if (kind === 'conversation') {
-        const u = seededRandom(seed + 7);
-        const v = seededRandom(seed + 11);
-        const wiggle = seededRandom(seed + 13);
-        if (u < 0.65) {
-          height = CONV_PITCH_Y * (0.9 + v * 0.06);
-          width = height * (0.72 + wiggle * 0.1);
-        } else {
-          width = WALL_TILE_W * (1.18 + v * 0.22);
-          height = CONV_PITCH_Y * (0.74 + wiggle * 0.08);
-        }
+        const clustered = conversationImageCount(node.properties) > 0;
+        ({ width, height } = conversationPlaneSize(
+          node.properties,
+          seed,
+          clustered ? 50 : 54,
+          clustered ? 66 : 74,
+        ));
+      } else if (isChatImageNode(node)) {
+        width = 80;
+        height = 60;
       } else if (typeof pw === 'number' && typeof ph === 'number' && pw > 0 && ph > 0) {
         const aspect = pw / ph;
         if (aspect >= 1) {
@@ -1108,16 +1234,12 @@ export function buildCanvasLayout(
       height = base;
       width = Math.round(base * aspect);
     } else if (kind === 'conversation') {
-      const u = seededRandom(seed + 7);
-      const v = seededRandom(seed + 11);
-      const wiggle = seededRandom(seed + 13);
-      if (u < 0.65) {
-        height = 158 + v * 22;
-        width = height * (0.68 + wiggle * 0.12);
-      } else {
-        width = 196 + v * 28;
-        height = width * (0.66 + wiggle * 0.1);
-      }
+      ({ width, height } = conversationPlaneSize(
+        node.properties,
+        seed,
+        CONV_HEIGHT_MIN,
+        CONV_HEIGHT_MAX,
+      ));
     } else if (kind === 'document') {
       width = 156;
       height = 172;

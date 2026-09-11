@@ -108,10 +108,59 @@ class GraphStore {
     );
   }
 
+  private isChatImageNode(n: KGNode): boolean {
+    return n.id.startsWith('chatfile:') || n.properties?.chat_image === true;
+  }
+
+  private conversationImageNodes(conv: KGNode): KGNode[] {
+    const images = conv.properties?.images;
+    if (!Array.isArray(images)) return [];
+    const createdAt = typeof conv.properties?.createdAt === 'number' ? conv.properties.createdAt : Date.now();
+    const out: KGNode[] = [];
+    for (const img of images) {
+      if (!img || typeof img !== 'object') continue;
+      const rec = img as Record<string, unknown>;
+      const fileId = typeof rec.id === 'string' ? rec.id : '';
+      if (!fileId) continue;
+      const taken =
+        typeof rec.created_at === 'number' && Number.isFinite(rec.created_at)
+          ? rec.created_at > 1e12
+            ? rec.created_at
+            : rec.created_at * 1000
+          : createdAt;
+      out.push({
+        id: `chatfile:${fileId}`,
+        labels: ['Photo'],
+        properties: {
+          entity_type: 'Photo',
+          chat_image: true,
+          conversation_id: conv.id,
+          file_id: fileId,
+          source_id: fileId,
+          title: typeof rec.filename === 'string' ? rec.filename : fileId,
+          createdAt: taken,
+          taken_at: taken,
+          content_type: rec.content_type,
+          kind: 'photo'
+        }
+      });
+    }
+    return out;
+  }
+
   private toConversationNode(c: KGNode | { id: string; labels?: string[]; properties?: Record<string, any> }): KGNode {
     const p = c.properties ?? {};
     const createdRaw = p.created_at ?? p.createdAt;
     const updatedRaw = p.updated_at ?? p.updatedAt;
+    const countRaw = p.message_count ?? p.messageCount;
+    const messageCount =
+      typeof countRaw === 'number' && Number.isFinite(countRaw) ? Math.max(0, countRaw) : 0;
+    const imageCountRaw = p.image_count ?? p.imageCount;
+    const images = Array.isArray(p.images) ? p.images : [];
+    const imageCount =
+      typeof imageCountRaw === 'number' && Number.isFinite(imageCountRaw)
+        ? Math.max(0, imageCountRaw)
+        : images.length;
     const toMs = (v: unknown): number => {
       if (typeof v !== 'number' || !Number.isFinite(v)) return Date.now();
       return v > 1e12 ? v : v * 1000;
@@ -125,6 +174,9 @@ class GraphStore {
         title: p.title ?? p.name,
         createdAt: toMs(createdRaw),
         updatedAt: toMs(updatedRaw),
+        message_count: messageCount,
+        image_count: imageCount,
+        images,
         isActive: c.id === this.activeConversationId,
         isStreaming: this.streamingConversationIds.has(c.id)
       }
@@ -139,9 +191,10 @@ class GraphStore {
     if (!convs) return;
 
     const convNodes: KGNode[] = convs.map((c: KGNode) => this.toConversationNode(c));
+    const chatImages = convNodes.flatMap((c) => this.conversationImageNodes(c));
 
-    const kept = this.nodes.filter((n) => !this.isConversationNode(n));
-    this.nodes = [...kept, ...convNodes];
+    const kept = this.nodes.filter((n) => !this.isConversationNode(n) && !this.isChatImageNode(n));
+    this.nodes = [...kept, ...convNodes, ...chatImages];
   }
 
   /** Merge library assets + conversations from GET /canvas.
@@ -172,14 +225,17 @@ class GraphStore {
     const rawConvs = canvas.conversations ?? [];
     const convNodes = rawConvs.length > 0 ? rawConvs.map((c) => this.toConversationNode(c)) : null;
 
+    const chatImages = convNodes ? convNodes.flatMap((c) => this.conversationImageNodes(c)) : [];
+
     const kept = this.nodes.filter((n) => {
       if (isLocalAssetNode(n)) return false;
       if (convNodes && this.isConversationNode(n)) return false;
+      if (convNodes && this.isChatImageNode(n)) return false;
       return true;
     });
 
     this.nodes = convNodes
-      ? [...kept, ...assetNodes, ...convNodes]
+      ? [...kept, ...assetNodes, ...convNodes, ...chatImages]
       : [...kept, ...assetNodes];
   }
 

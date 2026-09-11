@@ -117,6 +117,7 @@ export class SceneManager {
   // that and can zoom down toward 0 (oldest). Updated by setNodes.
   private _maxCameraZ = MAX_CAMERA_Z;
   private _minCameraZ = MIN_CAMERA_Z;
+  private _timeStickZ = 0;
   /**
    * Optional tighter Z clamp for the pinch gesture only. When set (by
    * CanvasView to the current time bucket's depth span), pinch zoom stays
@@ -146,6 +147,8 @@ export class SceneManager {
   private _flyElapsed = 0;
   private _lookYaw = 0;
   private _lookPitch = 0;
+  private _peekYaw = 0;
+  private _peekPitch = 0;
   private _yawFrom = 0;
   private _yawTo = 0;
   private _pitchFrom = 0;
@@ -211,7 +214,7 @@ export class SceneManager {
     this._renderer.domElement.style.touchAction = 'none';
 
     this._camera = new THREE.PerspectiveCamera(
-      CAMERA_FOV,
+      SceneManager.IS_TOUCH_DEVICE ? 46 : CAMERA_FOV,
       width / height,
       CAMERA_NEAR,
       CAMERA_FAR_MIN,
@@ -483,6 +486,8 @@ export class SceneManager {
   private centerOnLayout(nodes: CanvasNode[]): void {
     this._lookYaw = 0;
     this._lookPitch = 0;
+    this._peekYaw = 0;
+    this._peekPitch = 0;
     this._yawFrom = 0;
     this._yawTo = 0;
     this._pitchFrom = 0;
@@ -510,12 +515,12 @@ export class SceneManager {
    * velocity so inertia from prior drag/wheel input doesn't fight the tween.
    * Use for the date-pill timeline navigation.
    */
-  flyTo(targetZ: number): void {
+  flyTo(targetZ: number, durationMs = 700): void {
     if (this._disposed) return;
     const clampedZ = Math.max(this._minCameraZ, Math.min(this._maxCameraZ, targetZ));
     const yaw = Math.abs(this._lookYaw) > 0.4 ? this._lookYaw : 0;
     const x = yaw !== 0 ? this._basePos.x : 0;
-    this.beginFly(x, 0, clampedZ, 700, yaw);
+    this.beginFly(x, 0, clampedZ, durationMs, yaw);
   }
 
   flyToXYZ(x: number, y: number, z: number, durationMs = 700): void {
@@ -555,11 +560,24 @@ export class SceneManager {
   private viewDistForNode(node: CanvasNode, plane?: NodePlane): number {
     const vHalf = Math.tan((this._camera.fov * Math.PI) / 360);
     const aspect = Math.max(0.5, this._camera.aspect || 1);
+    const p = node.properties ?? {};
+    const imageCount = typeof p.image_count === 'number' ? p.image_count : 0;
+    const salon =
+      (node.kind === 'conversation' && imageCount > 0) ||
+      p.chat_image === true ||
+      typeof p.conversation_id === 'string';
+    if (salon) {
+      const clusterW = 340;
+      const clusterH = 260;
+      const distH = clusterH / 2 / (vHalf * 0.92);
+      const distW = clusterW / 2 / (vHalf * aspect * 0.92);
+      return Math.min(480, Math.max(220, Math.max(distH, distW)));
+    }
     const w = Math.max(1, plane?.mesh.scale.x ?? node.width);
     const h = Math.max(1, plane?.mesh.scale.y ?? node.height);
-    const fillH = node.kind === 'video' ? 0.56 : 0.78;
-    const fillW = node.kind === 'video' ? 0.48 : 0.55;
-    const cap = node.kind === 'video' ? 280 : 120;
+    const fillH = node.kind === 'video' ? 0.56 : node.kind === 'conversation' ? 0.5 : 0.78;
+    const fillW = node.kind === 'video' ? 0.48 : node.kind === 'conversation' ? 0.4 : 0.55;
+    const cap = node.kind === 'video' ? 280 : node.kind === 'conversation' ? 220 : 120;
     const distH = h / 2 / (vHalf * fillH);
     const distW = w / 2 / (vHalf * aspect * fillW);
     return Math.min(cap, Math.max(28, Math.max(distH, distW)));
@@ -710,6 +728,28 @@ export class SceneManager {
   /** Cancels any active fly-to, leaving the camera wherever it currently sits. */
   cancelFly(): void {
     this._flyTo = null;
+  }
+
+  get isFlying(): boolean {
+    return this._flyTo !== null;
+  }
+
+  /**
+   * Hold an analog stick along the time axis. `zNorm` is -1…1:
+   * negative flies into the past (down the corridor), positive returns toward now.
+   * Pass 0 or `clearTimeStick()` to release.
+   */
+  setTimeStick(zNorm: number): void {
+    const next = Math.max(-1, Math.min(1, zNorm));
+    this._timeStickZ = next;
+    if (next !== 0) {
+      this.cancelFly();
+      this._userMoved = true;
+    }
+  }
+
+  clearTimeStick(): void {
+    this._timeStickZ = 0;
   }
 
   /** Advances the fly-to tween by `deltaMs`. Returns true while flying. */
@@ -1068,12 +1108,13 @@ export class SceneManager {
 
     // Compose final camera position from basePos + drift. Chunk/fade logic
     // uses basePos only so mouse parallax never triggers remounts or pop-in.
+    this.applyWallPeek();
     this._camera.position.set(
       this._basePos.x + this._drift.x,
       this._basePos.y + this._drift.y,
       this._basePos.z,
     );
-    this._camera.rotation.set(this._lookPitch, this._lookYaw, 0);
+    this._camera.rotation.set(this._lookPitch + this._peekPitch, this._lookYaw + this._peekYaw, 0);
 
     if (this._skyTime) this._skyTime.value = now * 0.001;
 
@@ -1201,6 +1242,10 @@ export class SceneManager {
 
   /** Integrates targetVel + scrollAccum into velocity, then velocity into basePos. */
   private applyVelocity(): void {
+    if (this._timeStickZ !== 0) {
+      const cubic = this._timeStickZ * this._timeStickZ * this._timeStickZ;
+      this._targetVel.z += cubic * MAX_VELOCITY;
+    }
     this._targetVel.z += this._scrollAccum;
     this._scrollAccum *= SCROLL_DECAY;
     this._scrollMomentum = 1 + (this._scrollMomentum - 1) * SCROLL_MOMENTUM_DECAY;
@@ -1230,6 +1275,20 @@ export class SceneManager {
 
     this._targetVel.multiplyScalar(VELOCITY_DECAY);
     if (this._targetVel.lengthSq() < 1e-6) this._targetVel.set(0, 0, 0);
+  }
+
+  private applyWallPeek(): void {
+    const looking =
+      this.facingWall &&
+      !this._pointer.down &&
+      !this._pinchActive &&
+      this._flyTo === null;
+    const targetYaw = looking ? this._mouse.x * 0.32 : 0;
+    const targetPitch = looking ? this._mouse.y * 0.22 : 0;
+    this._peekYaw += (targetYaw - this._peekYaw) * 0.14;
+    this._peekPitch += (targetPitch - this._peekPitch) * 0.14;
+    if (Math.abs(this._peekYaw) < 1e-4) this._peekYaw = 0;
+    if (Math.abs(this._peekPitch) < 1e-4) this._peekPitch = 0;
   }
 
   /** Decays leftover camera drift toward origin. No mouse parallax. */

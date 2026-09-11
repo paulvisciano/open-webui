@@ -1,8 +1,8 @@
 import type { KGNode } from '../../constants';
-import { isLocalAssetNode, isPhotoNode } from '../Layout';
+import { isChatImageNode, isLocalAssetNode, isPhotoNode } from '../Layout';
 import type { BuildCtx, CanvasNode } from '../types';
 import type { NodeKindProvider } from '../NodeKindProvider';
-import { getAssetThumbUrl, getImageUrl } from '$lib/apis/graph';
+import { getAssetThumbUrl, getChatFileUrl, getImageUrl } from '$lib/apis/graph';
 
 function photoFilename(node: KGNode): string | null {
 	const p = node.properties ?? {};
@@ -24,6 +24,13 @@ function isLibraryPhoto(node: KGNode): boolean {
 	return isLocalAssetNode(node) && node.properties?.kind === 'photo';
 }
 
+function chatFileIdOf(node: KGNode): string {
+	const fid = node.properties?.file_id;
+	if (typeof fid === 'string' && fid.length > 0) return fid;
+	const id = node.id ?? '';
+	return id.startsWith('chatfile:') ? id.slice('chatfile:'.length) : '';
+}
+
 function sourceIdOf(node: KGNode): string {
 	const sid = node.properties?.source_id;
 	return typeof sid === 'string' ? sid : '';
@@ -35,12 +42,19 @@ export const photoProvider: NodeKindProvider = {
 		return isPhotoNode(node) || isLibraryPhoto(node);
 	},
 	shouldRender(node: KGNode, ctx: BuildCtx): boolean {
+		if (isChatImageNode(node)) return chatFileIdOf(node).length > 0;
 		if (isLocalAssetNode(node)) {
 			return ctx.sourceOnline[sourceIdOf(node)] !== false;
 		}
 		return !isStalePhoto(node);
 	},
 	buildCanvasFields(node: KGNode, ctx: BuildCtx): Partial<CanvasNode> {
+		if (isChatImageNode(node)) {
+			const fileId = chatFileIdOf(node);
+			const url = fileId ? getChatFileUrl(fileId) : undefined;
+			const cached = ctx.photoImages[node.id];
+			return { imageUrl: cached ?? url, fullUrl: url };
+		}
 		if (isLocalAssetNode(node)) {
 			const cached = ctx.photoImages[node.id];
 			const fullUrl = getAssetThumbUrl(node.id, 1024);

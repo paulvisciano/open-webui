@@ -27,6 +27,7 @@ import {
 } from './constants';
 import { getProvider } from './NodeKindProvider';
 import './providers'; // side-effect: registers all providers so getProvider works
+import { isChatImageNode } from './Layout';
 import type { CanvasNode } from './types';
 import { searchHighlight } from './search-highlight-flag';
 import { isSearchMatch } from '../search-match';
@@ -82,6 +83,7 @@ export class NodePlane {
   private _videoTexture: THREE.VideoTexture | null = null;
   private _stillMap: THREE.Texture | null = null;
   private _roundMask: THREE.CanvasTexture | null = null;
+  private _fittedAspect = 0;
 
   /**
    * @param node - the canvas node to render.
@@ -164,6 +166,7 @@ export class NodePlane {
   syncFrom(node: CanvasNode): void {
     if (this._disposed) return;
     const prevKey = this._contentKey(this._node);
+    if (this._node.id !== node.id) this._fittedAspect = 0;
     this._node = node;
     this._applyPose(node);
     if (node.kind === 'conversation' && prevKey !== this._contentKey(node)) {
@@ -295,7 +298,11 @@ export class NodePlane {
     if (this._disposed) return;
     const imgSize = this._imageSize(texture);
     if (imgSize && (this._node.kind === 'photo' || this._node.kind === 'video')) {
-      this._fitNaturalAspect(imgSize.w, imgSize.h);
+      this._fitNaturalAspect(
+        imgSize.w,
+        imgSize.h,
+        isChatImageNode(this._node) ? 88 : undefined,
+      );
     }
     if (this._node.kind === 'video' || this._node.kind === 'photo') {
       try {
@@ -497,7 +504,9 @@ export class NodePlane {
   }
 
   private _applyPose(node: CanvasNode): void {
-    this._mesh.scale.set(node.width, node.height, 1);
+    if (this._fittedAspect <= 0) {
+      this._mesh.scale.set(node.width, node.height, 1);
+    }
     this._mesh.position.set(node.localX, node.localY, node.localZ);
     this._mesh.rotation.y = node.yaw ?? 0;
     const yaw = node.yaw ?? 0;
@@ -546,7 +555,7 @@ export class NodePlane {
   private _createConversationTexture(hovered: boolean, isActive = false, isStreaming = false): THREE.CanvasTexture {
     const aspect = this._node.width > 0 && this._node.height > 0
       ? this._node.width / this._node.height
-      : 3 / 4;
+      : 1.45;
     const long = 1024;
     const canvasW = aspect >= 1 ? long : Math.max(256, Math.round(long * aspect));
     const canvasH = aspect >= 1 ? Math.max(256, Math.round(long / aspect)) : long;
@@ -615,33 +624,42 @@ export class NodePlane {
     ctx.fillStyle = rebateL;
     ctx.fillRect(paperX, paperY, Math.round(paperW * 0.06), paperH);
 
-    const padX = paperX + Math.round(paperW * 0.09);
-    const maxTextWidth = paperW - Math.round(paperW * 0.18);
-    const capH = Math.max(48, Math.round(paperH * 0.12));
+    const landscape = paperW >= paperH;
+    const padX = paperX + Math.round(paperW * (landscape ? 0.08 : 0.09));
+    const maxTextWidth = paperW - Math.round(paperW * (landscape ? 0.16 : 0.18));
+    const capH = Math.max(40, Math.round(paperH * (landscape ? 0.16 : 0.12)));
     const capY = paperY + paperH - capH;
     const artwork = excerpt || title;
-    const artworkTop = paperY + Math.round(paperH * 0.08);
+    const artworkTop = paperY + Math.round(paperH * (landscape ? 0.1 : 0.08));
     const artworkBot = capY - Math.round(paperH * 0.03);
     const artworkH = Math.max(48, artworkBot - artworkTop);
-    const lineGap = 1.12;
+    const lineGap = landscape ? 1.18 : 1.12;
     const words = artwork.split(/\s+/).filter(Boolean);
     const longest = words.reduce((a, b) => (a.length >= b.length ? a : b), 'Ag');
 
-    let fontLo = Math.max(28, Math.round(paperW * 0.07));
-    let fontHi = Math.min(Math.round(artworkH * 0.46), Math.round(paperW * 0.32));
+    let fontLo = Math.max(22, Math.round(paperW * (landscape ? 0.042 : 0.07)));
+    let fontHi = Math.min(
+      Math.round(artworkH * (landscape ? 0.34 : 0.46)),
+      Math.round(paperW * (landscape ? 0.108 : 0.32)),
+    );
     let titleFont = fontLo;
     ctx.textBaseline = 'top';
-    ctx.textAlign = 'left';
+    ctx.textAlign = landscape ? 'center' : 'left';
     for (let i = 0; i < 14; i++) {
       const fontMid = Math.round((fontLo + fontHi) / 2);
       if (fontMid <= fontLo) break;
       ctx.font = `500 ${fontMid}px ${FONT_DISPLAY}`;
       this._setLetterSpacing(ctx, `${Math.round(-0.03 * fontMid)}px`);
-      const fitLines = Math.max(2, Math.min(6, Math.floor(artworkH / (fontMid * lineGap))));
-      const overflow = ctx.measureText(longest).width > maxTextWidth;
-      const fitCount = this._countWrapped(ctx, artwork, maxTextWidth, fitLines);
+      const fitLines = landscape
+        ? 2
+        : Math.max(2, Math.min(6, Math.floor(artworkH / (fontMid * lineGap))));
+      const overflow = landscape
+        ? ctx.measureText(artwork).width > maxTextWidth && ctx.measureText(longest).width > maxTextWidth
+        : ctx.measureText(longest).width > maxTextWidth;
+      const oneLine = ctx.measureText(artwork).width <= maxTextWidth;
+      const fitCount = oneLine ? 1 : this._countWrapped(ctx, artwork, maxTextWidth, fitLines);
       const fitH = fitCount * fontMid * lineGap;
-      if (!overflow && fitH <= artworkH && fitCount > 0) {
+      if (!overflow && fitH <= artworkH && fitCount > 0 && (!landscape || oneLine || fitCount <= 2)) {
         titleFont = fontMid;
         fontLo = fontMid;
       } else {
@@ -653,12 +671,15 @@ export class NodePlane {
     ctx.font = `500 ${titleFont}px ${FONT_DISPLAY}`;
     this._setLetterSpacing(ctx, `${Math.round(-0.03 * titleFont)}px`);
     const titleLineH = Math.round(titleFont * lineGap);
-    const maxLines = Math.max(2, Math.min(6, Math.floor(artworkH / titleLineH)));
-    const lines = Math.max(1, this._countWrapped(ctx, artwork, maxTextWidth, maxLines));
+    const maxLines = landscape ? 2 : Math.max(2, Math.min(6, Math.floor(artworkH / titleLineH)));
+    const oneLine = ctx.measureText(artwork).width <= maxTextWidth;
+    const lines = oneLine ? 1 : Math.max(1, this._countWrapped(ctx, artwork, maxTextWidth, maxLines));
     const blockH = lines * titleLineH;
     const titleY = artworkTop + Math.max(0, Math.round((artworkH - blockH) / 2));
+    const titleX = landscape ? paperX + paperW / 2 : padX;
     ctx.fillStyle = '#24180f';
-    this._drawWrapped(ctx, artwork, padX, titleY, maxTextWidth, titleLineH, maxLines);
+    ctx.textAlign = landscape ? 'center' : 'left';
+    this._drawWrapped(ctx, artwork, titleX, titleY, maxTextWidth, titleLineH, maxLines);
     this._setLetterSpacing(ctx, '0px');
 
     ctx.strokeStyle = pal.caption;
@@ -956,9 +977,10 @@ export class NodePlane {
     return { w, h };
   }
 
-  private _fitNaturalAspect(iw: number, ih: number): void {
+  private _fitNaturalAspect(iw: number, ih: number, spanCap?: number): void {
     const aspect = iw / ih;
     if (!Number.isFinite(aspect) || aspect <= 0) return;
+    if (this._fittedAspect > 0) return;
     if (this._node.kind === 'video') {
       if (aspect >= 1) {
         const w = Math.max(this._node.width, this._node.height * aspect, 72);
@@ -967,14 +989,19 @@ export class NodePlane {
         const h = Math.max(this._node.height, 72);
         this._mesh.scale.set(h * aspect, h, 1);
       }
+      this._fittedAspect = aspect;
       return;
     }
-    const span = Math.max(this._node.width, this._node.height, 72);
+    const span = Math.min(
+      spanCap ?? Number.POSITIVE_INFINITY,
+      Math.max(this._node.width, this._node.height, 72),
+    );
     if (aspect >= 1) {
       this._mesh.scale.set(span, span / aspect, 1);
     } else {
       this._mesh.scale.set(span * aspect, span, 1);
     }
+    this._fittedAspect = aspect;
   }
 
   private _mediaDateLabel(): string {
