@@ -110,6 +110,7 @@ export class SceneManager {
   private _hoveredNodeId: string | null = null;
   private _cursorMode: 'idle' | 'grabbing' | 'pointer' = 'idle';
   private _hall: THREE.Group | null = null;
+  private _hallBackZ = 0;
   private _skyTime: { value: number } | null = null;
 
   // Dynamic camera Z bounds derived from the layout's depth (time) range.
@@ -149,6 +150,8 @@ export class SceneManager {
   private _lookPitch = 0;
   private _peekYaw = 0;
   private _peekPitch = 0;
+  private _peekReady = false;
+  private _peekSnap = true;
   private _yawFrom = 0;
   private _yawTo = 0;
   private _pitchFrom = 0;
@@ -436,7 +439,7 @@ export class SceneManager {
   }
 
   setPinchSensitivity(s: number): void {
-    this._pinchSensitivity = Math.max(0.1, Math.min(6.0, s));
+    this._pinchSensitivity = Math.max(0.1, Math.min(12.0, s));
   }
 
   setPinchZoomBounds(minZ: number | null, maxZ: number | null): void {
@@ -488,6 +491,7 @@ export class SceneManager {
     this._lookPitch = 0;
     this._peekYaw = 0;
     this._peekPitch = 0;
+    this._peekSnap = true;
     this._yawFrom = 0;
     this._yawTo = 0;
     this._pitchFrom = 0;
@@ -498,12 +502,15 @@ export class SceneManager {
       this._basePos.set(0, 0, INITIAL_CAMERA_Z);
       return;
     }
-    let maxBucket = 0;
+    let maxWallZ = -Infinity;
     for (const n of nodes) {
-      const b = Math.floor(n.cellZ / TIME_BUCKET_SPACING);
-      if (b > maxBucket) maxBucket = b;
+      if (!n.yaw) continue;
+      const wz = n.cellZ * CHUNK_SIZE + n.localZ;
+      if (wz > maxWallZ) maxWallZ = wz;
     }
-    const targetZ = maxBucket * TIME_BUCKET_SPACING * CHUNK_SIZE + INITIAL_CAMERA_Z;
+    const targetZ = Number.isFinite(maxWallZ)
+      ? maxWallZ + CHUNK_SIZE * 1.2
+      : INITIAL_CAMERA_Z;
     this._camera.position.set(0, 0, targetZ);
     this._camera.rotation.set(0, 0, 0);
     this._basePos.set(0, 0, targetZ);
@@ -737,6 +744,7 @@ export class SceneManager {
     this._pitchTo = pitchTo;
     this._flyElapsed = 0;
     this._flyDuration = durationMs;
+    this._peekSnap = true;
     this._velocity.set(0, 0, 0);
     this._targetVel.set(0, 0, 0);
     this._scrollAccum = 0;
@@ -1056,6 +1064,10 @@ export class SceneManager {
     const end = new THREE.Mesh(new THREE.PlaneGeometry(wallX * 2, hallH), wallMat.clone());
     end.name = 'galleryEnd';
     end.position.set(0, 8, z0);
+    const back = new THREE.Mesh(new THREE.PlaneGeometry(wallX * 2, hallH), wallMat.clone());
+    back.name = 'galleryBack';
+    back.position.set(0, 8, z1);
+    back.rotation.y = Math.PI;
 
     const floorY = -hallH / 2 + 8;
     const ceilY = hallH / 2 + 8;
@@ -1088,7 +1100,9 @@ export class SceneManager {
 
     this._hall = new THREE.Group();
     this._hall.name = 'galleryHall';
-    this._hall.add(left, right, end, floor, ceiling, stars);
+    this._hallBackZ = z1;
+    this._maxCameraZ = Math.min(this._maxCameraZ, z1 - 36);
+    this._hall.add(left, right, end, floor, ceiling, back, stars);
 
     this._scene.add(this._hall);
   }
@@ -1198,14 +1212,14 @@ export class SceneManager {
   }
 
   private applyFovZoom(delta: number): void {
-    const next = this._camera.fov + delta * 0.035 * this._pinchSensitivity;
-    this._camera.fov = Math.max(28, Math.min(72, next));
+    const next = this._camera.fov + delta * 0.055 * this._pinchSensitivity;
+    this._camera.fov = Math.max(16, Math.min(72, next));
     this._camera.updateProjectionMatrix();
     this._userMoved = true;
   }
 
   private hallInsideX(): number {
-    return CHUNK_SIZE * 1.5 + 6 - 18;
+    return CHUNK_SIZE * 1.5 - 2;
   }
 
   private clampInsideHall(): void {
@@ -1234,7 +1248,7 @@ export class SceneManager {
     const k = this._keys;
     let moved = false;
     const walk = KEYBOARD_SPEED * 2.4;
-    const yaw = this._lookYaw;
+    const yaw = this._lookYaw + this._peekYaw;
     const fx = -Math.sin(yaw);
     const fz = -Math.cos(yaw);
     const rx = Math.cos(yaw);
@@ -1293,6 +1307,8 @@ export class SceneManager {
       && this._pinchActive
       && this._pinchMinZ !== null
       && this._pinchMaxZ !== null
+      && Math.abs(this._peekYaw) < 0.25
+      && Math.abs(this._lookYaw) < 0.25
     ) {
       if (this._basePos.z < this._pinchMinZ) this._basePos.z = this._pinchMinZ;
       if (this._basePos.z > this._pinchMaxZ) this._basePos.z = this._pinchMaxZ;
@@ -1310,6 +1326,12 @@ export class SceneManager {
     const hallway = !this.facingWall;
     const targetYaw = looking ? -this._mouse.x * (hallway ? 3.4 : 3.1) : 0;
     const targetPitch = looking ? this._mouse.y * (hallway ? 2.2 : 2.0) : 0;
+    if (looking && this._peekReady && this._peekSnap) {
+      this._peekYaw = targetYaw;
+      this._peekPitch = targetPitch;
+      this._peekSnap = false;
+      return;
+    }
     const follow = hallway ? 0.22 : 0.2;
     this._peekYaw += (targetYaw - this._peekYaw) * follow;
     this._peekPitch += (targetPitch - this._peekPitch) * follow;
@@ -1362,10 +1384,19 @@ export class SceneManager {
     this.updateCursor();
   };
 
+  private onPointerTrack = (e: PointerEvent): void => {
+    const rect = this._renderer.domElement.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return;
+    this._mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this._mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    this._peekReady = true;
+  };
+
   private onPointerMove = (e: PointerEvent): void => {
     const rect = this._renderer.domElement.getBoundingClientRect();
     this._mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     this._mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    this._peekReady = true;
 
     if (e.pointerType === 'touch') {
       if (this._pointer.down && !this._pinchActive) {
@@ -1462,7 +1493,7 @@ export class SceneManager {
   /** Called by svelte-gestures on each pinch scale change. */
   handlePinchMove(scaleDelta: number): void {
     if (!this._pinchActive) return;
-    this.applyZoomDelta(scaleDelta * 18, true);
+    this.applyZoomDelta(scaleDelta * 52, true);
     this.applyFovZoom(scaleDelta);
   }
 
@@ -1586,6 +1617,7 @@ export class SceneManager {
   private bindEvents(): void {
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
+    window.addEventListener('pointermove', this.onPointerTrack);
     const el = this._renderer.domElement;
     el.addEventListener('pointerdown', this.onPointerDown);
     el.addEventListener('pointermove', this.onPointerMove);
@@ -1600,6 +1632,7 @@ export class SceneManager {
   private unbindEvents(): void {
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
+    window.removeEventListener('pointermove', this.onPointerTrack);
     const el = this._renderer.domElement;
     el.removeEventListener('pointerdown', this.onPointerDown);
     el.removeEventListener('pointermove', this.onPointerMove);
