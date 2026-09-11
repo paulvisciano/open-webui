@@ -540,21 +540,39 @@ export class SceneManager {
     const plane = this._chunkManager.findPlaneByNodeId(nodeId, this._basePos.z);
     const node = plane?.node ?? this._chunkManager.findLayoutNode(nodeId, this._basePos.z);
     if (!node) return;
-    const worldX = node.cellX * CHUNK_SIZE + node.localX;
     const worldZ = node.cellZ * CHUNK_SIZE + node.localZ;
     const viewDist = this.viewDistForNode(node, plane);
+    const worldX = node.cellX * CHUNK_SIZE + node.localX;
     const worldY = node.cellY * CHUNK_SIZE + node.localY;
-    let targetX = worldX;
-    let targetY = worldY;
-    let targetZ = Math.max(this._minCameraZ, worldZ + INITIAL_CAMERA_Z * 0.5);
-    let yawTo = 0;
-    if (node.yaw != null && node.yaw !== 0) {
-      targetX = worldX + Math.sign(node.yaw) * viewDist;
-      targetY = worldY;
-      targetZ = worldZ;
-      yawTo = node.yaw;
+    const wallYaw = node.yaw ?? 0;
+    const onThisWall =
+      wallYaw !== 0 &&
+      Math.abs(Math.sin(this._lookYaw)) > 0.5 &&
+      Math.sign(Math.sin(this._lookYaw)) === Math.sign(Math.sin(wallYaw));
+    if (onThisWall) {
+      this._lookYaw += this._peekYaw;
+      this._lookPitch += this._peekPitch;
+      this._peekYaw = 0;
+      this._peekPitch = 0;
+      const yaw = this._lookYaw;
+      const pitch = this._lookPitch;
+      const cy = Math.cos(pitch);
+      const fx = -Math.sin(yaw) * cy;
+      const fy = Math.sin(pitch);
+      const fz = -Math.cos(yaw) * cy;
+      const dist = Math.max(38, Math.min(viewDist * 0.5, 92));
+      const limit = this.hallInsideX();
+      this.beginFly(
+        Math.max(-limit, Math.min(limit, worldX - fx * dist)),
+        worldY - fy * dist,
+        worldZ - fz * dist,
+        800,
+        yaw,
+        pitch,
+      );
+      return;
     }
-    this.beginFly(targetX, targetY, targetZ, 1600, yawTo, 0);
+    this.beginFly(0, worldY, worldZ, 1100, wallYaw !== 0 ? wallYaw : this._lookYaw, 0);
   }
 
   private viewDistForNode(node: CanvasNode, plane?: NodePlane): number {
@@ -1163,11 +1181,18 @@ export class SceneManager {
     this._userMoved = true;
   }
 
-  private applyZoomDelta(delta: number): void {
+  private applyZoomDelta(delta: number, alongLook = false): void {
     const scale = this.panScale();
-    const mag = delta * ZOOM_FACTOR * 8 * scale * this._pinchSensitivity;
-    const alongView = Math.cos(this._lookYaw) < 0 ? -mag : mag;
-    this._basePos.z += alongView;
+    const mag = -delta * ZOOM_FACTOR * 4 * scale * this._pinchSensitivity;
+    const yaw = this._lookYaw + this._peekYaw;
+    if (alongLook || this.facingWall) {
+      this._basePos.x += -Math.sin(yaw) * mag;
+      this._basePos.z += -Math.cos(yaw) * mag;
+    } else {
+      this._basePos.z += -Math.cos(yaw) * mag;
+      this._basePos.x += (0 - this._basePos.x) * 0.35;
+    }
+    this.clampInsideHall();
     this.clampCorridorPose();
     this._userMoved = true;
   }
@@ -1279,14 +1304,15 @@ export class SceneManager {
 
   private applyWallPeek(): void {
     const looking =
-      this.facingWall &&
       !this._pointer.down &&
       !this._pinchActive &&
       this._flyTo === null;
-    const targetYaw = looking ? this._mouse.x * 0.32 : 0;
-    const targetPitch = looking ? this._mouse.y * 0.22 : 0;
-    this._peekYaw += (targetYaw - this._peekYaw) * 0.14;
-    this._peekPitch += (targetPitch - this._peekPitch) * 0.14;
+    const hallway = !this.facingWall;
+    const targetYaw = looking ? -this._mouse.x * (hallway ? 3.4 : 3.1) : 0;
+    const targetPitch = looking ? this._mouse.y * (hallway ? 2.2 : 2.0) : 0;
+    const follow = hallway ? 0.22 : 0.2;
+    this._peekYaw += (targetYaw - this._peekYaw) * follow;
+    this._peekPitch += (targetPitch - this._peekPitch) * follow;
     if (Math.abs(this._peekYaw) < 1e-4) this._peekYaw = 0;
     if (Math.abs(this._peekPitch) < 1e-4) this._peekPitch = 0;
   }
@@ -1436,6 +1462,7 @@ export class SceneManager {
   /** Called by svelte-gestures on each pinch scale change. */
   handlePinchMove(scaleDelta: number): void {
     if (!this._pinchActive) return;
+    this.applyZoomDelta(scaleDelta * 18, true);
     this.applyFovZoom(scaleDelta);
   }
 
