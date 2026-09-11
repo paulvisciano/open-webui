@@ -547,6 +547,12 @@ export class SceneManager {
     const plane = this._chunkManager.findPlaneByNodeId(nodeId, this._basePos.z);
     const node = plane?.node ?? this._chunkManager.findLayoutNode(nodeId, this._basePos.z);
     if (!node) return;
+    this._lookYaw += this._peekYaw;
+    this._lookPitch += this._peekPitch;
+    this._peekYaw = 0;
+    this._peekPitch = 0;
+    if (this._lookYaw > Math.PI) this._lookYaw -= Math.PI * 2;
+    if (this._lookYaw < -Math.PI) this._lookYaw += Math.PI * 2;
     const worldZ = node.cellZ * CHUNK_SIZE + node.localZ;
     const viewDist = this.viewDistForNode(node, plane);
     const worldX = node.cellX * CHUNK_SIZE + node.localX;
@@ -557,10 +563,6 @@ export class SceneManager {
       Math.abs(Math.sin(this._lookYaw)) > 0.5 &&
       Math.sign(Math.sin(this._lookYaw)) === Math.sign(Math.sin(wallYaw));
     if (onThisWall) {
-      this._lookYaw += this._peekYaw;
-      this._lookPitch += this._peekPitch;
-      this._peekYaw = 0;
-      this._peekPitch = 0;
       const yaw = this._lookYaw;
       const pitch = this._lookPitch;
       const cy = Math.cos(pitch);
@@ -569,14 +571,12 @@ export class SceneManager {
       const fz = -Math.cos(yaw) * cy;
       const dist = Math.max(38, Math.min(viewDist * 0.5, 92));
       const limit = this.hallInsideX();
-      this.beginFly(
-        Math.max(-limit, Math.min(limit, worldX - fx * dist)),
-        worldY - fy * dist,
-        worldZ - fz * dist,
-        800,
-        yaw,
-        pitch,
-      );
+      const x = Math.max(-limit, Math.min(limit, worldX - fx * dist));
+      const y = worldY - fy * dist;
+      const z = worldZ - fz * dist;
+      const travel = Math.hypot(x - this._basePos.x, y - this._basePos.y, z - this._basePos.z);
+      if (travel < 4) return;
+      this.beginFly(x, y, z, Math.max(320, Math.min(1100, 240 + travel * 3)), yaw, pitch);
       return;
     }
     this.beginFly(0, worldY, worldZ, 1100, wallYaw !== 0 ? wallYaw : this._lookYaw, 0);
@@ -739,12 +739,18 @@ export class SceneManager {
     this._flyFrom.copy(this._basePos);
     this._flyTo = new THREE.Vector3(x, y, z);
     this._yawFrom = this._lookYaw;
-    this._yawTo = yawTo;
+    let dyaw = yawTo - this._lookYaw;
+    while (dyaw > Math.PI) dyaw -= Math.PI * 2;
+    while (dyaw < -Math.PI) dyaw += Math.PI * 2;
+    this._yawTo = this._lookYaw + dyaw;
     this._pitchFrom = this._lookPitch;
     this._pitchTo = pitchTo;
     this._flyElapsed = 0;
     this._flyDuration = durationMs;
-    this._peekSnap = true;
+    this._peekSnap = false;
+    this._peekReady = false;
+    this._peekYaw = 0;
+    this._peekPitch = 0;
     this._velocity.set(0, 0, 0);
     this._targetVel.set(0, 0, 0);
     this._scrollAccum = 0;
@@ -794,6 +800,9 @@ export class SceneManager {
       this._flyTo = null;
       this._lookYaw = this._yawTo;
       this._lookPitch = this._pitchTo;
+      this._peekReady = false;
+      this._peekYaw = 0;
+      this._peekPitch = 0;
     }
     return true;
   }
@@ -1320,7 +1329,8 @@ export class SceneManager {
 
   private applyWallPeek(): void {
     const looking =
-      !this._pointer.down &&
+      this._peekReady &&
+      !(this._pointer.down && this._pointer.dragged) &&
       !this._pinchActive &&
       this._flyTo === null;
     const hallway = !this.facingWall;
@@ -1437,7 +1447,7 @@ export class SceneManager {
       if (this._pointer.down && !this._pointer.dragged) {
         // Don't let GraphPage treat a conversation tap as a background dismiss.
         // The actual select is delayed for double-tap detection.
-        if (this.isConversationHit(this.raycast(e))) e.stopPropagation();
+        if (this.raycast(e)) e.stopPropagation();
         this.detectDoubleTap(e.clientX, e.clientY);
       }
       this._pointer.down = false;
@@ -1446,7 +1456,7 @@ export class SceneManager {
     }
     if (this._pointer.down && !this._pointer.dragged) {
       const hit = this.clickRaycast(e);
-      if (this.isConversationHit(hit)) e.stopPropagation();
+      if (hit) e.stopPropagation();
     }
     this._pointer.down = false;
     this.updateCursor();
@@ -1553,10 +1563,6 @@ export class SceneManager {
     const hit = this.raycastAt(clientX, clientY);
     this.onSelectNode?.(hit ?? null);
     return hit;
-  }
-
-  private isConversationHit(nodeId: string | undefined | null): boolean {
-    return !!nodeId && this.getCanvasNode(nodeId)?.kind === 'conversation';
   }
 
   private raycastAt(clientX: number, clientY: number): string | undefined {
