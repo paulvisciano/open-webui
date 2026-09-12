@@ -806,11 +806,11 @@
 						onmouseenter={() => { orbCancelClose(); orbOptionsOpen = true; }}
 						onmouseleave={orbScheduleClose}
 					>
-						<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-							<ellipse cx="12" cy="8.2" rx="6.1" ry="6.4" />
-							<path d="M6.4 9.1c.4 4.1 2.5 6.5 5.6 6.5s5.2-2.4 5.6-6.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
-							<rect x="11.15" y="15.2" width="1.7" height="4.4" rx="0.4" />
-							<rect x="8.1" y="19.4" width="7.8" height="1.6" rx="0.5" />
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+							<rect x="9" y="3" width="6" height="11" rx="3" />
+							<path d="M6.5 11a5.5 5.5 0 0 0 11 0" />
+							<path d="M12 16.5V20" />
+							<path d="M9 20h6" />
 						</svg>
 					</div>
 				</div>
@@ -1307,55 +1307,46 @@
 		right: calc(16px + env(safe-area-inset-right, 0px));
 		bottom: calc(0.95rem + env(safe-area-inset-bottom, 0px));
 		z-index: 41;
-		width: 44px;
-		height: 44px;
+		width: 46px;
+		height: 46px;
 		padding: 0;
-		border: 0;
+		border: 1px solid oklch(82% 0.08 85 / 34%);
 		border-radius: 50%;
-		color: #2a1c12;
-		background:
-			linear-gradient(145deg, #f3e2b0 0%, #d4b45c 16%, #8d6b2c 48%, #c4a056 78%, #5c4518 100%);
+		color: oklch(94% 0.03 85);
+		background: oklch(16% 0.02 70 / 62%);
+		backdrop-filter: blur(22px) saturate(1.45);
+		-webkit-backdrop-filter: blur(22px) saturate(1.45);
 		box-shadow:
-			inset 0 1px 0 rgba(255, 248, 220, 0.45),
-			inset 0 -1px 0 rgba(40, 24, 12, 0.45),
-			0 10px 22px rgba(0, 0, 0, 0.48);
+			inset 0 1px 0 oklch(100% 0 0 / 14%),
+			0 10px 28px oklch(0% 0 0 / 42%);
 		display: flex;
 		align-items: center;
 		justify-content: center;
 		cursor: pointer;
-		transition: opacity 0.9s cubic-bezier(0.22, 1, 0.36, 1) 0.04s, filter 0.2s, transform 0.2s;
-	}
-	.graph-toolbar-search::before {
-		content: '';
-		position: absolute;
-		inset: 5px;
-		border-radius: 50%;
-		background:
-			linear-gradient(180deg, rgba(255, 248, 230, 0.4), transparent 40%),
-			#f4ead8;
-		box-shadow: inset 0 0 0 1px #c4a056;
-		pointer-events: none;
+		transition: border-color 0.2s, background 0.2s, transform 0.2s, box-shadow 0.2s;
 	}
 	.graph-toolbar-search svg {
 		position: relative;
 		z-index: 1;
 		width: 18px;
 		height: 18px;
-		stroke: #2a1c12;
+		stroke: oklch(88% 0.08 85);
 	}
 	.graph-toolbar-search:hover {
-		filter: brightness(1.08);
+		border-color: oklch(82% 0.1 85 / 55%);
+		background: oklch(20% 0.025 70 / 72%);
 		transform: translateY(-1px);
+		box-shadow:
+			inset 0 1px 0 oklch(100% 0 0 / 18%),
+			0 14px 32px oklch(0% 0 0 / 48%);
 	}
-	.graph-toolbar-search:hover::before {
-		background:
-			linear-gradient(180deg, rgba(255, 248, 230, 0.55), transparent 40%),
-			#f7efe0;
+	.graph-toolbar-search:active {
+		transform: scale(0.96);
 	}
 	@media (max-width: 767px) {
 		.graph-toolbar {
-			left: calc(50% - 51px - 12px - 48px);
-			right: auto;
+			left: auto;
+			right: calc(16px + env(safe-area-inset-right, 0px));
 			transform: none;
 		}
 		.graph-toolbar-search {
@@ -1365,8 +1356,12 @@
 			height: 48px;
 		}
 		.graph-toolbar-search svg {
-			width: 22px;
-			height: 22px;
+			width: 20px;
+			height: 20px;
+		}
+		.graph-toolbar .chat-orb {
+			width: 48px;
+			height: 48px;
 		}
 	}
 
@@ -1385,25 +1380,25 @@
 	}
 
 	.graph-toolbar .chat-orb {
-		background:
-			radial-gradient(circle at 32% 28%, #ffffff 0%, #e8e8e8 16%, #b0b0b0 38%, #7a7a7a 62%, #3a3a3a 100%);
-		border: 1px solid #8d8d8d;
+		width: 46px;
+		height: 46px;
+		background: oklch(16% 0.02 70 / 62%);
+		backdrop-filter: blur(22px) saturate(1.45);
+		-webkit-backdrop-filter: blur(22px) saturate(1.45);
+		border: 1px solid oklch(82% 0.08 85 / 34%);
 		box-shadow:
-			inset 0 2px 3px rgba(255, 255, 255, 0.75),
-			inset 0 -4px 8px rgba(0, 0, 0, 0.45),
-			0 10px 20px rgba(0, 0, 0, 0.5);
-		color: #1a1a1a;
+			inset 0 1px 0 oklch(100% 0 0 / 14%),
+			0 10px 28px oklch(0% 0 0 / 42%);
+		color: oklch(88% 0.08 85);
 	}
 	.graph-toolbar .chat-orb:hover,
 	.graph-toolbar .chat-collapsed-orb:hover .chat-orb {
-		transform: scale(1.06);
-		background:
-			radial-gradient(circle at 32% 28%, #ffffff 0%, #f2f2f2 14%, #c8c8c8 36%, #8a8a8a 62%, #404040 100%);
-		border-color: #c0c0c0;
+		transform: translateY(-1px);
+		background: oklch(20% 0.025 70 / 72%);
+		border-color: oklch(82% 0.1 85 / 55%);
 		box-shadow:
-			inset 0 2px 3px rgba(255, 255, 255, 0.85),
-			inset 0 -4px 8px rgba(0, 0, 0, 0.4),
-			0 12px 24px rgba(0, 0, 0, 0.55);
+			inset 0 1px 0 oklch(100% 0 0 / 18%),
+			0 14px 32px oklch(0% 0 0 / 48%);
 	}
 
 	.chat-collapsed-orb {
@@ -1465,21 +1460,7 @@
 		transform: scale(1.08);
 	}
 	.graph-toolbar .chat-orb::before {
-		content: '';
-		position: absolute;
-		inset: 7px;
-		border-radius: 50%;
-		border: 0;
-		animation: none;
-		background: repeating-linear-gradient(
-			180deg,
-			rgba(20, 20, 20, 0.28) 0 1px,
-			transparent 1px 2.5px
-		);
-		opacity: 0.55;
-		pointer-events: none;
-		-webkit-mask-image: radial-gradient(circle, #000 62%, transparent 63%);
-		mask-image: radial-gradient(circle, #000 62%, transparent 63%);
+		display: none;
 	}
 	.chat-orb::before {
 		content: '';
