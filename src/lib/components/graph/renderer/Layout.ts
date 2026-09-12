@@ -206,9 +206,38 @@ const WALL_YAW_LEFT = Math.PI / 2;
 const WALL_YAW_RIGHT = -Math.PI / 2;
 const WALL_PITCH_Y = 88;
 const CONV_PITCH_Y = 68;
-const WALL_PITCH_Z = 260;
+const WALL_PITCH_Z = 145;
 const WALL_TILE_W = 64;
 const WALL_ROWS = 2;
+export const DAY_SECTION_GAP_Z = 110;
+const PART_GAP_Z = 55;
+const PLAQUE_STANDOFF_Z = 40;
+
+export type DayPart = 'morning' | 'noon' | 'evening' | 'night';
+
+export type WallDaySection = {
+  dayKey: string;
+  ms: number;
+  z: number;
+  side: 'L' | 'R';
+  part?: DayPart;
+  startZ?: number;
+  endZ?: number;
+};
+
+function dayPart(d: Date): DayPart {
+  const h = d.getHours();
+  if (h >= 5 && h < 12) return 'morning';
+  if (h >= 12 && h < 17) return 'noon';
+  if (h >= 17 && h < 21) return 'evening';
+  return 'night';
+}
+
+const wallDaySectionsByLayout = new WeakMap<CanvasNode[], WallDaySection[]>();
+
+export function wallDaySectionsFor(nodes: CanvasNode[]): WallDaySection[] {
+  return wallDaySectionsByLayout.get(nodes) ?? [];
+}
 
 /** World |X| of aisle helix. Must stay < 140 so cards stay off walls at ±240. */
 const CONV_AISLE_X = 90;
@@ -222,9 +251,9 @@ const CONV_HEIGHT_MAX = 108;
 const CONV_LENGTH_REF = 64;
 
 const WALL_KINDS = new Set(['photo', 'pdf', 'document', 'video', 'audio']);
-const CLUSTER_PITCH_Y = 78;
-const CLUSTER_PITCH_Z = 98;
-const CLUSTER_COL_SPAN = 2;
+const CLUSTER_PITCH_Y = 56;
+const CLUSTER_PITCH_Z = 52;
+const CLUSTER_COL_SPAN = 1;
 const CLUSTER_SLOTS: ReadonlyArray<readonly [number, number]> = [
   [-0.78, 1.1],
   [0.84, 1.16],
@@ -954,7 +983,9 @@ export function buildCanvasLayout(
   type WallCell = { node: KGNode; row: number; span: number };
   type WallSegment =
     | { type: 'column'; cells: WallCell[] }
-    | { type: 'cluster'; convo: KGNode; photos: KGNode[] };
+    | { type: 'cluster'; convo: KGNode; photos: KGNode[] }
+    | { type: 'day-break'; dayKey: string; ms: number }
+    | { type: 'part-break'; part: DayPart; ms: number };
 
   const segments: WallSegment[] = [];
   let pendingPhotos: KGNode[] = [];
@@ -962,26 +993,54 @@ export function buildCanvasLayout(
   const flushPhotos = () => {
     while (pendingPhotos.length) {
       const slice = pendingPhotos.splice(0, WALL_ROWS);
+      const span = slice.length === 1 ? WALL_ROWS : 1;
       segments.push({
         type: 'column',
-        cells: slice.map((node, row) => ({ node, row, span: 1 })),
+        cells: slice.map((node, row) => ({ node, row, span })),
       });
     }
   };
   const flushConvos = () => {
     while (pendingConvos.length) {
       const slice = pendingConvos.splice(0, WALL_ROWS);
+      const span = slice.length === 1 ? WALL_ROWS : 1;
       segments.push({
         type: 'column',
-        cells: slice.map((node, row) => ({ node, row, span: 1 })),
+        cells: slice.map((node, row) => ({ node, row, span })),
       });
     }
   };
   const placed = new Set<string>();
+  let currentDayKey: string | null = null;
+  let currentPart: DayPart | null = null;
+  const openDaySection = (n: KGNode) => {
+    const d = parseNodeDate(n);
+    const key = d ? dayKey(d) : 'undated';
+    if (key === currentDayKey) return;
+    flushConvos();
+    flushPhotos();
+    segments.push({ type: 'day-break', dayKey: key, ms: d?.getTime() ?? 0 });
+    currentDayKey = key;
+    currentPart = null;
+  };
+  const openPartSection = (n: KGNode) => {
+    const d = parseNodeDate(n);
+    const part = d ? dayPart(d) : 'morning';
+    if (part === currentPart) return;
+    flushConvos();
+    flushPhotos();
+    segments.push({ type: 'part-break', part, ms: d?.getTime() ?? 0 });
+    currentPart = part;
+  };
   for (const n of wallNodes) {
     if (placed.has(n.id)) continue;
     const kind = classifyKind(n);
     const convoId = conversationIdOf(n);
+    if (kind === 'photo' && convoId && clusteredConvIds.has(convoId)) {
+      continue;
+    }
+    openDaySection(n);
+    openPartSection(n);
     if (kind === 'conversation' && clusteredConvIds.has(n.id)) {
       flushConvos();
       flushPhotos();
@@ -989,8 +1048,6 @@ export function buildCanvasLayout(
       segments.push({ type: 'cluster', convo: n, photos });
       placed.add(n.id);
       for (const p of photos) placed.add(p.id);
-    } else if (kind === 'photo' && convoId && clusteredConvIds.has(convoId)) {
-      continue;
     } else if (kind === 'video') {
       flushConvos();
       flushPhotos();
@@ -1009,43 +1066,159 @@ export function buildCanvasLayout(
   flushConvos();
   flushPhotos();
 
-  const sideCols = { L: 0, R: 0 };
-  for (let i = 0; i < segments.length; i++) {
-    const side: 'L' | 'R' = i % 2 === 0 ? 'L' : 'R';
-    const seg = segments[i];
-    if (seg.type === 'column') {
-      const wallCol = sideCols[side];
-      const worldZ = wallCol * WALL_PITCH_Z;
-      sideCols[side] += 1;
-      for (const cell of seg.cells) {
-        gridPosOf.set(cell.node.id, { x: wallCol, y: cell.row, worldZ, span: cell.span });
-        wallSideOf.set(cell.node.id, side);
+  type DayItem = Exclude<WallSegment, { type: 'day-break' }>;
+  type DayPack = { dayKey: string; ms: number; items: DayItem[] };
+  const daySections: WallDaySection[] = [];
+  const days: DayPack[] = [];
+  for (const seg of segments) {
+    if (seg.type === 'day-break') {
+      days.push({ dayKey: seg.dayKey, ms: seg.ms, items: [] });
+      continue;
+    }
+    days.at(-1)?.items.push(seg);
+  }
+
+  const flankSplit = (photos: KGNode[]): { left: KGNode[]; right: KGNode[] } => {
+    const left: KGNode[] = [];
+    const right: KGNode[] = [];
+    for (let i = 0; i < photos.length; i++) {
+      (i % 2 === 0 ? left : right).push(photos[i]);
+    }
+    return { left, right };
+  };
+  const flankCols = (n: number) => (n === 0 ? 0 : Math.ceil(n / WALL_ROWS));
+  const clusterSpanZ = (photos: KGNode[]): number => {
+    const { left, right } = flankSplit(photos);
+    return (flankCols(left.length) + 1 + flankCols(right.length)) * WALL_PITCH_Z;
+  };
+
+  const daySpanZ = (items: DayItem[]): number => {
+    let z = 0;
+    let sawContent = false;
+    for (const seg of items) {
+      if (seg.type === 'part-break') {
+        if (sawContent) z += PART_GAP_Z;
+        continue;
       }
-    } else {
-      const wallCol = sideCols[side];
-      const worldZ = wallCol * WALL_PITCH_Z + CLUSTER_PITCH_Z;
-      sideCols[side] += CLUSTER_COL_SPAN;
-      gridPosOf.set(seg.convo.id, { x: wallCol, y: 0, worldZ, span: WALL_ROWS, localY: 0 });
-      wallSideOf.set(seg.convo.id, side);
-      for (let p = 0; p < seg.photos.length; p++) {
-        const [dz, dy] = CLUSTER_SLOTS[p % CLUSTER_SLOTS.length];
-        const layer = 1 + Math.floor(p / CLUSTER_SLOTS.length) * 0.55;
-        const photo = seg.photos[p];
-        const jx = (seededRandom(hashStr(photo.id) + 3) - 0.5) * 0.16;
-        const jy = (seededRandom(hashStr(photo.id) + 9) - 0.5) * 0.14;
-        gridPosOf.set(photo.id, {
-          x: wallCol,
-          y: 0,
-          worldZ: worldZ + (dz + jx) * CLUSTER_PITCH_Z * layer,
-          span: 1,
-          localY: (dy + jy) * CLUSTER_PITCH_Y,
-        });
-        wallSideOf.set(photo.id, side);
+      sawContent = true;
+      z += seg.type === 'cluster' ? clusterSpanZ(seg.photos) : WALL_PITCH_Z;
+    }
+    return z;
+  };
+
+  const placeDay = (
+    items: DayItem[],
+    side: 'L' | 'R',
+    startZ: number,
+    dayKey: string,
+    markParts: boolean,
+  ): void => {
+    let z = startZ;
+    let col = 0;
+    let partStartZ = startZ;
+    let pendingPart: { part: DayPart; ms: number } | null = null;
+    const closePart = () => {
+      if (!pendingPart || !markParts) {
+        pendingPart = null;
+        return;
+      }
+      daySections.push({
+        dayKey,
+        ms: pendingPart.ms,
+        z: (partStartZ + z - WALL_PITCH_Z) / 2,
+        side,
+        part: pendingPart.part,
+      });
+      pendingPart = null;
+    };
+    for (const seg of items) {
+      if (seg.type === 'part-break') {
+        if (col > 0) {
+          closePart();
+          z += PART_GAP_Z;
+        }
+        pendingPart = { part: seg.part, ms: seg.ms };
+        partStartZ = z;
+        continue;
+      }
+      if (seg.type === 'column') {
+        const worldZ = z;
+        z += WALL_PITCH_Z;
+        for (const cell of seg.cells) {
+          gridPosOf.set(cell.node.id, { x: col, y: cell.row, worldZ, span: cell.span });
+          wallSideOf.set(cell.node.id, side);
+        }
+        col += 1;
+      } else {
+        const { left, right } = flankSplit(seg.photos);
+        const placePhotoCols = (nodes: KGNode[]) => {
+          for (let i = 0; i < nodes.length; i += WALL_ROWS) {
+            const slice = nodes.slice(i, i + WALL_ROWS);
+            const worldZ = z;
+            z += WALL_PITCH_Z;
+            const span = slice.length === 1 ? WALL_ROWS : 1;
+            for (let row = 0; row < slice.length; row++) {
+              gridPosOf.set(slice[row].id, { x: col, y: row, worldZ, span });
+              wallSideOf.set(slice[row].id, side);
+            }
+            col += 1;
+          }
+        };
+        placePhotoCols(left);
+        gridPosOf.set(seg.convo.id, { x: col, y: 0, worldZ: z, span: WALL_ROWS, localY: 0 });
+        wallSideOf.set(seg.convo.id, side);
+        z += WALL_PITCH_Z;
+        col += 1;
+        placePhotoCols(right);
       }
     }
+    closePart();
+  };
+
+  const leftDays: DayPack[] = [];
+  const rightDays: DayPack[] = [];
+  for (let i = days.length - 1; i >= 0; i--) {
+    if ((days.length - 1 - i) % 2 === 0) leftDays.push(days[i]);
+    else rightDays.push(days[i]);
   }
-  wallMetaOf.set('L', { cols: sideCols.L, rows: WALL_ROWS });
-  wallMetaOf.set('R', { cols: sideCols.R, rows: WALL_ROWS });
+  leftDays.reverse();
+  rightDays.reverse();
+
+  const wallTotalZ = (packs: DayPack[]): number => {
+    if (packs.length === 0) return 0;
+    let total = 0;
+    for (let i = 0; i < packs.length; i++) {
+      total += daySpanZ(packs[i].items);
+      if (i < packs.length - 1) total += DAY_SECTION_GAP_Z;
+    }
+    return total;
+  };
+
+  const alignEnd = Math.max(wallTotalZ(leftDays), wallTotalZ(rightDays));
+  const sideCols = { L: 0, R: 0 };
+
+  const packWall = (packs: DayPack[], side: 'L' | 'R') => {
+    let z = alignEnd - wallTotalZ(packs);
+    for (let i = 0; i < packs.length; i++) {
+      const day = packs[i];
+      const span = daySpanZ(day.items);
+      const partBreaks = day.items.filter((s) => s.type === 'part-break').length;
+      placeDay(day.items, side, z + WALL_PITCH_Z / 2, day.dayKey, partBreaks > 1);
+      sideCols[side] += day.items.length;
+      const startZ = z;
+      const endZ = z + span;
+      const plaqueZ = (startZ + endZ) / 2;
+      if (day.dayKey !== 'undated' && day.ms > 0) {
+        daySections.push({ dayKey: day.dayKey, ms: day.ms, z: plaqueZ, side, startZ, endZ });
+      }
+      z += span;
+      if (i < packs.length - 1) z += DAY_SECTION_GAP_Z;
+    }
+  };
+  packWall(leftDays, 'L');
+  packWall(rightDays, 'R');
+  wallMetaOf.set('L', { cols: Math.max(1, sideCols.L), rows: WALL_ROWS });
+  wallMetaOf.set('R', { cols: Math.max(1, sideCols.R), rows: WALL_ROWS });
 
   const timeline: { t: number; z: number }[] = [];
   for (const n of wallNodes) {
@@ -1195,7 +1368,7 @@ export function buildCanvasLayout(
         if (typeof pw === 'number' && typeof ph === 'number' && pw > 0 && ph > 0) {
           const aspect = pw / ph;
           if (aspect >= 1) {
-            width = Math.min(colH * aspect, WALL_PITCH_Z * 1.15);
+            width = Math.min(colH * aspect, WALL_PITCH_Z - 28);
             height = width / aspect;
           } else {
             height = colH;
@@ -1213,9 +1386,11 @@ export function buildCanvasLayout(
           clustered ? 50 : 54,
           clustered ? 66 : 74,
         ));
+        width = Math.min(width, WALL_PITCH_Z - 28);
+        height = Math.min(height, WALL_PITCH_Y * WALL_ROWS - 24);
       } else if (isChatImageNode(node)) {
-        width = 80;
-        height = 60;
+        width = Math.min(80, WALL_PITCH_Z - 28);
+        height = Math.min(60, WALL_PITCH_Y - 16);
       } else if (typeof pw === 'number' && typeof ph === 'number' && pw > 0 && ph > 0) {
         const aspect = pw / ph;
         if (aspect >= 1) {
@@ -1285,6 +1460,7 @@ export function buildCanvasLayout(
     };
   }
 
+  wallDaySectionsByLayout.set(out, daySections.filter((s) => s.dayKey !== 'undated' && s.ms > 0));
   return out;
 }
 

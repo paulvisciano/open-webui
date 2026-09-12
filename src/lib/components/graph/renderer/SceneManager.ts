@@ -41,6 +41,12 @@ import {
 import { ChunkManager } from './ChunkManager';
 import type { NodePlane } from './NodePlane';
 import type { CanvasNode } from './types';
+import {
+  DAY_SECTION_GAP_Z,
+  wallDaySectionsFor,
+  type DayPart,
+  type WallDaySection,
+} from './Layout';
 import { textureCache } from '../services/TextureCache';
 import { getAssetFileUrl } from '$lib/apis/graph';
 
@@ -85,7 +91,12 @@ export class SceneManager {
     downStartY: 0,
     dragged: false,
     isTouch: false,
+    id: -1,
   };
+  private readonly _pointers = new Map<number, { x: number; y: number }>();
+  private _lookVelYaw = 0;
+  private _lookVelPitch = 0;
+  private _lookMoveMs = 0;
   /** True while a pinch-to-zoom gesture is active (fed from svelte-gestures). */
   private _pinchActive = false;
 
@@ -508,6 +519,9 @@ export class SceneManager {
       if (!n.yaw) continue;
       const wz = n.cellZ * CHUNK_SIZE + n.localZ;
       if (wz > maxWallZ) maxWallZ = wz;
+    }
+    for (const section of wallDaySectionsFor(nodes)) {
+      if (section.z > maxWallZ) maxWallZ = section.z;
     }
     const targetZ = Number.isFinite(maxWallZ)
       ? maxWallZ + CHUNK_SIZE * 1.2
@@ -1061,6 +1075,204 @@ export class SceneManager {
     return points;
   }
 
+  private _addDaySectionMarkers(
+    sections: readonly WallDaySection[],
+    wallX: number,
+    hallH: number,
+  ): void {
+    if (!this._hall || sections.length === 0) return;
+    const labelX = wallX - 4;
+    const labelW = 108;
+    const labelH = 22;
+    const labelY = 8 + hallH / 2 - labelH / 2 - 10;
+    const partW = 52;
+    const partH = 10;
+    const partY = labelY - 16;
+    const dates = sections.filter((s) => !s.part);
+    const parts = sections.filter((s) => s.part);
+    const bySide = {
+      L: dates.filter((s) => s.side === 'L').sort((a, b) => a.z - b.z),
+      R: dates.filter((s) => s.side === 'R').sort((a, b) => a.z - b.z),
+    };
+    for (const side of ['L', 'R'] as const) {
+      const list = bySide[side];
+      if (list.length === 0) continue;
+      const first = list[0];
+      const last = list[list.length - 1];
+      if (first.startZ != null) {
+        this._addWallPilaster(
+          side,
+          wallX,
+          hallH,
+          first.startZ - DAY_SECTION_GAP_Z * 0.5,
+          `daySeam:${first.dayKey}:start:${side}`,
+        );
+      }
+      for (let i = 0; i < list.length - 1; i++) {
+        const a = list[i];
+        const b = list[i + 1];
+        const seamZ =
+          a.endZ != null && b.startZ != null
+            ? (a.endZ + b.startZ) / 2
+            : (a.z + b.z) / 2;
+        this._addWallPilaster(side, wallX, hallH, seamZ, `daySeam:${a.dayKey}:${side}`);
+      }
+      if (last.endZ != null) {
+        this._addWallPilaster(
+          side,
+          wallX,
+          hallH,
+          last.endZ + DAY_SECTION_GAP_Z * 0.5,
+          `daySeam:${last.dayKey}:end:${side}`,
+        );
+      }
+    }
+
+    for (const section of dates) {
+      const tex = this._makeDayInscriptionTexture(section.ms);
+      const geo = new THREE.PlaneGeometry(labelW, labelH);
+      const mat = new THREE.MeshBasicMaterial({
+        map: tex,
+        transparent: true,
+        depthWrite: false,
+        fog: true,
+        side: THREE.FrontSide,
+      });
+      const label = new THREE.Mesh(geo, mat);
+      if (section.side === 'R') {
+        label.position.set(labelX, labelY, section.z);
+        label.rotation.y = -Math.PI / 2;
+      } else {
+        label.position.set(-labelX, labelY, section.z);
+        label.rotation.y = Math.PI / 2;
+      }
+      label.name = `dayPlaque:${section.dayKey}:${section.side}`;
+      this._hall.add(label);
+    }
+
+    for (const section of parts) {
+      if (!section.part) continue;
+      const tex = this._makePartInscriptionTexture(section.part);
+      const geo = new THREE.PlaneGeometry(partW, partH);
+      const mat = new THREE.MeshBasicMaterial({
+        map: tex,
+        transparent: true,
+        depthWrite: false,
+        fog: true,
+        side: THREE.FrontSide,
+      });
+      const label = new THREE.Mesh(geo, mat);
+      if (section.side === 'R') {
+        label.position.set(labelX, partY, section.z);
+        label.rotation.y = -Math.PI / 2;
+      } else {
+        label.position.set(-labelX, partY, section.z);
+        label.rotation.y = Math.PI / 2;
+      }
+      label.name = `dayPart:${section.dayKey}:${section.part}:${section.side}`;
+      this._hall.add(label);
+    }
+  }
+
+  private _addWallPilaster(
+    side: 'L' | 'R',
+    wallX: number,
+    hallH: number,
+    z: number,
+    name: string,
+  ): void {
+    if (!this._hall) return;
+    const sign = side === 'R' ? 1 : -1;
+    const depth = 6;
+    const width = 11;
+    const capH = 5;
+    const baseH = 8;
+    const floorY = 8 - hallH / 2;
+    const ceilY = 8 + hallH / 2;
+    const x = sign * (wallX - depth / 2);
+    const shaftH = ceilY - capH - 3 - (floorY + baseH);
+    const shaftY = floorY + baseH + shaftH / 2;
+
+    const mat = (color: number) =>
+      new THREE.MeshBasicMaterial({ color, fog: true });
+    const group = new THREE.Group();
+    group.name = name;
+
+    const shaft = new THREE.Mesh(new THREE.BoxGeometry(depth, shaftH, width), mat(0x1c1812));
+    shaft.position.set(x, shaftY, z);
+    const shade = new THREE.Mesh(new THREE.BoxGeometry(depth * 0.15, shaftH, width + 0.2), mat(0x0c0a08));
+    shade.position.set(x + sign * (depth * 0.42), shaftY, z);
+    const gilt = mat(0xc4a056);
+    const giltDark = mat(0x6a4818);
+    const cap = new THREE.Mesh(new THREE.BoxGeometry(depth + 2.5, capH, width + 5), gilt);
+    cap.position.set(x - sign * 0.4, ceilY - capH / 2 - 2, z);
+    const capShade = new THREE.Mesh(new THREE.BoxGeometry(1, capH, width + 5.2), giltDark);
+    capShade.position.set(x + sign * (depth * 0.45), ceilY - capH / 2 - 2, z);
+    const base = new THREE.Mesh(new THREE.BoxGeometry(depth + 3, baseH, width + 6), gilt);
+    base.position.set(x - sign * 0.5, floorY + baseH / 2, z);
+    const baseShade = new THREE.Mesh(new THREE.BoxGeometry(1, baseH, width + 6.2), giltDark);
+    baseShade.position.set(x + sign * (depth * 0.5), floorY + baseH / 2, z);
+    group.add(shaft, shade, cap, capShade, base, baseShade);
+    this._hall.add(group);
+  }
+
+  private _makePartInscriptionTexture(part: DayPart): THREE.CanvasTexture {
+    const canvas = document.createElement('canvas');
+    canvas.width = 768;
+    canvas.height = 160;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return new THREE.CanvasTexture(canvas);
+    const w = canvas.width;
+    const h = canvas.height;
+    const word = part.toUpperCase();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#c4a056';
+    ctx.font = '600 72px Fraunces, Georgia, serif';
+    ctx.fillText(word.split('').join('  '), w / 2, h / 2);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.needsUpdate = true;
+    return tex;
+  }
+
+  private _makeDayInscriptionTexture(ms: number): THREE.CanvasTexture {
+    const d = new Date(ms);
+    const canvas = document.createElement('canvas');
+    canvas.width = 1536;
+    canvas.height = 320;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return new THREE.CanvasTexture(canvas);
+    const w = canvas.width;
+    const h = canvas.height;
+    const dow = d.toLocaleDateString('en-US', { weekday: 'long' }).toUpperCase();
+    const day = String(d.getDate());
+    const mon = d.toLocaleDateString('en-US', { month: 'long' }).toUpperCase();
+    const year = String(d.getFullYear());
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#8d6b2c';
+    ctx.font = '600 48px Fraunces, Georgia, serif';
+    ctx.fillText(dow.split('').join('  '), w / 2, 78);
+
+    ctx.fillStyle = '#d4b45c';
+    ctx.font = '600 96px Fraunces, Georgia, serif';
+    ctx.fillText(`${day}    ${mon}    ${year}`, w / 2, 175);
+
+    ctx.strokeStyle = 'rgba(196, 160, 86, 0.4)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(w * 0.22, 248);
+    ctx.lineTo(w * 0.78, 248);
+    ctx.stroke();
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.needsUpdate = true;
+    return tex;
+  }
+
   private updateGalleryHall(nodes: CanvasNode[]): void {
     this.disposeGalleryHall();
     let minZ = Infinity;
@@ -1070,6 +1282,10 @@ export class SceneManager {
       const wz = n.cellZ * CHUNK_SIZE + n.localZ;
       if (wz < minZ) minZ = wz;
       if (wz > maxZ) maxZ = wz;
+    }
+    for (const section of wallDaySectionsFor(nodes)) {
+      if (section.z < minZ) minZ = section.z;
+      if (section.z > maxZ) maxZ = section.z;
     }
     if (!Number.isFinite(minZ) || !Number.isFinite(maxZ)) return;
 
@@ -1135,6 +1351,7 @@ export class SceneManager {
     this._hallBackZ = z1;
     this._maxCameraZ = Math.min(this._maxCameraZ, z1 - 36);
     this._hall.add(left, right, end, floor, ceiling, back, stars);
+    this._addDaySectionMarkers(wallDaySectionsFor(nodes), wallX, hallH);
 
     this._scene.add(this._hall);
   }
@@ -1164,9 +1381,12 @@ export class SceneManager {
 
     if (this.tickFly(deltaMs)) {
       this._drift.set(0, 0);
+      this._lookVelYaw = 0;
+      this._lookVelPitch = 0;
     } else {
       this.applyKeyboard();
       this.applyVelocity();
+      this.applyLookInertia();
       this.applyDrift();
     }
 
@@ -1217,14 +1437,58 @@ export class SceneManager {
     return Math.max(0.5, Math.min(16, dist / ZOOM_FACTOR_DIVISOR));
   }
 
-  private applyLookDelta(dx: number, dy: number): void {
-    this._lookYaw -= dx * 0.0026;
+  private lookSensitivity(touch: boolean): { yaw: number; pitch: number } {
+    if (touch) {
+      const w = Math.max(1, this._container.clientWidth);
+      const h = Math.max(1, this._container.clientHeight);
+      return { yaw: (Math.PI * 0.72) / w, pitch: (Math.PI * 0.42) / h };
+    }
+    return { yaw: 0.0026, pitch: 0.002 };
+  }
+
+  private wrapLookYaw(): void {
     if (this._lookYaw > Math.PI) this._lookYaw -= Math.PI * 2;
     if (this._lookYaw < -Math.PI) this._lookYaw += Math.PI * 2;
-    this._lookPitch -= dy * 0.002;
+  }
+
+  private clampLookPitch(): void {
     if (this._lookPitch > 0.7) this._lookPitch = 0.7;
     if (this._lookPitch < -0.7) this._lookPitch = -0.7;
+  }
+
+  private applyLookDelta(dx: number, dy: number, touch = false): void {
+    const sens = this.lookSensitivity(touch);
+    const dyaw = -dx * sens.yaw;
+    const dpitch = -dy * sens.pitch;
+    this._lookYaw += dyaw;
+    this._lookPitch += dpitch;
+    this.wrapLookYaw();
+    this.clampLookPitch();
+    const now = performance.now();
+    const dt = Math.max(8, now - this._lookMoveMs);
+    this._lookMoveMs = now;
+    const k = 16 / dt;
+    this._lookVelYaw = dyaw * k;
+    this._lookVelPitch = dpitch * k;
     this._userMoved = true;
+  }
+
+  private applyLookInertia(): void {
+    if (this._pointer.down || this._pinchActive || !this._pointer.isTouch) {
+      if (!this._pointer.down && !this._pointer.isTouch) {
+        this._lookVelYaw = 0;
+        this._lookVelPitch = 0;
+      }
+      return;
+    }
+    this._lookYaw += this._lookVelYaw;
+    this._lookPitch += this._lookVelPitch;
+    this.wrapLookYaw();
+    this.clampLookPitch();
+    this._lookVelYaw *= 0.9;
+    this._lookVelPitch *= 0.9;
+    if (Math.abs(this._lookVelYaw) < 1e-5) this._lookVelYaw = 0;
+    if (Math.abs(this._lookVelPitch) < 1e-5) this._lookVelPitch = 0;
   }
 
   private applyZoomDelta(delta: number, alongLook = false): void {
@@ -1353,6 +1617,7 @@ export class SceneManager {
   private applyWallPeek(): void {
     const looking =
       this._peekReady &&
+      !this._pointer.isTouch &&
       !(this._pointer.down && this._pointer.dragged) &&
       !this._pinchActive &&
       this._flyTo === null;
@@ -1401,15 +1666,37 @@ export class SceneManager {
     this._keys.delete(e.key);
   };
 
+  private onTouchMovePrevent = (e: TouchEvent): void => {
+    if (e.cancelable) e.preventDefault();
+  };
+
   private onPointerDown = (e: PointerEvent): void => {
     this.cancelFly();
+    this._pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const touch = e.pointerType === 'touch';
+    if (this._pointers.size >= 2) {
+      this._pinchActive = true;
+      this._pointer.dragged = true;
+      this._lookVelYaw = 0;
+      this._lookVelPitch = 0;
+      this.updateCursor();
+      return;
+    }
     this._pointer.down = true;
-    this._pointer.isTouch = e.pointerType === 'touch';
+    this._pointer.isTouch = touch;
+    this._pointer.id = e.pointerId;
     this._pointer.lastX = e.clientX;
     this._pointer.lastY = e.clientY;
     this._pointer.downStartX = e.clientX;
     this._pointer.downStartY = e.clientY;
     this._pointer.dragged = false;
+    this._lookVelYaw = 0;
+    this._lookVelPitch = 0;
+    if (touch) {
+      this._peekReady = false;
+      this._peekYaw = 0;
+      this._peekPitch = 0;
+    }
     try {
       this._renderer.domElement.setPointerCapture(e.pointerId);
     } catch {}
@@ -1418,6 +1705,7 @@ export class SceneManager {
   };
 
   private onPointerTrack = (e: PointerEvent): void => {
+    if (e.pointerType === 'touch') return;
     const rect = this._renderer.domElement.getBoundingClientRect();
     if (rect.width < 1 || rect.height < 1) return;
     this._mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -1426,24 +1714,33 @@ export class SceneManager {
   };
 
   private onPointerMove = (e: PointerEvent): void => {
-    const rect = this._renderer.domElement.getBoundingClientRect();
-    this._mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-    this._mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-    this._peekReady = true;
+    const rec = this._pointers.get(e.pointerId);
+    if (rec) {
+      rec.x = e.clientX;
+      rec.y = e.clientY;
+    }
 
     if (e.pointerType === 'touch') {
-      if (this._pointer.down && !this._pinchActive) {
+      if (e.cancelable) e.preventDefault();
+      if (this._pointers.size >= 2 || this._pinchActive) return;
+      if (this._pointer.down && e.pointerId === this._pointer.id) {
         const dx = e.clientX - this._pointer.lastX;
         const dy = e.clientY - this._pointer.lastY;
         this._pointer.lastX = e.clientX;
         this._pointer.lastY = e.clientY;
-        if (Math.hypot(e.clientX - this._pointer.downStartX, e.clientY - this._pointer.downStartY) > 5) {
+        const slop = 12;
+        if (Math.hypot(e.clientX - this._pointer.downStartX, e.clientY - this._pointer.downStartY) > slop) {
           this._pointer.dragged = true;
         }
-        this.applyLookDelta(dx, dy);
+        if (this._pointer.dragged) this.applyLookDelta(dx, dy, true);
       }
       return;
     }
+
+    const rect = this._renderer.domElement.getBoundingClientRect();
+    this._mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this._mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    this._peekReady = true;
 
     if (this._pointer.down) {
       const dx = e.clientX - this._pointer.lastX;
@@ -1453,7 +1750,7 @@ export class SceneManager {
       if (Math.hypot(e.clientX - this._pointer.downStartX, e.clientY - this._pointer.downStartY) > 5) {
         this._pointer.dragged = true;
       }
-      this.applyLookDelta(dx, dy);
+      this.applyLookDelta(dx, dy, false);
       this.updateCursor();
     } else {
       this.hoverRaycast(e);
@@ -1466,14 +1763,31 @@ export class SceneManager {
         this._renderer.domElement.releasePointerCapture(e.pointerId);
       } catch {}
     }
+    this._pointers.delete(e.pointerId);
+    if (this._pointers.size < 2) this._pinchActive = false;
+
     if (e.pointerType === 'touch') {
+      if (this._pointers.size === 1) {
+        const left = this._pointers.entries().next().value;
+        if (left) {
+          this._pointer.id = left[0];
+          this._pointer.lastX = left[1].x;
+          this._pointer.lastY = left[1].y;
+          this._pointer.downStartX = left[1].x;
+          this._pointer.downStartY = left[1].y;
+          this._pointer.dragged = true;
+        }
+        this.updateCursor();
+        return;
+      }
       if (this._pointer.down && !this._pointer.dragged) {
-        // Don't let GraphPage treat a conversation tap as a background dismiss.
-        // The actual select is delayed for double-tap detection.
         if (this.raycast(e)) e.stopPropagation();
         this.detectDoubleTap(e.clientX, e.clientY);
+        this._lookVelYaw = 0;
+        this._lookVelPitch = 0;
       }
       this._pointer.down = false;
+      this._pointer.id = -1;
       this.updateCursor();
       return;
     }
@@ -1482,6 +1796,7 @@ export class SceneManager {
       if (hit) e.stopPropagation();
     }
     this._pointer.down = false;
+    this._pointer.id = -1;
     this.updateCursor();
   };
 
@@ -1526,8 +1841,8 @@ export class SceneManager {
   /** Called by svelte-gestures on each pinch scale change. */
   handlePinchMove(scaleDelta: number): void {
     if (!this._pinchActive) return;
-    this.applyZoomDelta(scaleDelta * 52, true);
-    this.applyFovZoom(scaleDelta);
+    this.applyZoomDelta(scaleDelta * 12, true);
+    this.applyFovZoom(scaleDelta * 0.35);
   }
 
   /** Called by svelte-gestures when the pinch gesture ends. */
@@ -1537,7 +1852,7 @@ export class SceneManager {
 
   /** Called by svelte-gestures on single-finger touch pan. */
   handleTouchPan(dx: number, dy: number): void {
-    this.applyLookDelta(dx, dy);
+    this.applyLookDelta(dx, dy, true);
   }
 
   /** Overlay cards sit above the canvas; forward their wheel/pinch here. */
@@ -1649,9 +1964,10 @@ export class SceneManager {
     window.addEventListener('pointermove', this.onPointerTrack);
     const el = this._renderer.domElement;
     el.addEventListener('pointerdown', this.onPointerDown);
-    el.addEventListener('pointermove', this.onPointerMove);
+    el.addEventListener('pointermove', this.onPointerMove, { passive: false });
     el.addEventListener('pointerup', this.onPointerUp);
     el.addEventListener('pointercancel', this.onPointerUp);
+    el.addEventListener('touchmove', this.onTouchMovePrevent, { passive: false });
     el.addEventListener('wheel', this.onWheel, { passive: false });
     el.addEventListener('dblclick', this.onDoubleClick);
     el.addEventListener('webglcontextlost', this.onContextLoss);
@@ -1667,6 +1983,7 @@ export class SceneManager {
     el.removeEventListener('pointermove', this.onPointerMove);
     el.removeEventListener('pointerup', this.onPointerUp);
     el.removeEventListener('pointercancel', this.onPointerUp);
+    el.removeEventListener('touchmove', this.onTouchMovePrevent);
     el.removeEventListener('wheel', this.onWheel);
     el.removeEventListener('dblclick', this.onDoubleClick);
     el.removeEventListener('webglcontextlost', this.onContextLoss);
