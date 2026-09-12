@@ -165,6 +165,7 @@ export class SceneManager {
     timer: ReturnType<typeof setTimeout>;
   }> = [];
   private _flyDuration = 700;
+  private _viewNodeId: string | null = null;
   private _lastFrameMs = 0;
 
   /** Optional callback fired when the camera crosses a chunk boundary. */
@@ -547,6 +548,7 @@ export class SceneManager {
     const plane = this._chunkManager.findPlaneByNodeId(nodeId, this._basePos.z);
     const node = plane?.node ?? this._chunkManager.findLayoutNode(nodeId, this._basePos.z);
     if (!node) return;
+    const fromHallway = Math.abs(Math.abs(this._lookYaw) - Math.PI / 2) > 0.3;
     this._lookYaw += this._peekYaw;
     this._lookPitch += this._peekPitch;
     this._peekYaw = 0;
@@ -558,6 +560,16 @@ export class SceneManager {
     const worldX = node.cellX * CHUNK_SIZE + node.localX;
     const worldY = node.cellY * CHUNK_SIZE + node.localY;
     const wallYaw = node.yaw ?? 0;
+    const prev = this._viewNodeId
+      ? this._chunkManager.findPlaneByNodeId(this._viewNodeId, this._basePos.z)?.node
+        ?? this._chunkManager.findLayoutNode(this._viewNodeId, this._basePos.z)
+      : undefined;
+    const sameGroup = !!prev && this.nodeGroupKey(prev) === this.nodeGroupKey(node);
+    this._viewNodeId = nodeId;
+    if (fromHallway || !sameGroup) {
+      this.beginFly(0, worldY, worldZ, 1100, wallYaw !== 0 ? wallYaw : 0, 0);
+      return;
+    }
     const onThisWall =
       wallYaw !== 0 &&
       Math.abs(Math.sin(this._lookYaw)) > 0.5 &&
@@ -580,6 +592,16 @@ export class SceneManager {
       return;
     }
     this.beginFly(0, worldY, worldZ, 1100, wallYaw !== 0 ? wallYaw : this._lookYaw, 0);
+  }
+
+  private nodeGroupKey(node: CanvasNode): string {
+    if (node.kind === 'conversation') return `c:${node.id}`;
+    const cid = node.properties?.conversation_id;
+    if (typeof cid === 'string' && cid.length > 0) return `c:${cid}`;
+    if (node.kind === 'video') return `v:${node.id}`;
+    const side = Math.sign(node.yaw ?? 0);
+    const wz = node.cellZ * CHUNK_SIZE + node.localZ;
+    return `z:${side}:${Math.round(wz / 260)}`;
   }
 
   private viewDistForNode(node: CanvasNode, plane?: NodePlane): number {
@@ -714,6 +736,7 @@ export class SceneManager {
   /** Return to corridor view: look down −Z, x back to 0, keep current z. */
   resetLook(): void {
     if (this._disposed) return;
+    this._viewNodeId = null;
     this.stopHallwayPreview();
     this.stopInlineVideo();
     const z = Math.max(this._minCameraZ, Math.min(this._maxCameraZ, this._basePos.z));
