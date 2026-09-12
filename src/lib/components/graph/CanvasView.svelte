@@ -517,7 +517,7 @@
     if (lastPinchScale === 1) {
       sceneManager.handlePinchStart();
     }
-    const delta = -(scale - lastPinchScale) * 200;
+    const delta = -(scale - lastPinchScale) * 70;
     lastPinchScale = scale;
     sceneManager.handlePinchMove(delta);
   }
@@ -1224,6 +1224,9 @@
     width: 100%;
     height: 100%;
     overflow: hidden;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
   }
 
   /* ── Empty state — glassmorphism, floating spatial ── */
