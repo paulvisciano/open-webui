@@ -120,7 +120,10 @@ class GraphStore {
     for (const img of images) {
       if (!img || typeof img !== 'object') continue;
       const rec = img as Record<string, unknown>;
-      const fileId = typeof rec.id === 'string' ? rec.id : '';
+      const fileId =
+        (typeof rec.id === 'string' && rec.id) ||
+        (typeof rec.file_id === 'string' && rec.file_id) ||
+        '';
       if (!fileId) continue;
       const taken =
         typeof rec.created_at === 'number' && Number.isFinite(rec.created_at)

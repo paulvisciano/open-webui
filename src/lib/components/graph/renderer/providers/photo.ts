@@ -75,7 +75,7 @@ export const photoProvider: NodeKindProvider = {
 		};
 	},
 	planeConfig: {
-		color: 0xffffff,
+		color: 0x17140f,
 		textureSource: 'url',
 		lodEnabled: true
 	}

@@ -257,6 +257,7 @@ export class NodePlane {
         : Math.max(0, 1 - (absDepth - fadeStart) / Math.max(fadeEnd - fadeStart, 0.0001));
 
     let targetOpacity = Math.min(gridFade, onWall ? depthFade : depthFade * depthFade);
+    if (gridFade > 0) this._requestThumbIfNeeded();
 
     this._currentOpacity += (targetOpacity - this._currentOpacity) * OPACITY_LERP;
 
@@ -269,10 +270,6 @@ export class NodePlane {
     }
     this._material.opacity = this._currentOpacity;
     this._material.needsUpdate = true;
-
-    if (this._mesh.visible && targetOpacity > 0.05) {
-      this._requestThumbIfNeeded();
-    }
   }
 
   private _requestThumbIfNeeded(): void {
@@ -358,7 +355,7 @@ export class NodePlane {
     const shouldFull = cheby <= LOD_FULL_CHEBY && absDepth <= LOD_FULL_DEPTH;
     const shouldThumb = cheby > demoteThreshold || absDepth > demoteDepth;
 
-    if (this._currentLod === 'thumb' && shouldFull) {
+    if (this._currentLod === 'thumb' && shouldFull && this._material.map) {
       this._promoteToFull();
     } else if (this._currentLod === 'full' && shouldThumb) {
       this._demoteToThumb();
