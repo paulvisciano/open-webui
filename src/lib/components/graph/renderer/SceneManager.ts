@@ -52,6 +52,8 @@ import { getAssetFileUrl } from '$lib/apis/graph';
 
 /** Camera field of view in degrees. */
 const CAMERA_FOV = 60;
+/** Vertical look clamp in radians (~23°). Stops mouse-look from hitting ceiling/floor. */
+const MAX_LOOK_PITCH = 0.4;
 /** Near clipping plane. */
 const CAMERA_NEAR = 0.1;
 /** Minimum far clipping plane — used when no layout is applied yet. */
@@ -1398,7 +1400,8 @@ export class SceneManager {
       this._basePos.y + this._drift.y,
       this._basePos.z,
     );
-    this._camera.rotation.set(this._lookPitch + this._peekPitch, this._lookYaw + this._peekYaw, 0);
+    const pitch = Math.max(-MAX_LOOK_PITCH, Math.min(MAX_LOOK_PITCH, this._lookPitch + this._peekPitch));
+    this._camera.rotation.set(pitch, this._lookYaw + this._peekYaw, 0);
 
     if (this._skyTime) this._skyTime.value = now * 0.001;
 
@@ -1452,8 +1455,8 @@ export class SceneManager {
   }
 
   private clampLookPitch(): void {
-    if (this._lookPitch > 0.7) this._lookPitch = 0.7;
-    if (this._lookPitch < -0.7) this._lookPitch = -0.7;
+    if (this._lookPitch > MAX_LOOK_PITCH) this._lookPitch = MAX_LOOK_PITCH;
+    if (this._lookPitch < -MAX_LOOK_PITCH) this._lookPitch = -MAX_LOOK_PITCH;
   }
 
   private applyLookDelta(dx: number, dy: number, touch = false): void {
@@ -1623,7 +1626,7 @@ export class SceneManager {
       this._flyTo === null;
     const hallway = !this.facingWall;
     const targetYaw = looking ? -this._mouse.x * (hallway ? 3.4 : 3.1) : 0;
-    const targetPitch = looking ? this._mouse.y * (hallway ? 2.2 : 2.0) : 0;
+    const targetPitch = looking ? this._mouse.y * MAX_LOOK_PITCH : 0;
     if (looking && this._peekReady && this._peekSnap) {
       this._peekYaw = targetYaw;
       this._peekPitch = targetPitch;
