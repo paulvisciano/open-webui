@@ -94,6 +94,17 @@ def _is_text_file(file_path: str, chunk_size: int = 8192) -> bool:
         return False
 
 
+def _is_inline_media(content_type: str | None, filename: str) -> bool:
+    """Images/PDFs must be inline so <img> and WebGL textures can decode them."""
+    ct = (content_type or '').lower()
+    name = (filename or '').lower()
+    if ct.startswith('image/') or ct == 'application/pdf':
+        return True
+    return name.endswith(
+        ('.pdf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.heic', '.bmp')
+    )
+
+
 def _cleanup_local_cache(file_path: str) -> None:
     """Remove the local cached copy of a cloud-stored file after processing."""
     if STORAGE_LOCAL_CACHE or STORAGE_PROVIDER == 'local':
@@ -801,23 +812,20 @@ async def get_file_content_by_id(
 
             # Check if the file already exists in the cache
             if file_path.is_file():
-                # Handle Unicode filenames
-                filename = file.meta.get('name', file.filename)
-                encoded_filename = quote(filename)  # RFC5987 encoding
-
-                content_type = file.meta.get('content_type')
-                filename = file.meta.get('name', file.filename)
+                meta = file.meta if isinstance(file.meta, dict) else {}
+                content_type = meta.get('content_type')
+                filename = meta.get('name', file.filename)
                 encoded_filename = quote(filename)
                 headers = {}
 
                 if attachment:
                     headers['Content-Disposition'] = f"attachment; filename*=UTF-8''{encoded_filename}"
-                else:
+                elif _is_inline_media(content_type, filename):
+                    headers['Content-Disposition'] = f"inline; filename*=UTF-8''{encoded_filename}"
                     if content_type == 'application/pdf' or filename.lower().endswith('.pdf'):
-                        headers['Content-Disposition'] = f"inline; filename*=UTF-8''{encoded_filename}"
                         content_type = 'application/pdf'
-                    elif content_type != 'text/plain':
-                        headers['Content-Disposition'] = f"attachment; filename*=UTF-8''{encoded_filename}"
+                elif content_type != 'text/plain':
+                    headers['Content-Disposition'] = f"attachment; filename*=UTF-8''{encoded_filename}"
 
                 return FileResponse(file_path, headers=headers, media_type=content_type)
 
