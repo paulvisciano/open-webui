@@ -108,6 +108,7 @@ export class NodePlane {
     if (textureSource === 'url' && node.imageUrl) {
       this._thumbUrl = node.imageUrl;
       this._fullUrl = node.fullUrl;
+      if (node.kind === 'photo') this._applyPhotoMatte();
     } else if (textureSource === 'text' && node.textContent) {
       this._bakeTextTextures();
     }
@@ -515,6 +516,33 @@ export class NodePlane {
       p.isActive === true ? '1' : '0',
       p.isStreaming === true ? '1' : '0',
     ].join('\0');
+  }
+
+  private _applyPhotoMatte(): void {
+    const aspect =
+      this._node.width > 0 && this._node.height > 0
+        ? this._node.width / this._node.height
+        : 4 / 3;
+    const long = 512;
+    const canvasW = aspect >= 1 ? long : Math.max(192, Math.round(long * aspect));
+    const canvasH = aspect >= 1 ? Math.max(192, Math.round(long / aspect)) : long;
+    const canvas = document.createElement('canvas');
+    canvas.width = canvasW;
+    canvas.height = canvasH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const pal = this._framePalette();
+    const [hi, lo, mid] = pal.frame;
+    const wood = Math.max(14, Math.round(Math.min(canvasW, canvasH) * 0.07));
+    this._fillMolding(ctx, 0, 0, canvasW, canvasH, wood, hi, lo, mid);
+    ctx.fillStyle = pal.mat;
+    ctx.fillRect(wood, wood, canvasW - wood * 2, canvasH - wood * 2);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    this._noteTexture = tex;
+    this._material.map = tex;
+    this._material.color.setHex(0xffffff);
+    this._material.needsUpdate = true;
   }
 
   private _bakeTextTextures(): void {

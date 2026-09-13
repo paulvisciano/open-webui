@@ -33,6 +33,8 @@ class TextureCache {
    * cancels the pending fetch and frees the connection for other consumers.
    */
   private inFlightImages = new Map<string, HTMLImageElement>();
+  private inFlightAbort = new Map<string, AbortController>();
+  private blobUrls = new Map<string, string>();
 
   private static readonly MAX_RETRIES = 4;
   private static readonly BASE_RETRY_MS = 500;
@@ -121,17 +123,74 @@ class TextureCache {
   }
 
   private _loadInternal(url: string, callbacks: Set<(t: THREE.Texture) => void>): void {
-    const texture = this.textureLoader.load(
-      url,
-      (t: THREE.Texture) => this.onDone(url, t),
-      undefined,
-      (err: unknown) => this.onLoadError(url, callbacks, err),
-    );
+    const ac = new AbortController();
+    this.inFlightAbort.set(url, ac);
+    void this._fetchTexture(url, ac.signal, callbacks);
+  }
 
-    const img = texture.image as HTMLImageElement | undefined;
-    if (img && typeof img === 'object' && 'src' in img) {
-      this.inFlightImages.set(url, img);
+  private _authHeaders(): HeadersInit {
+    const token = typeof localStorage !== 'undefined' ? localStorage.token : '';
+    return token ? { authorization: `Bearer ${token}` } : {};
+  }
+
+  private async _fetchTexture(
+    url: string,
+    signal: AbortSignal,
+    callbacks: Set<(t: THREE.Texture) => void>,
+  ): Promise<void> {
+    try {
+      if (url.startsWith('blob:') || url.startsWith('data:')) {
+        await this._decodeImage(url, url, signal);
+        return;
+      }
+      const parsed = new URL(url, typeof window !== 'undefined' ? window.location.origin : undefined);
+      parsed.searchParams.delete('token');
+      const res = await fetch(parsed.toString(), {
+        headers: this._authHeaders(),
+        signal,
+        credentials: 'include',
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      if (signal.aborted) return;
+      const objUrl = URL.createObjectURL(blob);
+      this.blobUrls.set(url, objUrl);
+      await this._decodeImage(url, objUrl, signal);
+    } catch (err) {
+      if (signal.aborted) return;
+      const blob = this.blobUrls.get(url);
+      if (blob) {
+        URL.revokeObjectURL(blob);
+        this.blobUrls.delete(url);
+      }
+      this.onLoadError(url, callbacks, err);
     }
+  }
+
+  private _decodeImage(cacheKey: string, src: string, signal: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (signal.aborted) {
+        reject(new DOMException('Aborted', 'AbortError'));
+        return;
+      }
+      const img = new Image();
+      this.inFlightImages.set(cacheKey, img);
+      img.onload = () => {
+        this.inFlightImages.delete(cacheKey);
+        if (signal.aborted) {
+          reject(new DOMException('Aborted', 'AbortError'));
+          return;
+        }
+        const texture = new THREE.Texture(img);
+        this.onDone(cacheKey, texture);
+        resolve();
+      };
+      img.onerror = () => {
+        this.inFlightImages.delete(cacheKey);
+        reject(new Error('image decode failed'));
+      };
+      img.src = src;
+    });
   }
 
   private onLoadError(url: string, callbacks: Set<(t: THREE.Texture) => void>, err: unknown): void {
@@ -161,6 +220,7 @@ class TextureCache {
 
   private onDone(url: string, texture: THREE.Texture): void {
     this.inFlightImages.delete(url);
+    this.inFlightAbort.delete(url);
     this.retries.delete(url);
     if (this._loadTimers) {
       const t = this._loadTimers.get(url);
@@ -300,10 +360,20 @@ class TextureCache {
         this._loadTimers?.has(url) === true ||
         this.loaders.has(url));
 
+    const abort = this.inFlightAbort.get(url);
+    if (abort) {
+      abort.abort();
+      this.inFlightAbort.delete(url);
+    }
     const img = this.inFlightImages.get(url);
     if (img) {
       img.src = '';
       this.inFlightImages.delete(url);
+    }
+    const blob = this.blobUrls.get(url);
+    if (blob) {
+      URL.revokeObjectURL(blob);
+      this.blobUrls.delete(url);
     }
     if (this._loadTimers) {
       const t = this._loadTimers.get(url);
@@ -389,6 +459,10 @@ class TextureCache {
     this.fullResLru.clear();
     this.thumbLru.clear();
     this.inFlightImages.clear();
+    for (const ac of this.inFlightAbort.values()) ac.abort();
+    this.inFlightAbort.clear();
+    for (const blob of this.blobUrls.values()) URL.revokeObjectURL(blob);
+    this.blobUrls.clear();
     this._loadQueue.length = 0;
     this._inFlightCount = 0;
   }
@@ -400,6 +474,8 @@ class TextureCache {
    * fetches for tens of seconds.
    */
   abortInFlight(): void {
+    for (const ac of this.inFlightAbort.values()) ac.abort();
+    this.inFlightAbort.clear();
     for (const img of this.inFlightImages.values()) {
       img.src = '';
     }
