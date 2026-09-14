@@ -2663,8 +2663,12 @@ class ChatTable:
             meta_dict = meta if isinstance(meta, dict) else {}
             content_type = meta_dict.get('content_type')
             name = filename or meta_dict.get('name') or ''
-            is_image = isinstance(content_type, str) and content_type.startswith('image/')
-            if not is_image and not re.search(r'\.(png|jpe?g|gif|webp|heic|bmp|svg)$', str(name), re.I):
+            name_l = str(name).lower()
+            ct = content_type.lower() if isinstance(content_type, str) else ''
+            if name_l.endswith('.dng') or 'dng' in ct:
+                continue
+            is_image = ct.startswith('image/')
+            if not is_image and not re.search(r'\.(png|jpe?g|gif|webp|heic|bmp|svg)$', name_l, re.I):
                 continue
             grouped.setdefault(chat_id, []).append(
                 {

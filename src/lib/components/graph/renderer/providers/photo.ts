@@ -42,7 +42,12 @@ export const photoProvider: NodeKindProvider = {
 		return isPhotoNode(node) || isLibraryPhoto(node);
 	},
 	shouldRender(node: KGNode, ctx: BuildCtx): boolean {
-		if (isChatImageNode(node)) return chatFileIdOf(node).length > 0;
+		if (isChatImageNode(node)) {
+			const title = String(node.properties?.title ?? '');
+			const ct = String(node.properties?.content_type ?? '');
+			if (/\.dng$/i.test(title) || /dng/i.test(ct)) return false;
+			return chatFileIdOf(node).length > 0;
+		}
 		if (isLocalAssetNode(node)) {
 			return ctx.sourceOnline[sourceIdOf(node)] !== false;
 		}
