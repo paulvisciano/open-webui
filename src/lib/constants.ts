@@ -7,8 +7,11 @@ import { browser, dev } from '$app/environment';
 // https://docs.openwebui.com/license.
 export const APP_NAME = 'Open WebUI';
 
-export const WEBUI_HOSTNAME = browser ? (dev ? `${location.hostname}:8080` : ``) : '';
-export const WEBUI_BASE_URL = browser ? (dev ? `${location.protocol}//${WEBUI_HOSTNAME}` : ``) : ``;
+// Same-origin in every environment. In Vite dev the /api, /ws, /ollama, and
+// /openai paths are proxied to the backend so phones on the LAN only need
+// port 5173 (hitting :8080 directly fails CORS and cert SAN checks).
+export const WEBUI_HOSTNAME = browser && dev ? location.host : '';
+export const WEBUI_BASE_URL = browser && dev ? `${location.protocol}//${location.host}` : '';
 export const WEBUI_API_BASE_URL = `${WEBUI_BASE_URL}/api/v1`;
 
 export const OLLAMA_API_BASE_URL = `${WEBUI_BASE_URL}/ollama`;

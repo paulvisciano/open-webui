@@ -162,16 +162,22 @@ fi
 
 echo "▶ Starting Open WebUI backend on port $PORT..."
 
-# Auto-detect primary LAN IP for cross-device access (phone, tablet, etc.)
-LAN_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo "")
+	# Auto-detect primary LAN IP for cross-device access (phone, tablet, etc.)
+	LAN_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo "")
 
-# Generate/regenerate HTTPS cert for the LAN IP so phone mic/camera work over HTTPS
-if [[ -n "$LAN_IP" ]] && command -v mkcert &>/dev/null; then
-    mkdir -p "$SCRIPT_DIR/certs"
-    if [[ ! -f "$SCRIPT_DIR/certs/cert.pem" ]] || ! grep -q "$LAN_IP" "$SCRIPT_DIR/certs/cert.pem" 2>/dev/null; then
-        echo "▶ Generating HTTPS cert for localhost + $LAN_IP..."
-        mkcert -cert-file "$SCRIPT_DIR/certs/cert.pem" -key-file "$SCRIPT_DIR/certs/key.pem" localhost "$LAN_IP" 2>/dev/null
-    fi
+	cert_has_ip() {
+	    local cert="$1" ip="$2"
+	    [[ -f "$cert" ]] && openssl x509 -in "$cert" -noout -text 2>/dev/null | grep -q "IP Address:${ip}"
+	}
+
+	# Generate/regenerate HTTPS cert for the LAN IP so phone mic/camera work over HTTPS.
+	# SAN lives in the cert DER, not as plaintext, so grep on the PEM file is not enough.
+	if [[ -n "$LAN_IP" ]] && command -v mkcert &>/dev/null; then
+	    mkdir -p "$SCRIPT_DIR/certs"
+	    if [[ ! -f "$SCRIPT_DIR/certs/cert.pem" ]] || ! cert_has_ip "$SCRIPT_DIR/certs/cert.pem" "$LAN_IP"; then
+	        echo "▶ Generating HTTPS cert for localhost + $LAN_IP..."
+	        mkcert -cert-file "$SCRIPT_DIR/certs/cert.pem" -key-file "$SCRIPT_DIR/certs/key.pem" localhost 127.0.0.1 "$LAN_IP"
+	    fi
     CA_B64=$(base64 -i "$(mkcert -CAROOT)/rootCA.pem")
     cat > "$SCRIPT_DIR/static/install-ca.html" << CAEOF
 <!doctype html>
@@ -222,15 +228,19 @@ else
     cd "$SCRIPT_DIR"
 fi
 
-echo "▶ Starting frontend on port 5173..."
-if [[ "$BACKGROUND" == "true" ]]; then
-    tmux new-session -d -s "$TMUX_PREFIX-frontend" \
-        "cd '$SCRIPT_DIR' && npm run dev 2>&1 | tee /tmp/open-webui-frontend.log"
-else
-    cd "$SCRIPT_DIR"
-    npm run dev &
-    FRONTEND_PID=$!
-fi
+	echo "▶ Starting frontend on port 5173..."
+	export WEBUI_BACKEND_URL="https://localhost:${PORT}"
+	if [[ -n "$LAN_IP" ]]; then
+	    export VITE_LAN_IP="$LAN_IP"
+	fi
+	if [[ "$BACKGROUND" == "true" ]]; then
+	    tmux new-session -d -s "$TMUX_PREFIX-frontend" \
+	        "cd '$SCRIPT_DIR' && WEBUI_BACKEND_URL='$WEBUI_BACKEND_URL' VITE_LAN_IP='${LAN_IP}' npm run dev 2>&1 | tee /tmp/open-webui-frontend.log"
+	else
+	    cd "$SCRIPT_DIR"
+	    WEBUI_BACKEND_URL="$WEBUI_BACKEND_URL" npm run dev &
+	    FRONTEND_PID=$!
+	fi
 
 echo ""
 echo "═══ All services running ═══"
