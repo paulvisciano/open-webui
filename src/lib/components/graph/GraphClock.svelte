@@ -353,50 +353,26 @@
     let raf = 0;
     let lastKey = '';
     let lastAriaAt = 0;
-    let flipping = false;
-    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
     const tick = () => {
       const dock = document.querySelector<HTMLButtonElement>('.flip-cal-dock');
-      const front = dock?.querySelector<HTMLElement>('.cal-face-front');
-      const under = dock?.querySelector<HTMLElement>('.cal-under');
-      if (!dock || !front || !under) return;
+      const sheet = dock?.querySelector<HTMLElement>('.cal-sheet');
+      if (!dock || !sheet) return;
 
       const nowMs = Date.now();
       const at = viewDate();
       const live = Math.abs(at.getTime() - nowMs) < 5 * 60 * 1000;
       const next = partsOf(at);
-      const traveling = dateTravel != null;
       dock.classList.toggle('is-live', live);
       dock.classList.toggle('is-rewinding', !live);
-      dock.classList.toggle('is-traveling', traveling);
 
       if (next.key !== lastKey) {
-        const fill = (el: HTMLElement, p: typeof next) => {
-          const dow = el.querySelector('.cal-dow');
-          const day = el.querySelector('.cal-day');
-          const mon = el.querySelector('.cal-mon');
-          if (dow) dow.textContent = p.dow;
-          if (day) day.textContent = p.day;
-          if (mon) mon.textContent = `${p.mon}  ·  ${p.year}`;
-        };
-        if (lastKey && !reduceMotion && !flipping && !traveling) {
-          flipping = true;
-          fill(under, next);
-          dock.classList.remove('is-flipping');
-          void dock.offsetWidth;
-          dock.classList.add('is-flipping');
-          window.setTimeout(() => {
-            fill(front, next);
-            dock.classList.remove('is-flipping');
-            flipping = false;
-          }, 560);
-        } else {
-          fill(front, next);
-          fill(under, next);
-          flipping = false;
-          dock.classList.remove('is-flipping');
-        }
+        const dow = sheet.querySelector('.cal-dow');
+        const day = sheet.querySelector('.cal-day');
+        const mon = sheet.querySelector('.cal-mon');
+        if (dow) dow.textContent = next.dow;
+        if (day) day.textContent = next.day;
+        if (mon) mon.textContent = `${next.mon}  ·  ${next.year}`;
         lastKey = next.key;
       }
 
@@ -467,18 +443,10 @@
     onpointercancel={onStickUp}
   >
     <span class="cal-book">
-      <span class="cal-under cal-sheet">
+      <span class="cal-sheet">
         <span class="cal-dow">—</span>
         <span class="cal-day">—</span>
         <span class="cal-mon">—</span>
-      </span>
-      <span class="cal-leaf">
-        <span class="cal-face cal-face-front cal-sheet">
-          <span class="cal-dow">—</span>
-          <span class="cal-day">—</span>
-          <span class="cal-mon">—</span>
-        </span>
-        <span class="cal-face cal-face-back cal-sheet"></span>
       </span>
     </span>
   </button>
@@ -580,18 +548,6 @@
     text-shadow: 0 0 40px oklch(82% 0.14 210 / 35%);
     letter-spacing: 0.04em;
   }
-  @keyframes paper-flip-fwd {
-    0% { transform: rotateX(0deg) rotateY(0deg); }
-    16% { transform: rotateX(-18deg) rotateY(-26deg) translate3d(-4%, 2%, 14px); }
-    48% { transform: rotateX(-98deg) rotateY(-18deg) translate3d(-2%, 4%, 18px); }
-    100% { transform: rotateX(-180deg) rotateY(0deg); }
-  }
-  @keyframes paper-flip-back {
-    0% { transform: rotateX(0deg) rotateY(0deg); }
-    16% { transform: rotateX(-18deg) rotateY(26deg) translate3d(4%, 2%, 14px); }
-    48% { transform: rotateX(-98deg) rotateY(18deg) translate3d(2%, 4%, 18px); }
-    100% { transform: rotateX(-180deg) rotateY(0deg); }
-  }
   .flip-cal-dock:focus-visible {
     outline: 2px solid oklch(82% 0.14 210 / 70%);
     outline-offset: 4px;
@@ -602,7 +558,6 @@
     position: relative;
     width: 118px;
     height: 136px;
-    perspective: 700px;
     transform:
       perspective(640px)
       rotateX(calc(8deg + var(--stick-y, 0) * -14deg))
@@ -617,7 +572,8 @@
     transition: none;
   }
   .cal-sheet {
-    position: relative;
+    position: absolute;
+    inset: 0;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -643,30 +599,6 @@
     box-shadow: inset 0 0 0 1px #c4a056;
     pointer-events: none;
   }
-  .cal-under {
-    position: absolute;
-    inset: 0;
-  }
-  .cal-leaf {
-    position: absolute;
-    inset: 0;
-    transform-origin: 100% 0%;
-    transform-style: preserve-3d;
-  }
-  .cal-face {
-    position: absolute;
-    inset: 0;
-    backface-visibility: hidden;
-    -webkit-backface-visibility: hidden;
-  }
-  .cal-face-back {
-    transform: rotateX(180deg);
-    background: linear-gradient(145deg, #c4a056, #8d6b2c);
-  }
-  .cal-face-back::before {
-    background: #e8dcc4;
-  }
-
   .cal-dow,
   .cal-day,
   .cal-mon {
@@ -697,10 +629,6 @@
     letter-spacing: 0.16em;
     color: #8d6b2c;
   }
-  .flip-cal-dock.is-flipping .cal-leaf {
-    animation: paper-flip-fwd 0.42s cubic-bezier(0.22, 0.08, 0.25, 1) forwards;
-  }
-
   @media (max-width: 767px) {
     .flip-cal-wrap {
       left: 50%;
