@@ -15,6 +15,8 @@
   import { getAssetFileUrl, revealAssetPath } from '$lib/apis/graph';
   import { EXIF_DISPLAY_KEYS, loadPhotoExif } from './exif';
   import { getChatById, deleteChatById } from '$lib/apis/chats';
+  import PanzoomContainer from '$lib/components/common/PanzoomContainer.svelte';
+  import { lockBrowserZoom, preventBrowserZoom, resetPageZoom } from './reset-page-zoom';
 
   interface ChatMessage {
     role: 'user' | 'assistant' | 'system';
@@ -120,6 +122,7 @@
   let fetchedExifNodeId = $state<string | null>(null);
   let fetchedExifRows = $state<{ label: string; value: string }[]>([]);
   let fullscreenUrl = $state<string | null>(null);
+  let fullscreenPanzoom: { reset: () => void } | undefined = $state();
   let deleting = $state(false);
   let personPhotoErrors = $state(new Set<string>());
   let activeTab = $state<'details' | 'connections'>('details');
@@ -712,8 +715,16 @@
   }
 
   function closeFullscreen() {
+    if (!fullscreenUrl) return;
+    fullscreenPanzoom?.reset();
+    resetPageZoom();
     fullscreenUrl = null;
   }
+
+  $effect(() => {
+    if (!fullscreenUrl) return;
+    return lockBrowserZoom();
+  });
 
   function prefersReducedMotion(): boolean {
     return typeof window !== 'undefined'
@@ -787,7 +798,7 @@
     if (phase === 'leaving') return;
     pauseMedia();
     disposePhotoImg();
-    fullscreenUrl = null;
+    closeFullscreen();
     finderPath = null;
     finderCopied = false;
     if (prefersReducedMotion()) {
@@ -933,7 +944,7 @@
         e.preventDefault();
         e.stopPropagation();
         if (fullscreenUrl) {
-          fullscreenUrl = null;
+          closeFullscreen();
         } else {
           handleClose();
         }
@@ -1385,8 +1396,20 @@
   {/if}
 
   {#if fullscreenUrl}
-    <div class="fullscreen-overlay" data-od-id="fullscreen-overlay" onclick={closeFullscreen} role="presentation">
-      <img src={fullscreenUrl} alt={fileName} onclick={(e) => e.stopPropagation()} role="presentation">
+    <div
+      class="fullscreen-overlay"
+      data-od-id="fullscreen-overlay"
+      onclick={closeFullscreen}
+      onwheel={preventBrowserZoom}
+      role="presentation"
+    >
+      <PanzoomContainer
+        bind:this={fullscreenPanzoom}
+        className="fullscreen-panzoom"
+        options={{ minZoom: 1, maxZoom: 8 }}
+      >
+        <img src={fullscreenUrl} alt={fileName} onclick={(e) => e.stopPropagation()} role="presentation">
+      </PanzoomContainer>
       <button class="fullscreen-close" data-od-id="fullscreen-close" aria-label="Close fullscreen" onclick={closeFullscreen}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
@@ -2230,6 +2253,9 @@
     position: fixed;
     inset: 0;
     z-index: 2000;
+    overflow: hidden;
+    touch-action: none;
+    overscroll-behavior: none;
     background:
       radial-gradient(ellipse 80% 60% at 50% 50%, oklch(10% 0.02 260 / 80%), oklch(3% 0.01 260 / 96%));
     backdrop-filter: blur(12px);
@@ -2238,6 +2264,14 @@
     align-items: center;
     justify-content: center;
     animation: fade-in 0.2s ease;
+  }
+  .fullscreen-panzoom {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    touch-action: none;
   }
   @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
   .fullscreen-overlay img {
