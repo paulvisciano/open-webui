@@ -49,6 +49,7 @@ import {
 } from './Layout';
 import { textureCache } from '../services/TextureCache';
 import { getAssetFileUrl } from '$lib/apis/graph';
+import { WallQr } from '../wall-qr';
 
 /** Camera field of view in degrees. */
 const CAMERA_FOV = 60;
@@ -123,6 +124,7 @@ export class SceneManager {
   private _hoveredNodeId: string | null = null;
   private _cursorMode: 'idle' | 'grabbing' | 'pointer' = 'idle';
   private _hall: THREE.Group | null = null;
+  private _wallQr: WallQr | null = null;
   private _hallBackZ = 0;
   private _skyTime: { value: number } | null = null;
 
@@ -251,6 +253,7 @@ export class SceneManager {
 
     this.bindEvents();
     this._renderer.domElement.style.cursor = 'grab';
+    this._wallQr = new WallQr(this._scene);
   }
 
   /** The perspective camera. */
@@ -355,6 +358,10 @@ export class SceneManager {
     worldPos.y += oy;
     worldPos.z += -ox * Math.sin(yaw);
     return this.projectToScreen(worldPos);
+  }
+
+  setWallQr(nodeId: string | null, url: string | null = null): void {
+    this._wallQr?.set(nodeId, url);
   }
 
   getPlaneScreenRect(nodeId: string): { left: number; top: number; width: number; height: number } | null {
@@ -759,18 +766,11 @@ export class SceneManager {
     this.beginFly(0, 0, z, 1600, 0, 0);
   }
 
-  dashAlongLook(): void {
+  dashCorridorForward(): void {
     if (this._disposed) return;
-    const dir = new THREE.Vector3();
-    this._camera.getWorldDirection(dir);
-    dir.y = 0;
-    if (dir.lengthSq() < 1e-8) dir.set(0, 0, -1);
-    dir.normalize();
     const dist = 560;
-    const limit = this.hallInsideX();
-    const x = Math.max(-limit, Math.min(limit, this._basePos.x + dir.x * dist));
-    const z = Math.max(this._minCameraZ, Math.min(this._maxCameraZ, this._basePos.z + dir.z * dist));
-    this.beginFly(x, this._basePos.y, z, 360, this._lookYaw, this._lookPitch);
+    const z = Math.max(this._minCameraZ, Math.min(this._maxCameraZ, this._basePos.z - dist));
+    this.beginFly(0, 0, z, 360, this._lookYaw, this._lookPitch);
   }
 
   private beginFly(x: number, y: number, z: number, durationMs: number, yawTo: number, pitchTo = 0): void {
@@ -880,6 +880,8 @@ export class SceneManager {
     this._resizeObserver.disconnect();
     this.unbindEvents();
     this._chunkManager.dispose();
+    this._wallQr?.dispose();
+    this._wallQr = null;
     this.disposeGalleryHall();
     this._sharedGeometry.dispose();
     this._renderer.dispose();
@@ -1407,6 +1409,7 @@ export class SceneManager {
 
     const velMag = this._velocity.length();
     this._chunkManager.update(this._basePos, velMag);
+    this._wallQr?.tick((id) => this._chunkManager.findPlaneByNodeId(id));
     this.tickVanish();
     this.tickVideoPreviews();
 

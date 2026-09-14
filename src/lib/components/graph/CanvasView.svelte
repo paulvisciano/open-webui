@@ -30,9 +30,13 @@
   import type { CanvasNode } from './renderer/types';
   import { dateFromProperties, loadPhotoExif, peekExif, plaqueFromExif, type PlaqueInfo } from './exif';
   import { wallNeighborId } from './renderer/wall-nav';
+  import { conversationDeepLink } from './deeplink';
+  import { mobile } from '$lib/stores';
   import { hoverCaption } from './hover-caption';
   import { getAssetFileUrl, getChatFileUrl } from '$lib/apis/graph';
   import { isChatImageNode } from './renderer/Layout';
+  import PanzoomContainer from '$lib/components/common/PanzoomContainer.svelte';
+  import { lockBrowserZoom, preventBrowserZoom, resetPageZoom } from './reset-page-zoom';
 
   /** Default pinch-zoom sensitivity. The KG config store exposed this via a
    *  settings drawer; OWUI has no such UI yet so we use a fixed constant. */
@@ -47,12 +51,14 @@
     dateLabel = $bindable<string | null>(null),
     timelineOpen = $bindable(false),
     inspecting = $bindable(false),
+    wallQrOrigin = '',
   }: {
     onqueryAbout?: (node: KGNode) => void;
     onselectconversation?: (id: string) => void;
     dateLabel?: string | null;
     timelineOpen?: boolean;
     inspecting?: boolean;
+    wallQrOrigin?: string;
   } = $props();
 
   let containerEl: HTMLDivElement | undefined = $state();
@@ -105,6 +111,7 @@
     leaving: boolean;
   } | null>(null);
   let lightboxMediaEl: HTMLElement | undefined = $state();
+  let lightboxPanzoom: { reset: () => void } | undefined = $state();
   let lightboxLeaveTimer: ReturnType<typeof setTimeout> | null = null;
   let videoAutoplayTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -344,10 +351,13 @@
       origin: sm?.getPlaneScreenRect(id) ?? photoPlaqueRect,
       leaving: false,
     };
+    lightboxPanzoom?.reset();
   }
 
   function closeLightbox(): void {
     if (!lightbox || lightbox.leaving) return;
+    lightboxPanzoom?.reset();
+    resetPageZoom();
     lightbox = { ...lightbox, leaving: true };
     morphLightbox(true);
     lightboxLeaveTimer = setTimeout(() => {
@@ -355,6 +365,11 @@
       lightbox = null;
     }, 500);
   }
+
+  $effect(() => {
+    if (!lightbox || lightbox.leaving) return;
+    return lockBrowserZoom();
+  });
 
   function maximizeVideo(id: string): void {
     openLightbox(id);
@@ -546,7 +561,7 @@
   }
 
   function handleDoubleTap(_x: number, _y: number): void {
-    sceneManager?.dashAlongLook();
+    sceneManager?.dashCorridorForward();
   }
 
   function updateDateLabel(worldZ: number): void {
@@ -892,6 +907,7 @@
       clearTimeout(lightboxLeaveTimer);
       lightboxLeaveTimer = null;
     }
+    if (lightbox) resetPageZoom();
     clearVideoAutoplay();
     containerEl?.removeEventListener('pointermove', onContainerPointerMove);
     graphStore.setVanishHandler(null);
@@ -975,16 +991,12 @@
   // Fly the camera to the active conversation node whenever the active id
   // changes. The layout rebuild is throttled, so the node may not be mounted
   // in the chunk manager on the first frame — retry on the next frame until
-  // the plane is found or a short timeout elapses.
+  // the plane is found or a short timeout elapses. Deeplinks (`?chat=`) rely
+  // on this including the first id after mount.
   let activeFlyTimer: ReturnType<typeof setTimeout> | null = null;
-  let firstActiveSeen = false;
   $effect(() => {
     const activeId = graphStore.activeConversationId;
     if (!mounted || !sceneManager || !activeId) return;
-    if (!firstActiveSeen) {
-      firstActiveSeen = true;
-      return;
-    }
     if (activeFlyTimer) {
       clearTimeout(activeFlyTimer);
       activeFlyTimer = null;
@@ -997,11 +1009,22 @@
         sm.flyToNode(activeId);
         return;
       }
-      if (attempts++ < 20) {
+      if (attempts++ < 40) {
         activeFlyTimer = setTimeout(tryFly, 100);
       }
     };
     activeFlyTimer = setTimeout(tryFly, 220);
+  });
+
+  $effect(() => {
+    const sm = sceneManager;
+    if (!sm) return;
+    const id = graphStore.activeConversationId;
+    if (!id || !wallQrOrigin || $mobile) {
+      sm.setWallQr(null);
+      return;
+    }
+    sm.setWallQr(id, conversationDeepLink(wallQrOrigin, id));
   });
 
   // Reset wheel offset when timeline closes; initialize when it opens
@@ -1084,11 +1107,23 @@
 {/if}
 
 {#if lightbox}
-  <div class="lightbox" class:is-leaving={lightbox.leaving} role="presentation" onclick={closeLightbox}>
+  <div
+    class="lightbox"
+    class:is-leaving={lightbox.leaving}
+    role="presentation"
+    onclick={closeLightbox}
+    onwheel={preventBrowserZoom}
+  >
     {#if lightbox.kind === 'video'}
       <video bind:this={lightboxMediaEl} class="lightbox-media" src={lightbox.url} controls autoplay onclick={(e) => e.stopPropagation()}></video>
     {:else}
-      <img bind:this={lightboxMediaEl} class="lightbox-media" src={lightbox.url} alt={lightbox.alt} onclick={(e) => e.stopPropagation()} />
+      <PanzoomContainer
+        bind:this={lightboxPanzoom}
+        className="lightbox-panzoom"
+        options={{ minZoom: 1, maxZoom: 8 }}
+      >
+        <img bind:this={lightboxMediaEl} class="lightbox-media" src={lightbox.url} alt={lightbox.alt} onclick={(e) => e.stopPropagation()} />
+      </PanzoomContainer>
     {/if}
     <button type="button" class="lightbox-close" aria-label="Close" onclick={closeLightbox}>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
@@ -1423,10 +1458,21 @@
     align-items: center;
     justify-content: center;
     padding: 24px;
+    overflow: hidden;
+    touch-action: none;
+    overscroll-behavior: none;
     background: oklch(4% 0.01 260 / 92%);
     backdrop-filter: blur(16px);
     -webkit-backdrop-filter: blur(16px);
     transition: background 0.8s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .lightbox-panzoom {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    touch-action: none;
   }
   .lightbox.is-leaving {
     background: oklch(4% 0.01 260 / 0%);

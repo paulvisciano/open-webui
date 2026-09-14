@@ -3,6 +3,8 @@
 	import { fly } from 'svelte/transition';
 	import type { Writable } from 'svelte/store';
 	import type { i18n as i18nType } from 'i18next';
+	import { afterNavigate, goto } from '$app/navigation';
+	import { page } from '$app/stores';
 
 	import { showSidebar, mobile, showSearch } from '$lib/stores';
 	import { createNewChat, getChatList, deleteChatById } from '$lib/apis/chats';
@@ -29,6 +31,7 @@
 	import type { KGNode } from './constants';
 	import { createSheetDrag, type SheetSnap } from './composables/use-sheet-drag';
 	import { CANVAS_DISMISS_DRAG_PX, shouldDismissChatPanel } from './canvas-dismiss';
+	import { graphConversationPath, parseGraphChatId, resolveLanOrigin } from './deeplink';
 
 	const i18n: Writable<i18nType> = getContext('i18n');
 
@@ -52,6 +55,8 @@
 	let corridorTimelineOpen = $state(false);
 	let inspecting = $state(false);
 	let orbCloseTimer: ReturnType<typeof setTimeout> | null = null;
+	let wallQrOrigin = $state('');
+	let syncingChatUrl = false;
 
 	$effect(() => {
 		if (!$showSearch) return;
@@ -197,11 +202,32 @@
 	};
 
 	// ── Conversation selection ───────────────────────────────────────
+	const syncChatUrl = (chatId: string | null) => {
+		const pathname = $page.url?.pathname || '/graph';
+		const path = graphConversationPath(chatId, pathname);
+		const current = `${pathname}${$page.url?.search ?? ''}`;
+		if (path === current) return;
+		syncingChatUrl = true;
+		void goto(path, { replaceState: true, noScroll: true, keepFocus: true }).finally(() => {
+			syncingChatUrl = false;
+		});
+	};
+
+	const applyChatDeeplink = (url?: URL | null) => {
+		if (syncingChatUrl) return;
+		const id = parseGraphChatId(url ?? $page.url);
+		if (id && (id !== selectedChatId || !showChatPanel)) void openChat(id);
+	};
+
 	const openChat = async (chatId: string) => {
 		if (!chatId) return;
 		// Same pointerup that selected this conversation also bubbles to the
 		// canvas dismiss handler — skip that dismiss so the panel stays open.
 		skipCanvasDismiss = true;
+		if (chatId === selectedChatId && showChatPanel) {
+			syncChatUrl(chatId);
+			return;
+		}
 		showSidebar.set(false);
 		chatLoading = true;
 		selectedChatId = chatId;
@@ -209,6 +235,7 @@
 		sheetSnap = 'peek';
 		showChatPanel = true;
 		graphStore.setActiveConversation(chatId);
+		syncChatUrl(chatId);
 		await tick();
 		document.getElementById('chat-input')?.blur();
 		(document.activeElement as HTMLElement | null)?.blur();
@@ -221,6 +248,7 @@
 		chatDraftKey = `${Date.now()}`;
 		sheetSnap = 'peek';
 		showChatPanel = true;
+		syncChatUrl(null);
 	};
 
 	const startVoiceChat = async ({ continueChat = false } = {}) => {
@@ -317,9 +345,11 @@
 			voiceChatVisible = false;
 			return;
 		}
+		syncingChatUrl = true;
 		showChatPanel = false;
 		sheetSnap = 'peek';
 		graphStore.setActiveConversation('');
+		syncChatUrl(null);
 	};
 
 	$effect(() => {
@@ -335,6 +365,10 @@
 			if (graphStore.pendingOpenChatId === id) graphStore.pendingOpenChatId = null;
 		});
 		void openChat(id);
+	});
+
+	afterNavigate(({ to }) => {
+		applyChatDeeplink(to?.url ?? $page.url);
 	});
 
 	$effect(() => {
@@ -363,6 +397,7 @@
 			await refreshRecentChats();
 			// Live-update the graph so the new conversation node appears immediately.
 			await graphStore.loadConversations(token);
+			syncChatUrl(chat.id);
 		}
 		return chat;
 	};
@@ -372,6 +407,7 @@
 		selectedChatId = id;
 		chatDraftKey = '';
 		graphStore.setActiveConversation(id);
+		syncChatUrl(id);
 	};
 
 	const deleteEmbeddedChat = async (id: string) => {
@@ -391,6 +427,7 @@
 			showChatPanel = false;
 			sheetSnap = 'peek';
 			graphStore.setActiveConversation('');
+			syncChatUrl(null);
 		}
 	};
 
@@ -501,6 +538,7 @@
 		window.addEventListener('keydown', handleKeydown);
 		await refreshRecentChats();
 		graphStore.startPresencePoll(graphToken);
+		wallQrOrigin = await resolveLanOrigin();
 	});
 
 	onDestroy(() => {
@@ -526,6 +564,7 @@
 			bind:dateLabel={corridorDate}
 			bind:timelineOpen={corridorTimelineOpen}
 			bind:inspecting={inspecting}
+			{wallQrOrigin}
 		/>
 
 		{#if !$showSidebar && !showChatPanel && !(voiceStarting || (voiceActive && voiceService))}
