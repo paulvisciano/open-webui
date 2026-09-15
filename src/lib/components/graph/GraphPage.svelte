@@ -22,7 +22,6 @@
 	import Chat from '$lib/components/chat/Chat.svelte';
 	import GraphVoiceOverlay from './GraphVoiceOverlay.svelte';
 	import VoiceWaveform from './VoiceWaveform.svelte';
-	import Spinner from '$lib/components/common/Spinner.svelte';
 	import { VoiceCallService } from '$lib/components/chat/MessageInput/VoiceCallService.svelte';
 
 	import { graphStore } from './stores/graph.svelte';
@@ -47,36 +46,6 @@
 	let chatDraftKey = $state<string>('');
 	let showChatPanel = $state(false);
 	let chatSheetEl: HTMLDivElement | undefined = $state();
-	let chatLoading = $state(false);
-	let chatInputLocked = $state(false);
-	let chatInputUnlockTimer: ReturnType<typeof setTimeout> | null = null;
-
-	const blurChatInput = () => {
-		const root = document.getElementById('chat-input');
-		root?.blur();
-		(root?.querySelector('[contenteditable="true"]') as HTMLElement | null)?.blur();
-		const active = document.activeElement as HTMLElement | null;
-		if (active && (active.id === 'chat-input' || root?.contains(active))) active.blur();
-	};
-
-	const lockChatInputOnOpen = () => {
-		chatInputLocked = true;
-		if (chatInputUnlockTimer) clearTimeout(chatInputUnlockTimer);
-		const unlock = () => {
-			window.removeEventListener('pointerup', onUp);
-			window.removeEventListener('pointercancel', onUp);
-			blurChatInput();
-			chatInputUnlockTimer = setTimeout(() => {
-				chatInputLocked = false;
-				blurChatInput();
-				requestAnimationFrame(blurChatInput);
-			}, 80);
-		};
-		const onUp = () => unlock();
-		window.addEventListener('pointerup', onUp);
-		window.addEventListener('pointercancel', onUp);
-		chatInputUnlockTimer = setTimeout(unlock, 450);
-	};
 	let orbOptionsOpen = $state(false);
 	let graphSearchOpen = $state(false);
 	let corridorDate = $state<string | null>(null);
@@ -257,27 +226,20 @@
 			return;
 		}
 		showSidebar.set(false);
-		chatLoading = true;
 		selectedChatId = chatId;
 		chatDraftKey = '';
 		showChatPanel = true;
 		graphStore.setActiveConversation(chatId);
 		syncChatUrl(chatId);
-		lockChatInputOnOpen();
-		await tick();
-		blurChatInput();
-		chatLoading = false;
 	};
 
 	const startNewChat = async () => {
 		showSidebar.set(false);
+		skipCanvasDismiss = true;
 		selectedChatId = '';
 		chatDraftKey = `${Date.now()}`;
 		showChatPanel = true;
 		syncChatUrl(null);
-		lockChatInputOnOpen();
-		await tick();
-		blurChatInput();
 	};
 
 	const startVoiceChat = async ({ continueChat = false } = {}) => {
@@ -910,7 +872,7 @@
 	{#if showChatPanel}
 		<div
 			bind:this={chatSheetEl}
-			class="chat-side-panel graph-chat-panel flex flex-col z-30 {voiceHidesChat ? 'voice-hidden' : ''} {$mobile ? 'chat-sheet' : ''} {chatInputLocked ? 'input-locked' : ''}"
+			class="chat-side-panel graph-chat-panel flex flex-col z-30 {voiceHidesChat ? 'voice-hidden' : ''} {$mobile ? 'chat-sheet' : ''}"
 			style={voiceHidesChat
 				? 'display: none;'
 				: $mobile
@@ -924,11 +886,6 @@
 				</div>
 			{/if}
 		<div class="flex-1 overflow-hidden min-h-0">
-				{#if chatLoading}
-					<div class="flex h-full items-center justify-center">
-						<Spinner className="size-5" />
-					</div>
-				{:else}
 				<Chat
 					embedded={true}
 					chatIdProp={selectedChatId}
@@ -951,7 +908,6 @@
 						}}
 					onStartEmbeddedVoice={() => startVoiceChat({ continueChat: true })}
 					/>
-				{/if}
 			</div>
 		</div>
 	{/if}
@@ -1671,6 +1627,52 @@
 		color: oklch(90% 0.005 250);
 	}
 
+	.graph-chat-panel :global(.embedded-boot) {
+		display: flex;
+		flex-direction: column;
+		height: 100%;
+		min-height: 0;
+	}
+	.graph-chat-panel :global(.embedded-boot-header) {
+		flex-shrink: 0;
+		height: 3.25rem;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 0 14px;
+		border-bottom: 1px solid oklch(82% 0.14 210 / 14%);
+	}
+	.graph-chat-panel :global(.embedded-boot-bar) {
+		display: block;
+		background: oklch(82% 0.08 85 / 16%);
+	}
+	.graph-chat-panel :global(.embedded-boot-title) {
+		width: 7.5rem;
+		height: 11px;
+		border-radius: 999px;
+	}
+	.graph-chat-panel :global(.embedded-boot-icon) {
+		width: 28px;
+		height: 28px;
+		border-radius: 50%;
+	}
+	.graph-chat-panel :global(.embedded-boot-body) {
+		flex: 1;
+	}
+	.graph-chat-panel :global(.embedded-boot-composer) {
+		flex-shrink: 0;
+		margin: 10px 14px calc(10px + env(safe-area-inset-bottom, 0px));
+		height: 52px;
+		border-radius: 26px;
+		background: oklch(16% 0.02 70 / 48%);
+		border: 1px solid oklch(82% 0.08 85 / 22%);
+		box-shadow: inset 0 1px 0 oklch(100% 0 0 / 10%);
+		animation: chat-boot-pulse 1.6s ease-in-out infinite;
+	}
+	@keyframes chat-boot-pulse {
+		50% { opacity: 0.55; }
+	}
+
 	.chat-sheet :global(.embedded-chat-header) {
 		min-height: 3.25rem;
 	}
@@ -1746,11 +1748,6 @@
 	}
 	.chat-sheet.sheet-dragging {
 		transition: none;
-	}
-	.graph-chat-panel.input-locked :global(#chat-input),
-	.graph-chat-panel.input-locked :global(#chat-input *),
-	.graph-chat-panel.input-locked :global([contenteditable='true']) {
-		pointer-events: none !important;
 	}
 	.sheet-handle {
 		flex-shrink: 0;
