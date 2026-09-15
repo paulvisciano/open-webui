@@ -232,7 +232,7 @@
 		chatLoading = true;
 		selectedChatId = chatId;
 		chatDraftKey = '';
-		sheetSnap = 'peek';
+		sheetSnap = $mobile ? 'full' : 'peek';
 		showChatPanel = true;
 		graphStore.setActiveConversation(chatId);
 		syncChatUrl(chatId);
@@ -246,7 +246,7 @@
 		showSidebar.set(false);
 		selectedChatId = '';
 		chatDraftKey = `${Date.now()}`;
-		sheetSnap = 'peek';
+		sheetSnap = $mobile ? 'full' : 'peek';
 		showChatPanel = true;
 		syncChatUrl(null);
 	};
@@ -392,12 +392,13 @@
 			return null;
 		});
 		if (chat?.id) {
-			selectedChatId = chat.id;
+			// Do not set selectedChatId here. Chat.svelte still has the in-flight
+			// first message in memory; binding chatIdProp now would reload this
+			// empty row and wipe it. onSelectEmbeddedChat runs after Chat pins
+			// loadedChatIdProp.
 			chatDraftKey = '';
 			await refreshRecentChats();
-			// Live-update the graph so the new conversation node appears immediately.
 			await graphStore.loadConversations(token);
-			syncChatUrl(chat.id);
 		}
 		return chat;
 	};
@@ -534,8 +535,14 @@
 		}
 	};
 
+	const preventFileNavigation = (e: DragEvent) => {
+		if (e.dataTransfer?.types?.includes('Files')) e.preventDefault();
+	};
+
 	onMount(async () => {
 		window.addEventListener('keydown', handleKeydown);
+		window.addEventListener('dragover', preventFileNavigation, true);
+		window.addEventListener('drop', preventFileNavigation, true);
 		await refreshRecentChats();
 		graphStore.startPresencePoll(graphToken);
 		wallQrOrigin = await resolveLanOrigin();
@@ -543,6 +550,8 @@
 
 	onDestroy(() => {
 		window.removeEventListener('keydown', handleKeydown);
+		window.removeEventListener('dragover', preventFileNavigation, true);
+		window.removeEventListener('drop', preventFileNavigation, true);
 		graphStore.stopPresencePoll();
 		graphStore.stopScanPoll();
 	});
@@ -1717,6 +1726,7 @@
 	}
 	.chat-sheet.sheet-expanded {
 		border-radius: 0;
+		transform: translate3d(0, 0, 0);
 	}
 	.sheet-handle {
 		flex-shrink: 0;
