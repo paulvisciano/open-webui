@@ -29,7 +29,7 @@
 	import { isTrashSource } from './assets';
 	import { scanProgressStore, countsFromScanResponse } from './stores/scan-progress.svelte';
 	import type { KGNode } from './constants';
-	import { createSheetDrag, type SheetSnap } from './composables/use-sheet-drag';
+	import { createSheetDrag } from './composables/use-sheet-drag';
 	import { CANVAS_DISMISS_DRAG_PX, shouldDismissChatPanel } from './canvas-dismiss';
 	import { graphConversationPath, parseGraphChatId, resolveLanOrigin } from './deeplink';
 
@@ -47,8 +47,36 @@
 	let chatDraftKey = $state<string>('');
 	let showChatPanel = $state(false);
 	let chatSheetEl: HTMLDivElement | undefined = $state();
-	let sheetSnap: SheetSnap = $state('peek');
 	let chatLoading = $state(false);
+	let chatInputLocked = $state(false);
+	let chatInputUnlockTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const blurChatInput = () => {
+		const root = document.getElementById('chat-input');
+		root?.blur();
+		(root?.querySelector('[contenteditable="true"]') as HTMLElement | null)?.blur();
+		const active = document.activeElement as HTMLElement | null;
+		if (active && (active.id === 'chat-input' || root?.contains(active))) active.blur();
+	};
+
+	const lockChatInputOnOpen = () => {
+		chatInputLocked = true;
+		if (chatInputUnlockTimer) clearTimeout(chatInputUnlockTimer);
+		const unlock = () => {
+			window.removeEventListener('pointerup', onUp);
+			window.removeEventListener('pointercancel', onUp);
+			blurChatInput();
+			chatInputUnlockTimer = setTimeout(() => {
+				chatInputLocked = false;
+				blurChatInput();
+				requestAnimationFrame(blurChatInput);
+			}, 80);
+		};
+		const onUp = () => unlock();
+		window.addEventListener('pointerup', onUp);
+		window.addEventListener('pointercancel', onUp);
+		chatInputUnlockTimer = setTimeout(unlock, 450);
+	};
 	let orbOptionsOpen = $state(false);
 	let graphSearchOpen = $state(false);
 	let corridorDate = $state<string | null>(null);
@@ -203,7 +231,7 @@
 
 	// ── Conversation selection ───────────────────────────────────────
 	const syncChatUrl = (chatId: string | null) => {
-		const pathname = $page.url?.pathname || '/graph';
+		const pathname = $page.url?.pathname || '/gallery';
 		const path = graphConversationPath(chatId, pathname);
 		const current = `${pathname}${$page.url?.search ?? ''}`;
 		if (path === current) return;
@@ -232,13 +260,12 @@
 		chatLoading = true;
 		selectedChatId = chatId;
 		chatDraftKey = '';
-		sheetSnap = $mobile ? 'full' : 'peek';
 		showChatPanel = true;
 		graphStore.setActiveConversation(chatId);
 		syncChatUrl(chatId);
+		lockChatInputOnOpen();
 		await tick();
-		document.getElementById('chat-input')?.blur();
-		(document.activeElement as HTMLElement | null)?.blur();
+		blurChatInput();
 		chatLoading = false;
 	};
 
@@ -246,9 +273,11 @@
 		showSidebar.set(false);
 		selectedChatId = '';
 		chatDraftKey = `${Date.now()}`;
-		sheetSnap = $mobile ? 'full' : 'peek';
 		showChatPanel = true;
 		syncChatUrl(null);
+		lockChatInputOnOpen();
+		await tick();
+		blurChatInput();
 	};
 
 	const startVoiceChat = async ({ continueChat = false } = {}) => {
@@ -347,7 +376,6 @@
 		}
 		syncingChatUrl = true;
 		showChatPanel = false;
-		sheetSnap = 'peek';
 		graphStore.setActiveConversation('');
 		syncChatUrl(null);
 	};
@@ -375,11 +403,7 @@
 		if (!showChatPanel || !chatSheetEl || !$mobile || voiceActive) return;
 		const drag = createSheetDrag({
 			sheet: chatSheetEl,
-			onDismiss: closeChatPanel,
-			getSnap: () => sheetSnap,
-			setSnap: (snap) => {
-				sheetSnap = snap;
-			}
+			onDismiss: closeChatPanel
 		});
 		return () => drag.destroy();
 	});
@@ -426,7 +450,6 @@
 			selectedChatId = '';
 			chatDraftKey = '';
 			showChatPanel = false;
-			sheetSnap = 'peek';
 			graphStore.setActiveConversation('');
 			syncChatUrl(null);
 		}
@@ -887,7 +910,7 @@
 	{#if showChatPanel}
 		<div
 			bind:this={chatSheetEl}
-			class="chat-side-panel graph-chat-panel flex flex-col z-30 {voiceHidesChat ? 'voice-hidden' : ''} {$mobile ? 'chat-sheet' : ''} {sheetSnap === 'full' ? 'sheet-expanded' : ''}"
+			class="chat-side-panel graph-chat-panel flex flex-col z-30 {voiceHidesChat ? 'voice-hidden' : ''} {$mobile ? 'chat-sheet' : ''} {chatInputLocked ? 'input-locked' : ''}"
 			style={voiceHidesChat
 				? 'display: none;'
 				: $mobile
@@ -1715,8 +1738,8 @@
 		height: 100dvh;
 		max-height: 100dvh;
 		border-left: 0;
-		border-radius: 18px 18px 0 0;
-		transform: translate3d(0, 42%, 0);
+		border-radius: 0;
+		transform: translate3d(0, 0, 0);
 		transition: transform 0.4s cubic-bezier(0.32, 0.72, 0, 1);
 		box-shadow: 0 -12px 40px oklch(0% 0 0 / 35%);
 		padding-bottom: env(safe-area-inset-bottom, 0px);
@@ -1724,9 +1747,10 @@
 	.chat-sheet.sheet-dragging {
 		transition: none;
 	}
-	.chat-sheet.sheet-expanded {
-		border-radius: 0;
-		transform: translate3d(0, 0, 0);
+	.graph-chat-panel.input-locked :global(#chat-input),
+	.graph-chat-panel.input-locked :global(#chat-input *),
+	.graph-chat-panel.input-locked :global([contenteditable='true']) {
+		pointer-events: none !important;
 	}
 	.sheet-handle {
 		flex-shrink: 0;

@@ -1,13 +1,8 @@
 import { browser } from '$app/environment';
 
-export type SheetSnap = 'peek' | 'full';
-
 interface SheetDragOptions {
 	sheet: HTMLElement;
 	onDismiss: () => void;
-	getSnap: () => SheetSnap;
-	setSnap: (snap: SheetSnap) => void;
-	peekRatio?: number;
 	dismissThreshold?: number;
 	velocityThreshold?: number;
 }
@@ -15,36 +10,23 @@ interface SheetDragOptions {
 export function createSheetDrag(options: SheetDragOptions) {
 	if (!browser) return { destroy: () => {} };
 
-	const {
-		sheet,
-		onDismiss,
-		getSnap,
-		setSnap,
-		peekRatio = 0.42,
-		dismissThreshold = 110,
-		velocityThreshold = 0.55
-	} = options;
+	const { sheet, onDismiss, dismissThreshold = 110, velocityThreshold = 0.55 } = options;
 
 	let startY = 0;
 	let currentY = 0;
 	let startTime = 0;
-	let startTranslate = 0;
 	let dragging = false;
 	let armed = false;
 	let scrollable: HTMLElement | null = null;
 
-	const restY = (snap: SheetSnap, h: number) => (snap === 'full' ? 0 : h * peekRatio);
-
-	const applyRest = (snap: SheetSnap, animate = true) => {
-		const y = restY(snap, sheet.getBoundingClientRect().height);
-		sheet.classList.toggle('sheet-expanded', snap === 'full');
+	const applyRest = (animate = true) => {
 		if (animate) sheet.classList.remove('sheet-dragging');
 		else sheet.classList.add('sheet-dragging');
-		sheet.style.transform = `translate3d(0, ${y}px, 0)`;
+		sheet.style.transform = 'translate3d(0, 0, 0)';
 	};
 
-	applyRest(getSnap(), false);
-	requestAnimationFrame(() => applyRest(getSnap(), true));
+	applyRest(false);
+	requestAnimationFrame(() => applyRest(true));
 
 	function isScrollableAtTop(el: HTMLElement): boolean {
 		return el.scrollTop <= 1;
@@ -79,11 +61,9 @@ export function createSheetDrag(options: SheetDragOptions) {
 		startY = e.touches[0].clientY;
 		currentY = startY;
 		startTime = Date.now();
-		startTranslate = restY(getSnap(), sheet.getBoundingClientRect().height);
 		scrollable = findScrollableAncestor(e.target);
 		const atTop = scrollable ? isScrollableAtTop(scrollable) : true;
-		const handle = isHandle(e.target);
-		armed = handle || atTop || getSnap() === 'peek';
+		armed = isHandle(e.target) || atTop;
 		dragging = false;
 	}
 
@@ -93,7 +73,7 @@ export function createSheetDrag(options: SheetDragOptions) {
 		const dy = currentY - startY;
 		if (!dragging) {
 			if (Math.abs(dy) < 8) return;
-			if (dy < 0 && getSnap() === 'full' && scrollable && !isScrollableAtTop(scrollable)) {
+			if (dy < 0) {
 				armed = false;
 				return;
 			}
@@ -106,7 +86,7 @@ export function createSheetDrag(options: SheetDragOptions) {
 		}
 		e.preventDefault();
 		const h = sheet.getBoundingClientRect().height;
-		let y = startTranslate + dy;
+		let y = dy;
 		if (y < 0) y = y * 0.18;
 		if (y > h) y = h;
 		sheet.style.transform = `translate3d(0, ${y}px, 0)`;
@@ -119,44 +99,18 @@ export function createSheetDrag(options: SheetDragOptions) {
 		}
 		const h = sheet.getBoundingClientRect().height;
 		const dy = currentY - startY;
-		const y = Math.max(0, startTranslate + dy);
 		const dt = Math.max(Date.now() - startTime, 1);
 		const velocity = dy / dt;
-		const peekY = restY('peek', h);
-		const snap = getSnap();
 
 		dragging = false;
 		armed = false;
 		sheet.classList.remove('sheet-dragging');
 
-		if (velocity > velocityThreshold && dy > 36) {
-			if (snap === 'full') {
-				setSnap('peek');
-				applyRest('peek');
-			} else {
-				onDismiss();
-			}
-			return;
-		}
-		if (velocity < -velocityThreshold && dy < -28) {
-			setSnap('full');
-			applyRest('full');
-			return;
-		}
-
-		const midPeekDismiss = (peekY + h) / 2;
-		const midFullPeek = peekY / 2;
-		if (y >= midPeekDismiss || (snap === 'peek' && dy > dismissThreshold)) {
+		if ((velocity > velocityThreshold && dy > 36) || dy > dismissThreshold || dy > h * 0.28) {
 			onDismiss();
 			return;
 		}
-		if (y <= midFullPeek) {
-			setSnap('full');
-			applyRest('full');
-			return;
-		}
-		setSnap('peek');
-		applyRest('peek');
+		applyRest(true);
 	}
 
 	sheet.addEventListener('touchstart', onTouchStart, { passive: true });
