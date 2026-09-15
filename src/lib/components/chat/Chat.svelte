@@ -4858,11 +4858,22 @@
 			</div>
 		</div>
 	{:else if loading}
-		<div class=" flex items-center justify-center h-full w-full">
-			<div class="m-auto">
-				<Spinner className="size-5" />
+		{#if embedded}
+			<div class="embedded-boot" aria-busy="true">
+				<div class="embedded-boot-header">
+					<span class="embedded-boot-bar embedded-boot-title"></span>
+					<span class="embedded-boot-bar embedded-boot-icon"></span>
+				</div>
+				<div class="embedded-boot-body"></div>
+				<div class="embedded-boot-composer"></div>
 			</div>
-		</div>
+		{:else}
+			<div class=" flex items-center justify-center h-full w-full">
+				<div class="m-auto">
+					<Spinner className="size-5" />
+				</div>
+			</div>
+		{/if}
 	{/if}
 </div>
 
