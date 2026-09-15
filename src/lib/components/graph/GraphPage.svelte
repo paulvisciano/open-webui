@@ -1528,33 +1528,42 @@
 		gap: 10px;
 		padding: 8px 16px 8px 8px;
 		border-radius: 100px;
-		background: oklch(16% 0.015 255 / 80%);
-		backdrop-filter: blur(24px) saturate(1.5);
-		-webkit-backdrop-filter: blur(24px) saturate(1.5);
-		border: 1px solid oklch(50% 0.03 255 / 12%);
-		box-shadow: 0 12px 40px oklch(0% 0 0 / 50%);
+		background: oklch(16% 0.02 70 / 72%);
+		backdrop-filter: blur(22px) saturate(1.45);
+		-webkit-backdrop-filter: blur(22px) saturate(1.45);
+		border: 1px solid oklch(82% 0.08 85 / 34%);
+		box-shadow:
+			inset 0 1px 0 oklch(100% 0 0 / 14%),
+			0 10px 28px oklch(0% 0 0 / 42%);
 		cursor: pointer;
-		color: oklch(90% 0.005 250);
+		color: oklch(94% 0.03 85);
 		font-size: 14px;
 		font-weight: 500;
+		letter-spacing: 0.01em;
 		white-space: nowrap;
 		margin-bottom: 0;
-		transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1) 0.05s;
+		transition: border-color 0.2s, background 0.2s, box-shadow 0.2s, opacity 0.35s cubic-bezier(0.16, 1, 0.3, 1) 0.05s, transform 0.35s cubic-bezier(0.16, 1, 0.3, 1) 0.05s;
 	}
 	.chat-orb-expand .coe-icon {
 		width: 32px;
 		height: 32px;
 		border-radius: 50%;
-		background: oklch(82% 0.14 210 / 12%);
+		background: oklch(16% 0.02 70 / 62%);
+		border: 1px solid oklch(82% 0.08 85 / 28%);
+		box-shadow: inset 0 1px 0 oklch(100% 0 0 / 12%);
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		color: oklch(82% 0.14 210);
+		color: oklch(88% 0.08 85);
 		flex-shrink: 0;
 	}
 	.chat-orb-expand .coe-icon svg { width: 16px; height: 16px; }
 	.chat-orb-expand:hover {
-		border-color: oklch(82% 0.14 210 / 25%);
+		border-color: oklch(82% 0.1 85 / 55%);
+		background: oklch(20% 0.025 70 / 78%);
+		box-shadow:
+			inset 0 1px 0 oklch(100% 0 0 / 18%),
+			0 14px 32px oklch(0% 0 0 / 48%);
 	}
 
 	.chat-orb-add {
@@ -1567,33 +1576,42 @@
 		gap: 10px;
 		padding: 8px 16px 8px 8px;
 		border-radius: 100px;
-		background: oklch(16% 0.015 255 / 80%);
-		backdrop-filter: blur(24px) saturate(1.5);
-		-webkit-backdrop-filter: blur(24px) saturate(1.5);
-		border: 1px solid oklch(50% 0.03 255 / 12%);
-		box-shadow: 0 12px 40px oklch(0% 0 0 / 50%);
+		background: oklch(16% 0.02 70 / 72%);
+		backdrop-filter: blur(22px) saturate(1.45);
+		-webkit-backdrop-filter: blur(22px) saturate(1.45);
+		border: 1px solid oklch(82% 0.08 85 / 34%);
+		box-shadow:
+			inset 0 1px 0 oklch(100% 0 0 / 14%),
+			0 10px 28px oklch(0% 0 0 / 42%);
 		cursor: pointer;
-		color: oklch(90% 0.005 250);
+		color: oklch(94% 0.03 85);
 		font-size: 14px;
 		font-weight: 500;
+		letter-spacing: 0.01em;
 		white-space: nowrap;
 		margin-bottom: 0;
-		transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1) 0.1s;
+		transition: border-color 0.2s, background 0.2s, box-shadow 0.2s, opacity 0.35s cubic-bezier(0.16, 1, 0.3, 1) 0.1s, transform 0.35s cubic-bezier(0.16, 1, 0.3, 1) 0.1s;
 	}
 	.chat-orb-add .coa-icon {
 		width: 32px;
 		height: 32px;
 		border-radius: 50%;
-		background: oklch(82% 0.14 210 / 12%);
+		background: oklch(16% 0.02 70 / 62%);
+		border: 1px solid oklch(82% 0.08 85 / 28%);
+		box-shadow: inset 0 1px 0 oklch(100% 0 0 / 12%);
 		display: flex;
 		align-items: center;
 		justify-content: center;
-		color: oklch(82% 0.14 210);
+		color: oklch(88% 0.08 85);
 		flex-shrink: 0;
 	}
 	.chat-orb-add .coa-icon svg { width: 16px; height: 16px; }
 	.chat-orb-add:hover {
-		border-color: oklch(82% 0.14 210 / 25%);
+		border-color: oklch(82% 0.1 85 / 55%);
+		background: oklch(20% 0.025 70 / 78%);
+		box-shadow:
+			inset 0 1px 0 oklch(100% 0 0 / 18%),
+			0 14px 32px oklch(0% 0 0 / 48%);
 	}
 
 	.chat-side-panel {
