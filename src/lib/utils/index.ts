@@ -451,6 +451,107 @@ export const compressImage = async (imageUrl, maxWidth, maxHeight) => {
 		img.src = imageUrl;
 	});
 };
+
+export const blobToDataURL = (blob: Blob): Promise<string> =>
+	new Promise((resolve, reject) => {
+		const reader = new FileReader();
+		reader.onload = () => resolve(String(reader.result));
+		reader.onerror = () => reject(reader.error);
+		reader.readAsDataURL(blob);
+	});
+
+export const DEFAULT_CHAT_IMAGE_MAX_DIM = 2048;
+const CHAT_IMAGE_JPEG_QUALITY = 0.85;
+const CHAT_IMAGE_SKIP_COMPRESS_BYTES = 2 * 1024 * 1024;
+
+const scaledImageSize = (width: number, height: number, maxWidth: number, maxHeight: number) => {
+	const scale = Math.min(1, maxWidth / width, maxHeight / height);
+	return {
+		width: Math.max(1, Math.round(width * scale)),
+		height: Math.max(1, Math.round(height * scale))
+	};
+};
+
+/** Resize/compress an image File via canvas.toBlob — never materializes a data URL. */
+export const compressImageFile = async (
+	file: File,
+	maxWidth: number | null = DEFAULT_CHAT_IMAGE_MAX_DIM,
+	maxHeight: number | null = DEFAULT_CHAT_IMAGE_MAX_DIM,
+	quality = CHAT_IMAGE_JPEG_QUALITY
+): Promise<File> => {
+	const maxW = maxWidth || maxHeight || DEFAULT_CHAT_IMAGE_MAX_DIM;
+	const maxH = maxHeight || maxWidth || DEFAULT_CHAT_IMAGE_MAX_DIM;
+
+	let bitmap: ImageBitmap | null = null;
+	try {
+		if (typeof createImageBitmap === 'function') {
+			bitmap = await createImageBitmap(file);
+		}
+	} catch (error) {
+		console.warn('compressImageFile: createImageBitmap failed', error);
+	}
+
+	const drawToCanvas = async (source: CanvasImageSource, width: number, height: number) => {
+		const canvas = document.createElement('canvas');
+		canvas.width = width;
+		canvas.height = height;
+		const ctx = canvas.getContext('2d');
+		if (!ctx) return null;
+		ctx.drawImage(source, 0, 0, width, height);
+		return await new Promise<Blob | null>((resolve) =>
+			canvas.toBlob(resolve, 'image/jpeg', quality)
+		);
+	};
+
+	if (bitmap) {
+		try {
+			if (
+				bitmap.width <= maxW &&
+				bitmap.height <= maxH &&
+				file.size <= CHAT_IMAGE_SKIP_COMPRESS_BYTES &&
+				file.type !== 'image/heic' &&
+				file.type !== 'image/heif'
+			) {
+				return file;
+			}
+			const size = scaledImageSize(bitmap.width, bitmap.height, maxW, maxH);
+			const blob = await drawToCanvas(bitmap, size.width, size.height);
+			if (!blob) return file;
+			const name = file.name.replace(/\.[^.]+$/, '') + '.jpg';
+			return new File([blob], name, { type: 'image/jpeg' });
+		} finally {
+			bitmap.close();
+		}
+	}
+
+	const objectUrl = URL.createObjectURL(file);
+	try {
+		const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+			const image = new Image();
+			image.onload = () => resolve(image);
+			image.onerror = () => reject(new Error('Failed to decode image'));
+			image.src = objectUrl;
+		});
+		if (
+			img.width <= maxW &&
+			img.height <= maxH &&
+			file.size <= CHAT_IMAGE_SKIP_COMPRESS_BYTES
+		) {
+			return file;
+		}
+		const size = scaledImageSize(img.width, img.height, maxW, maxH);
+		const blob = await drawToCanvas(img, size.width, size.height);
+		if (!blob) return file;
+		const name = file.name.replace(/\.[^.]+$/, '') + '.jpg';
+		return new File([blob], name, { type: 'image/jpeg' });
+	} catch (error) {
+		console.warn('compressImageFile: falling back to original file', error);
+		return file;
+	} finally {
+		URL.revokeObjectURL(objectUrl);
+	}
+};
+
 export const generateInitialsImage = (name) => {
 	const canvas = document.createElement('canvas');
 	const ctx = canvas.getContext('2d');
