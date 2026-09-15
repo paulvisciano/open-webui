@@ -479,6 +479,7 @@
 	let chatVariables = {};
 	let showChatVariablesModal = false;
 	let loadedChatIdProp = '';
+	let creatingEmbeddedChat = false;
 	let currentDraftKey = '';
 
 	$: toolApprovalMode =
@@ -843,7 +844,7 @@
 	};
 
 	$: if (chatIdProp && chatIdProp !== loadedChatIdProp) {
-		if (embeddedVoiceActive) {
+		if (embeddedVoiceActive || creatingEmbeddedChat) {
 			loadedChatIdProp = chatIdProp;
 		} else {
 			noteChatDebug('chatIdProp changed; loading linked chat', {
@@ -3218,9 +3219,14 @@
 			return;
 		}
 
+		const nonImageCount = (list) =>
+			(list ?? []).filter(
+				(item) => item?.type !== 'image' && !(item?.content_type ?? '').startsWith('image/')
+			).length;
+
 		if (
 			($config?.file?.max_count ?? null) !== null &&
-			files.length + chatFiles.length > $config?.file?.max_count
+			nonImageCount(files) + nonImageCount(chatFiles) > $config?.file?.max_count
 		) {
 			toast.error(
 				$i18n.t(`You can only chat with a maximum of {{maxCount}} file(s) at a time.`, {
@@ -3383,22 +3389,27 @@
 		// Empty embedded drafts create their backing chat only when the first message is sent.
 		if (!_chatId) {
 			if (embedded && onCreateEmbeddedChat) {
-				const createdChat = await onCreateEmbeddedChat();
-				if (!createdChat?.id) {
-					toast.error($i18n.t('Failed to create chat'));
-					return;
+				creatingEmbeddedChat = true;
+				try {
+					const createdChat = await onCreateEmbeddedChat();
+					if (!createdChat?.id) {
+						toast.error($i18n.t('Failed to create chat'));
+						return;
+					}
+
+					chat = createdChat;
+					_chatId = createdChat.id;
+					loadedChatIdProp = _chatId;
+					await chatId.set(_chatId);
+					await chatTitle.set(createdChat?.chat?.title ?? createdChat?.title ?? $i18n.t('Chat'));
+
+					params = structuredClone(createdChat?.chat?.params ?? {});
+					delete params.note_id;
+					chatFiles = mergeFiles(chatFiles, createdChat?.chat?.files ?? []);
+					await onSelectEmbeddedChat?.(_chatId);
+				} finally {
+					creatingEmbeddedChat = false;
 				}
-
-				chat = createdChat;
-				_chatId = createdChat.id;
-				loadedChatIdProp = _chatId;
-				await chatId.set(_chatId);
-				await chatTitle.set(createdChat?.chat?.title ?? createdChat?.title ?? $i18n.t('Chat'));
-
-				params = structuredClone(createdChat?.chat?.params ?? {});
-				delete params.note_id;
-				chatFiles = mergeFiles(chatFiles, createdChat?.chat?.files ?? []);
-				await onSelectEmbeddedChat?.(_chatId);
 			} else if ($temporaryChatEnabled) {
 				_chatId = createTemporaryChatId($socket?.id);
 				await chatId.set(_chatId);
