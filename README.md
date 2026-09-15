@@ -6,6 +6,8 @@ Fork of [open-webui/open-webui](https://github.com/open-webui/open-webui). Upstr
 
 `/gallery` (sidebar: **Gallery**). `/graph` redirects here.
 
+![Gallery hallway](docs/gallery.png)
+
 A hallway of dated day bays. Conversation prints hang on the walls. Photos from those chats cluster around them. Click a print to open the thread. Walk, look around, fly to a photo.
 
 - Calendar stick in the corner scrubs time (camera depth follows photo dates).
