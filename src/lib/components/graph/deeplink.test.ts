@@ -11,16 +11,16 @@ import {
 
 describe('graph conversation deeplink', () => {
 	it('parses the chat query param', () => {
-		expect(parseGraphChatId(new URL('https://localhost:5173/graph'))).toBeNull();
-		expect(parseGraphChatId(new URL('https://localhost:5173/graph?chat='))).toBeNull();
-		expect(parseGraphChatId(new URL('https://localhost:5173/graph?chat=abc-123'))).toBe('abc-123');
+		expect(parseGraphChatId(new URL('https://localhost:5173/gallery'))).toBeNull();
+		expect(parseGraphChatId(new URL('https://localhost:5173/gallery?chat='))).toBeNull();
+		expect(parseGraphChatId(new URL('https://localhost:5173/gallery?chat=abc-123'))).toBe('abc-123');
 		expect(parseGraphChatId(null)).toBeNull();
 		expect(parseGraphChatId(undefined)).toBeNull();
 	});
 
-	it('builds /graph?chat= paths', () => {
-		expect(graphConversationPath(null)).toBe('/graph');
-		expect(graphConversationPath('abc-123')).toBe(`/graph?${GRAPH_CHAT_PARAM}=abc-123`);
+	it('builds /gallery?chat= paths', () => {
+		expect(graphConversationPath(null)).toBe('/gallery');
+		expect(graphConversationPath('abc-123')).toBe(`/gallery?${GRAPH_CHAT_PARAM}=abc-123`);
 	});
 
 	it('treats localhost aliases as loopback', () => {
@@ -41,7 +41,7 @@ describe('graph conversation deeplink', () => {
 
 	it('encodes a phone-reachable conversation URL', () => {
 		expect(conversationDeepLink('https://192.168.1.20:5173', 'chat-1')).toBe(
-			'https://192.168.1.20:5173/graph?chat=chat-1'
+			'https://192.168.1.20:5173/gallery?chat=chat-1'
 		);
 	});
 

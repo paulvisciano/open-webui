@@ -5,7 +5,9 @@ export function parseGraphChatId(url: URL | null | undefined): string | null {
 	return id ? id : null;
 }
 
-export function graphConversationPath(chatId: string | null, pathname = '/graph'): string {
+export const GALLERY_PATH = '/gallery';
+
+export function graphConversationPath(chatId: string | null, pathname = GALLERY_PATH): string {
 	if (!chatId) return pathname;
 	const params = new URLSearchParams();
 	params.set(GRAPH_CHAT_PARAM, chatId);
@@ -31,7 +33,7 @@ export function lanOriginFrom(
 export function conversationDeepLink(
 	origin: string,
 	chatId: string,
-	pathname = '/graph'
+	pathname = GALLERY_PATH
 ): string {
 	return `${origin.replace(/\/$/, '')}${graphConversationPath(chatId, pathname)}`;
 }

@@ -3,7 +3,7 @@ import { encodeQrMatrix } from './qr';
 
 describe('encodeQrMatrix', () => {
 	it('encodes a graph conversation URL with finder patterns', () => {
-		const url = 'https://192.168.1.20:5173/graph?chat=abc-123';
+		const url = 'https://192.168.1.20:5173/gallery?chat=abc-123';
 		const matrix = encodeQrMatrix(url);
 		expect(matrix.size).toBeGreaterThan(20);
 		expect(matrix.data).toHaveLength(matrix.size);
