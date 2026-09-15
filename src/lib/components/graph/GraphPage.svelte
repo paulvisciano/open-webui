@@ -220,7 +220,7 @@
 		if (!chatId) return;
 		// Same pointerup that selected this conversation also bubbles to the
 		// canvas dismiss handler — skip that dismiss so the panel stays open.
-		skipCanvasDismiss = true;
+		guardOpeningGesture();
 		if (chatId === selectedChatId && showChatPanel) {
 			syncChatUrl(chatId);
 			return;
@@ -235,7 +235,7 @@
 
 	const startNewChat = async () => {
 		showSidebar.set(false);
-		skipCanvasDismiss = true;
+		guardOpeningGesture();
 		selectedChatId = '';
 		chatDraftKey = `${Date.now()}`;
 		showChatPanel = true;
@@ -448,6 +448,17 @@
 
 	let panelClickStart: { x: number; y: number } | null = null;
 	let skipCanvasDismiss = false;
+	let ignoreBackdropClose = false;
+	let ignoreBackdropTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const guardOpeningGesture = () => {
+		skipCanvasDismiss = true;
+		ignoreBackdropClose = true;
+		if (ignoreBackdropTimer) clearTimeout(ignoreBackdropTimer);
+		ignoreBackdropTimer = setTimeout(() => {
+			ignoreBackdropClose = false;
+		}, 400);
+	};
 
 	const handleCanvasPointerDown = (e: PointerEvent) => {
 		skipCanvasDismiss = false;
@@ -866,7 +877,7 @@
 	</div>
 
 	{#if showChatPanel && $mobile && !voiceHidesChat}
-		<button type="button" class="chat-sheet-backdrop" aria-label="Close conversation" onclick={closeChatPanel}></button>
+		<button type="button" class="chat-sheet-backdrop" aria-label="Close conversation" onclick={() => { if (!ignoreBackdropClose) closeChatPanel(); }}></button>
 	{/if}
 
 	{#if showChatPanel}
