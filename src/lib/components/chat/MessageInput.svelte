@@ -43,7 +43,9 @@
 
 	import {
 		convertHeicToJpeg,
-		compressImage,
+		compressImageFile,
+		blobToDataURL,
+		DEFAULT_CHAT_IMAGE_MAX_DIM,
 		createMessagesList,
 		extractContentFromFile,
 		extractCurlyBraceWords,
@@ -66,7 +68,13 @@
 	import { getNoteById } from '$lib/apis/notes';
 	import { getSessionUser } from '$lib/apis/auths';
 
-	import { WEBUI_BASE_URL, WEBUI_API_BASE_URL, PASTED_TEXT_CHARACTER_LIMIT } from '$lib/constants';
+	import {
+		WEBUI_BASE_URL,
+		WEBUI_API_BASE_URL,
+		PASTED_TEXT_CHARACTER_LIMIT,
+		MAX_CHAT_IMAGES,
+		MAX_CHAT_IMAGE_SOURCE_BYTES
+	} from '$lib/constants';
 	import { matchKeybinding, Shortcut } from '$lib/shortcuts';
 
 	import { createNoteHandler } from '../notes/utils';
@@ -1065,116 +1073,199 @@
 		}
 	};
 
+	const isImageAttachment = (item) =>
+		item?.type === 'image' || (item?.content_type ?? item?.type ?? '').startsWith('image/');
+
+	const isImageInputFile = (file) =>
+		file?.type?.startsWith('image/') ||
+		/\.(heic|heif|jpe?g|png|gif|webp|bmp|avif)$/i.test(file?.name ?? '');
+
+	const revokePreviewUrl = (url) => {
+		if (typeof url === 'string' && url.startsWith('blob:')) {
+			URL.revokeObjectURL(url);
+		}
+	};
+
+	const imageCompressionBounds = (settings = {}, config = {}) => {
+		const settingsCompression = settings?.imageCompression ?? false;
+		const configWidth = config?.file?.image_compression?.width ?? null;
+		const configHeight = config?.file?.image_compression?.height ?? null;
+		let width = settingsCompression
+			? (settings?.imageCompressionSize?.width ?? DEFAULT_CHAT_IMAGE_MAX_DIM)
+			: DEFAULT_CHAT_IMAGE_MAX_DIM;
+		let height = settingsCompression
+			? (settings?.imageCompressionSize?.height ?? DEFAULT_CHAT_IMAGE_MAX_DIM)
+			: DEFAULT_CHAT_IMAGE_MAX_DIM;
+		if (configWidth && width > configWidth) width = configWidth;
+		if (configHeight && height > configHeight) height = configHeight;
+		return { width, height };
+	};
+
+	const attachImageFile = async (file) => {
+		if ($_user?.role !== 'admin' && !($_user?.permissions?.chat?.file_upload ?? true)) {
+			toast.error($i18n.t('You do not have permission to upload files.'));
+			return;
+		}
+		if (visionCapableModels.length === 0) {
+			toast.error($i18n.t('Selected model(s) do not support image inputs'));
+			return;
+		}
+		if (file.size > MAX_CHAT_IMAGE_SOURCE_BYTES) {
+			toast.error(
+				$i18n.t(`File size should not exceed {{maxSize}} MB.`, {
+					maxSize: Math.round(MAX_CHAT_IMAGE_SOURCE_BYTES / (1024 * 1024))
+				})
+			);
+			return;
+		}
+
+		const itemId = uuidv4();
+		let source = file;
+		try {
+			if (
+				file.type === 'image/heic' ||
+				file.type === 'image/heif' ||
+				/\.(heic|heif)$/i.test(file.name ?? '')
+			) {
+				source = await convertHeicToJpeg(file);
+			}
+		} catch (error) {
+			toast.error(`${error}`);
+			return;
+		}
+
+		const previewUrl = URL.createObjectURL(source);
+		const fileItem: any = {
+			type: 'image',
+			url: previewUrl,
+			name: file.name,
+			size: file.size,
+			status: 'uploading',
+			itemId,
+			content_type: source.type || file.type || 'image/jpeg'
+		};
+		files = [...files, fileItem];
+
+		try {
+			const { width, height } = imageCompressionBounds($settings, $config);
+			const prepared = await compressImageFile(source, width, height);
+			const maxSizeMb = $config?.file?.max_size ?? null;
+			if (maxSizeMb !== null && prepared.size > maxSizeMb * 1024 * 1024) {
+				throw new Error(
+					$i18n.t(`File size should not exceed {{maxSize}} MB.`, {
+						maxSize: maxSizeMb
+					})
+				);
+			}
+
+			if ($temporaryChatEnabled) {
+				const dataUrl = await blobToDataURL(prepared);
+				revokePreviewUrl(fileItem.url);
+				fileItem.url = dataUrl;
+				fileItem.status = 'uploaded';
+				fileItem.size = prepared.size;
+				fileItem.content_type = prepared.type;
+				files = files;
+				return;
+			}
+
+			const uploadedFile = await uploadFile(localStorage.token, prepared, null, false, false);
+			if (!uploadedFile) {
+				throw new Error($i18n.t('Failed to upload file.'));
+			}
+			if (uploadedFile.error) {
+				toast.warning(uploadedFile.error);
+			}
+			revokePreviewUrl(fileItem.url);
+			fileItem.status = 'uploaded';
+			fileItem.file = uploadedFile;
+			fileItem.id = uploadedFile.id;
+			fileItem.size = prepared.size;
+			fileItem.collection_name =
+				uploadedFile?.meta?.collection_name || uploadedFile?.collection_name;
+			fileItem.content_type =
+				uploadedFile.meta?.content_type || uploadedFile.content_type || prepared.type;
+			fileItem.url = `${uploadedFile.id}`;
+			files = files;
+		} catch (error) {
+			revokePreviewUrl(fileItem.url);
+			files = files.filter((item) => item?.itemId !== itemId);
+			toast.error(`${error}`);
+		} finally {
+			onUpdate({ file: fileItem });
+		}
+	};
+
+	const runWithConcurrency = async (items, limit, worker) => {
+		const queue = [...items];
+		await Promise.all(
+			Array.from({ length: Math.min(limit, queue.length) }, async () => {
+				while (queue.length) {
+					const item = queue.shift();
+					if (item) await worker(item);
+				}
+			})
+		);
+	};
+
 	const inputFilesHandler = async (inputFiles) => {
 		console.log('Input files handler called with:', inputFiles);
 
+		const incomingImages = inputFiles.filter(isImageInputFile);
+		const incomingOthers = inputFiles.filter((file) => !isImageInputFile(file));
+		const existingImages = files.filter(isImageAttachment);
+		const existingOthers = files.filter((file) => !isImageAttachment(file));
+
+		if (existingImages.length + incomingImages.length > MAX_CHAT_IMAGES) {
+			toast.error(
+				$i18n.t(`You can only attach up to {{maxCount}} images at a time.`, {
+					maxCount: MAX_CHAT_IMAGES
+				})
+			);
+		}
+		const imagesToAdd = incomingImages.slice(
+			0,
+			Math.max(0, MAX_CHAT_IMAGES - existingImages.length)
+		);
+
 		if (
+			incomingOthers.length > 0 &&
 			($config?.file?.max_count ?? null) !== null &&
-			files.length + inputFiles.length > $config?.file?.max_count
+			existingOthers.length + incomingOthers.length > $config?.file?.max_count
 		) {
 			toast.error(
 				$i18n.t(`You can only chat with a maximum of {{maxCount}} file(s) at a time.`, {
 					maxCount: $config?.file?.max_count
 				})
 			);
-			return;
-		}
-
-		inputFiles.forEach(async (file) => {
-			console.log('Processing file:', {
-				name: file.name,
-				type: file.type,
-				size: file.size,
-				extension: file.name.split('.').at(-1)
-			});
-
-			if (
-				($config?.file?.max_size ?? null) !== null &&
-				file.size > ($config?.file?.max_size ?? 0) * 1024 * 1024
-			) {
-				console.log('File exceeds max size limit:', {
-					fileSize: file.size,
-					maxSize: ($config?.file?.max_size ?? 0) * 1024 * 1024
+		} else {
+			incomingOthers.forEach((file) => {
+				console.log('Processing file:', {
+					name: file.name,
+					type: file.type,
+					size: file.size,
+					extension: file.name.split('.').at(-1)
 				});
-				toast.error(
-					$i18n.t(`File size should not exceed {{maxSize}} MB.`, {
-						maxSize: $config?.file?.max_size
-					})
-				);
-				return;
-			}
 
-			if (file['type'].startsWith('image/')) {
-				if (visionCapableModels.length === 0) {
-					toast.error($i18n.t('Selected model(s) do not support image inputs'));
+				if (
+					($config?.file?.max_size ?? null) !== null &&
+					file.size > ($config?.file?.max_size ?? 0) * 1024 * 1024
+				) {
+					toast.error(
+						$i18n.t(`File size should not exceed {{maxSize}} MB.`, {
+							maxSize: $config?.file?.max_size
+						})
+					);
 					return;
 				}
 
-				const compressImageHandler = async (imageUrl, settings = {}, config = {}) => {
-					// Quick shortcut so we don’t do unnecessary work.
-					const settingsCompression = settings?.imageCompression ?? false;
-					const configWidth = config?.file?.image_compression?.width ?? null;
-					const configHeight = config?.file?.image_compression?.height ?? null;
-
-					// If neither settings nor config wants compression, return original URL.
-					if (!settingsCompression && !configWidth && !configHeight) {
-						return imageUrl;
-					}
-
-					// Default to null (no compression unless set)
-					let width = null;
-					let height = null;
-
-					// If user/settings want compression, pick their preferred size.
-					if (settingsCompression) {
-						width = settings?.imageCompressionSize?.width ?? null;
-						height = settings?.imageCompressionSize?.height ?? null;
-					}
-
-					// Apply config limits as an upper bound if any
-					if (configWidth && (width === null || width > configWidth)) {
-						width = configWidth;
-					}
-					if (configHeight && (height === null || height > configHeight)) {
-						height = configHeight;
-					}
-
-					// Do the compression if required
-					if (width || height) {
-						return await compressImage(imageUrl, width, height);
-					}
-					return imageUrl;
-				};
-
-				let reader = new FileReader();
-
-				reader.onload = async (event) => {
-					let imageUrl = event.target.result;
-
-					// Compress the image if settings or config require it
-					imageUrl = await compressImageHandler(imageUrl, $settings, $config);
-
-					if ($temporaryChatEnabled) {
-						files = [
-							...files,
-							{
-								type: 'image',
-								url: imageUrl
-							}
-						];
-					} else {
-						const blob = await (await fetch(imageUrl)).blob();
-						const compressedFile = new File([blob], file.name, { type: file.type });
-
-						uploadFileHandler(compressedFile, false);
-					}
-				};
-
-				reader.readAsDataURL(file['type'] === 'image/heic' ? await convertHeicToJpeg(file) : file);
-			} else {
 				uploadFileHandler(file);
-			}
-		});
+			});
+		}
+
+		if (imagesToAdd.length > 0) {
+			void runWithConcurrency(imagesToAdd, 2, attachImageFile);
+		}
 	};
 
 	const createNote = async () => {
@@ -1566,6 +1657,14 @@
 		window.addEventListener('focus', onFocus);
 		window.addEventListener('blur', onBlur);
 
+		const preventFileNavigation = (e: DragEvent) => {
+			if (e.dataTransfer?.types?.includes('Files')) {
+				e.preventDefault();
+			}
+		};
+		window.addEventListener('dragover', preventFileNavigation, true);
+		window.addEventListener('drop', preventFileNavigation, true);
+
 		let isDestroyed = false;
 		let dropzoneElement: HTMLElement | null = null;
 		const initialize = async () => {
@@ -1589,6 +1688,11 @@
 
 			window.removeEventListener('focus', onFocus);
 			window.removeEventListener('blur', onBlur);
+
+			window.removeEventListener('dragover', preventFileNavigation, true);
+			window.removeEventListener('drop', preventFileNavigation, true);
+
+			files.forEach((file) => revokePreviewUrl(file?.url));
 
 			if (dropzoneElement) {
 				dropzoneElement.removeEventListener('dragover', onDragOver, true);
@@ -1896,76 +2000,95 @@
 							{/if}
 
 							{#if files.length > 0}
-								<div
-									class="mx-2 mt-2 pb-1 flex items-center flex-wrap gap-1.5"
-									dir={$settings?.chatDirection ?? 'auto'}
-								>
-									{#each files as file, fileIdx}
-										{#if file.type === 'image' || (file?.content_type ?? '').startsWith('image/')}
+								{@const imageAttachments = files.filter(isImageAttachment)}
+								{@const otherAttachments = files.filter((file) => !isImageAttachment(file))}
+								{#if imageAttachments.length > 0}
+									<div
+										class="mx-1.5 mt-2.5 flex gap-2 overflow-x-auto overflow-y-hidden px-0.5 pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+										dir={$settings?.chatDirection ?? 'auto'}
+									>
+										{#each imageAttachments as file}
 											{@const fileUrl =
-												file.url.startsWith('data') || file.url.startsWith('http')
-													? file.url
-													: `${WEBUI_API_BASE_URL}/files/${file.url}${file?.content_type ? '/content' : ''}`}
-											<div class=" relative group">
-												<div class="relative flex items-center">
+												!file.url
+													? ''
+													: file.url.startsWith('data') ||
+														  file.url.startsWith('http') ||
+														  file.url.startsWith('blob:')
+														? file.url
+														: `${WEBUI_API_BASE_URL}/files/${file.url}${file?.content_type ? '/content' : ''}`}
+											<div
+												class="relative h-32 w-32 shrink-0 overflow-hidden rounded-2xl bg-black/20"
+											>
+												{#if fileUrl}
 													<Image
 														src={fileUrl}
 														alt=""
-														imageClassName=" size-10 rounded-xl object-cover"
+														className="h-32 w-32"
+														imageClassName="h-32 w-32 object-cover"
 													/>
-													{#if selectedModelIds.length !== visionCapableModels.length}
-														<Tooltip
-															className=" absolute top-1 left-1"
-															content={$i18n.t('{{ models }}', {
-																models: selectedModelIds
-																	.filter((id) => !visionCapableModels.includes(id))
-																	.join(', ')
-															})}
-														>
-															<svg
-																xmlns="http://www.w3.org/2000/svg"
-																viewBox="0 0 24 24"
-																fill="currentColor"
-																aria-hidden="true"
-																class="size-4 fill-yellow-300"
-															>
-																<path
-																	fill-rule="evenodd"
-																	d="M9.401 3.003c1.155-2 4.043-2 5.197 0l7.355 12.748c1.154 2-.29 4.5-2.599 4.5H4.645c-2.309 0-3.752-2.5-2.598-4.5L9.4 3.003ZM12 8.25a.75.75 0 0 1 .75.75v3.75a.75.75 0 0 1-1.5 0V9a.75.75 0 0 1 .75-.75Zm0 8.25a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z"
-																	clip-rule="evenodd"
-																/>
-															</svg>
-														</Tooltip>
-													{/if}
-												</div>
-												<div class=" absolute -top-1 -right-1">
-													<button
-														class=" bg-white text-black border border-white rounded-full {($settings?.highContrastMode ??
-														false)
-															? ''
-															: 'hover-reveal transition'}"
-														type="button"
-														aria-label={$i18n.t('Remove file')}
-														on:click={() => {
-															files.splice(fileIdx, 1);
-															files = files;
-														}}
+												{/if}
+												{#if file.status === 'uploading'}
+													<div
+														class="absolute inset-0 flex items-center justify-center bg-black/35 text-white"
+													>
+														<Spinner className="size-5" />
+													</div>
+												{/if}
+												{#if selectedModelIds.length !== visionCapableModels.length}
+													<Tooltip
+														className="absolute top-1.5 left-1.5"
+														content={$i18n.t('{{ models }}', {
+															models: selectedModelIds
+																.filter((id) => !visionCapableModels.includes(id))
+																.join(', ')
+														})}
 													>
 														<svg
 															xmlns="http://www.w3.org/2000/svg"
-															viewBox="0 0 20 20"
+															viewBox="0 0 24 24"
 															fill="currentColor"
 															aria-hidden="true"
-															class="size-4"
+															class="size-4 fill-yellow-300"
 														>
 															<path
-																d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z"
+																fill-rule="evenodd"
+																d="M9.401 3.003c1.155-2 4.043-2 5.197 0l7.355 12.748c1.154 2-.29 4.5-2.599 4.5H4.645c-2.309 0-3.752-2.5-2.598-4.5L9.4 3.003ZM12 8.25a.75.75 0 0 1 .75.75v3.75a.75.75 0 0 1-1.5 0V9a.75.75 0 0 1 .75-.75Zm0 8.25a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z"
+																clip-rule="evenodd"
 															/>
 														</svg>
-													</button>
-												</div>
+													</Tooltip>
+												{/if}
+												<button
+													class="absolute top-1.5 right-1.5 z-10 flex size-6 items-center justify-center rounded-full bg-black/60 text-white shadow-sm backdrop-blur-[2px]"
+													type="button"
+													aria-label={$i18n.t('Remove file')}
+													on:click={() => {
+														revokePreviewUrl(file.url);
+														files = files.filter((item) => item !== file);
+													}}
+												>
+													<svg
+														xmlns="http://www.w3.org/2000/svg"
+														viewBox="0 0 20 20"
+														fill="currentColor"
+														aria-hidden="true"
+														class="size-3.5"
+													>
+														<path
+															d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z"
+														/>
+													</svg>
+												</button>
 											</div>
-										{:else}
+										{/each}
+									</div>
+								{/if}
+								{#if otherAttachments.length > 0}
+									<div
+										class="mx-2 mt-2 pb-1 flex items-center flex-wrap gap-1.5"
+										dir={$settings?.chatDirection ?? 'auto'}
+									>
+										{#each otherAttachments as file}
 											<FileItem
 												item={file}
 												name={file.name}
@@ -1977,17 +2100,15 @@
 												small={true}
 												modal={['file', 'collection'].includes(file?.type)}
 												on:dismiss={async () => {
-													// Remove from UI state
-													files.splice(fileIdx, 1);
-													files = files;
+													files = files.filter((item) => item !== file);
 												}}
 												on:click={() => {
 													console.log(file);
 												}}
 											/>
-										{/if}
-									{/each}
-								</div>
+										{/each}
+									</div>
+								{/if}
 							{/if}
 
 							<div class="px-2 relative">
