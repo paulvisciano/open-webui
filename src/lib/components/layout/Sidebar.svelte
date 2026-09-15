@@ -192,7 +192,7 @@
 
 	const getMenuItemMeta = (id) => {
 		const items = {
-			graph: { label: 'Gallery', href: '/graph', iconType: 'graph' },
+			graph: { label: 'Gallery', href: '/gallery', iconType: 'graph' },
 			notes: { label: 'Notes', href: '/notes', iconType: 'note' },
 			workspace: { label: 'Workspace', href: '/workspace', iconType: 'workspace' },
 			automations: { label: 'Automations', href: '/automations', iconType: 'automations' },
@@ -203,7 +203,7 @@
 	};
 
 	const menuItemPathPrefixes = {
-		graph: '/graph',
+		graph: '/gallery',
 		notes: '/notes',
 		workspace: '/workspace',
 		calendar: '/calendar',

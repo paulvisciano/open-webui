@@ -165,7 +165,10 @@
 		lastReadAt = Date.now() / 1000;
 
 		const onGraph =
-			$page.url.pathname === '/graph' || $page.url.pathname.startsWith('/graph/');
+			$page.url.pathname === '/gallery' ||
+			$page.url.pathname.startsWith('/gallery/') ||
+			$page.url.pathname === '/graph' ||
+			$page.url.pathname.startsWith('/graph/');
 		if (onGraph) {
 			event?.preventDefault();
 			graphStore.requestOpenChat(id);
