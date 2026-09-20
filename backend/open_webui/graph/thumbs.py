@@ -342,6 +342,23 @@ def ensure_thumb(asset: Mapping[str, Any], size: int = THUMB_MAX) -> Path | None
         return None
 
 
+def ensure_file_thumb(src: Path, file_id: str, size: int = THUMB_MAX) -> Path:
+    """Return a cached WEBP path (512 or 1024) for a chat file, generating on miss."""
+    edge = clamp_thumb_size(size)
+    dest = GRAPH_THUMBS_DIR / "files" / f"{_safe_id(file_id)}_{edge}.webp"
+    try:
+        if dest.is_file() and dest.stat().st_size > 0:
+            try:
+                if dest.stat().st_mtime >= src.stat().st_mtime:
+                    return dest
+            except OSError:
+                return dest
+        return _write_photo_thumb(src, dest, edge)
+    except Exception:
+        logger.exception("ensure_file_thumb failed file_id=%s", file_id)
+        return _write_placeholder(dest)
+
+
 def delete_source_thumbs(source_id: str) -> None:
     try:
         dest = (GRAPH_THUMBS_DIR / _safe_id(source_id)).resolve()

@@ -105,6 +105,16 @@ def _is_inline_media(content_type: str | None, filename: str) -> bool:
     )
 
 
+def _is_raster_image(content_type: str | None, filename: str) -> bool:
+    ct = (content_type or '').lower()
+    name = (filename or '').lower()
+    if ct.startswith('image/') and 'svg' not in ct:
+        return True
+    return name.endswith(
+        ('.png', '.jpg', '.jpeg', '.gif', '.webp', '.heic', '.heif', '.bmp', '.tif', '.tiff')
+    )
+
+
 def _cleanup_local_cache(file_path: str) -> None:
     """Remove the local cached copy of a cloud-stored file after processing."""
     if STORAGE_LOCAL_CACHE or STORAGE_PROVIDER == 'local':
@@ -795,6 +805,7 @@ async def get_file_content_by_id(
     id: str,
     user=Depends(get_verified_user),
     attachment: bool = Query(False),
+    w: int | None = Query(None),
     db: AsyncSession = Depends(get_async_session),
 ):
     file = await Files.get_file_by_id(id, db=db)
@@ -826,6 +837,21 @@ async def get_file_content_by_id(
                         content_type = 'application/pdf'
                 elif content_type != 'text/plain':
                     headers['Content-Disposition'] = f"attachment; filename*=UTF-8''{encoded_filename}"
+
+                if (
+                    w is not None
+                    and not attachment
+                    and _is_raster_image(content_type, filename)
+                ):
+                    from open_webui.graph.thumbs import clamp_thumb_size, ensure_file_thumb
+
+                    size = clamp_thumb_size(int(w))
+                    try:
+                        thumb = await asyncio.to_thread(ensure_file_thumb, file_path, id, size)
+                        headers['Cache-Control'] = 'private, max-age=604800'
+                        return FileResponse(thumb, headers=headers, media_type='image/webp')
+                    except Exception:
+                        log.exception('file thumb failed id=%s', id)
 
                 return FileResponse(file_path, headers=headers, media_type=content_type)
 
