@@ -219,7 +219,7 @@ export const CHUNK_OFFSETS: readonly ChunkOffset[] = (() => {
 /** Chebyshev chunk distance at/below which a photo node promotes to full-res. */
 export const LOD_FULL_CHEBY = 1;
 /** Absolute depth (world units) at/below which a photo node promotes to full-res. */
-export const LOD_FULL_DEPTH = 240;
+export const LOD_FULL_DEPTH = 100;
 /** Extra Chebyshev distance beyond LOD_FULL_CHEBY where a node stays full-res before demoting (hysteresis band). */
 export const LOD_HYSTERESIS = 1;
 /** Absolute depth hysteresis band (world units) beyond LOD_FULL_DEPTH before demoting. */
