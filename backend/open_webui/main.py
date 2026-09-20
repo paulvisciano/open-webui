@@ -136,7 +136,7 @@ from open_webui.events import (
 from open_webui.internal.db import engine, get_async_session
 from open_webui.models.access_grants import AccessGrants
 from open_webui.models.channels import Channels
-from open_webui.models.chats import ChatForm, Chats
+from open_webui.models.chats import ChatForm, Chats, message_attachment_file_ids
 from open_webui.models.config import Config
 from open_webui.models.functions import Functions
 from open_webui.models.messages import Messages
@@ -1440,11 +1440,7 @@ async def chat_completion(
                             await Chats.insert_chat_files(
                                 chat_id,
                                 user_message_id,
-                                [
-                                    file_item.get('id')
-                                    for file_item in user_message_files
-                                    if file_item.get('type') == 'file'
-                                ],
+                                message_attachment_file_ids(user_message_files),
                                 user.id,
                             )
                         except Exception as e:
@@ -1548,11 +1544,7 @@ async def chat_completion(
                             await Chats.insert_chat_files(
                                 chat_id,
                                 user_message.get('id'),
-                                [
-                                    file_item.get('id')
-                                    for file_item in user_message_files
-                                    if file_item.get('type') == 'file'
-                                ],
+                                message_attachment_file_ids(user_message_files),
                                 user.id,
                             )
                         except Exception as e:
