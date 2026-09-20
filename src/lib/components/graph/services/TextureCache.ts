@@ -18,11 +18,11 @@
  */
 import * as THREE from 'three';
 import { LOD_FULL_MAX } from '../renderer/constants';
+import { decodeImageBitmap, maxEdgeForUrl } from './texture-decode';
 
 class TextureCache {
   private cache = new Map<string, THREE.Texture>();
   private loaders = new Map<string, Set<(t: THREE.Texture) => void>>();
-  private textureLoader = new THREE.TextureLoader();
   private fullResLru = new Map<string, Set<() => void>>();
   /** Thumbnail LRU (insertion order). Distinct from `fullResLru`. */
   private thumbLru = new Map<string, true>();
@@ -139,58 +139,43 @@ class TextureCache {
     callbacks: Set<(t: THREE.Texture) => void>,
   ): Promise<void> {
     try {
-      if (url.startsWith('blob:') || url.startsWith('data:')) {
-        await this._decodeImage(url, url, signal);
+      const blob = await this._fetchBlob(url, signal);
+      if (signal.aborted) return;
+      const buffer = await blob.arrayBuffer();
+      if (signal.aborted) return;
+      const bitmap = await decodeImageBitmap(
+        buffer,
+        blob.type,
+        maxEdgeForUrl(url),
+        signal,
+      );
+      if (signal.aborted) {
+        bitmap.close();
         return;
       }
-      const parsed = new URL(url, typeof window !== 'undefined' ? window.location.origin : undefined);
-      parsed.searchParams.delete('token');
-      const res = await fetch(parsed.toString(), {
-        headers: this._authHeaders(),
-        signal,
-        credentials: 'include',
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const blob = await res.blob();
-      if (signal.aborted) return;
-      const objUrl = URL.createObjectURL(blob);
-      this.blobUrls.set(url, objUrl);
-      await this._decodeImage(url, objUrl, signal);
+      const texture = new THREE.Texture(bitmap);
+      this.onDone(url, texture);
     } catch (err) {
       if (signal.aborted) return;
-      const blob = this.blobUrls.get(url);
-      if (blob) {
-        URL.revokeObjectURL(blob);
-        this.blobUrls.delete(url);
-      }
       this.onLoadError(url, callbacks, err);
     }
   }
 
-  private _decodeImage(cacheKey: string, src: string, signal: AbortSignal): Promise<void> {
-    return new Promise((resolve, reject) => {
-      if (signal.aborted) {
-        reject(new DOMException('Aborted', 'AbortError'));
-        return;
-      }
-      const img = new Image();
-      this.inFlightImages.set(cacheKey, img);
-      img.onload = () => {
-        this.inFlightImages.delete(cacheKey);
-        if (signal.aborted) {
-          reject(new DOMException('Aborted', 'AbortError'));
-          return;
-        }
-        const texture = new THREE.Texture(img);
-        this.onDone(cacheKey, texture);
-        resolve();
-      };
-      img.onerror = () => {
-        this.inFlightImages.delete(cacheKey);
-        reject(new Error('image decode failed'));
-      };
-      img.src = src;
+  private async _fetchBlob(url: string, signal: AbortSignal): Promise<Blob> {
+    if (url.startsWith('blob:') || url.startsWith('data:')) {
+      const res = await fetch(url, { signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.blob();
+    }
+    const parsed = new URL(url, typeof window !== 'undefined' ? window.location.origin : undefined);
+    parsed.searchParams.delete('token');
+    const res = await fetch(parsed.toString(), {
+      headers: this._authHeaders(),
+      signal,
+      credentials: 'include',
     });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.blob();
   }
 
   private onLoadError(url: string, callbacks: Set<(t: THREE.Texture) => void>, err: unknown): void {
@@ -231,15 +216,16 @@ class TextureCache {
     }
 
     if (!this.loaders.has(url)) {
-      texture.dispose();
+      this._disposeTexture(texture);
       return;
     }
 
     texture.colorSpace = THREE.SRGBColorSpace;
-    texture.generateMipmaps = true;
-    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.generateMipmaps = false;
+    texture.minFilter = THREE.LinearFilter;
     texture.magFilter = THREE.LinearFilter;
-    texture.anisotropy = 8;
+    texture.anisotropy = 1;
+    texture.flipY = false;
     texture.needsUpdate = true;
     this.cache.set(url, texture);
     if (!this.fullResLru.has(url)) {
@@ -325,7 +311,7 @@ class TextureCache {
     this.thumbLru.delete(url);
     const tex = this.cache.get(url);
     if (tex) {
-      tex.dispose();
+      this._disposeTexture(tex);
       this.cache.delete(url);
     }
   }
@@ -356,7 +342,8 @@ class TextureCache {
     }
     const wasInFlightSlot =
       queuedIdx < 0 &&
-      (this.inFlightImages.has(url) ||
+      (this.inFlightAbort.has(url) ||
+        this.inFlightImages.has(url) ||
         this._loadTimers?.has(url) === true ||
         this.loaders.has(url));
 
@@ -394,7 +381,7 @@ class TextureCache {
 
     const tex = this.cache.get(url);
     if (tex) {
-      tex.dispose();
+      this._disposeTexture(tex);
       this.cache.delete(url);
     }
 
@@ -452,7 +439,7 @@ class TextureCache {
     }
     this.retries.clear();
     for (const texture of this.cache.values()) {
-      texture.dispose();
+      this._disposeTexture(texture);
     }
     this.cache.clear();
     this.loaders.clear();
@@ -489,6 +476,12 @@ class TextureCache {
     this._inFlightCount = 0;
   }
 
+  private _disposeTexture(texture: THREE.Texture): void {
+    const image = texture.image as { close?: () => void } | undefined;
+    texture.dispose();
+    image?.close?.();
+  }
+
   size(): number {
     return this.cache.size;
   }
@@ -498,7 +491,7 @@ class TextureCache {
   }
 
   isInFlight(url: string): boolean {
-    return this.inFlightImages.has(url);
+    return this.inFlightAbort.has(url) || this.loaders.has(url);
   }
 }
 
