@@ -267,11 +267,12 @@ const appendAuthToken = (url: URL): string => {
 	return url.toString();
 };
 
-export const getChatFileUrl = (fileId: string) => {
+export const getChatFileUrl = (fileId: string, w: string | number | null = null) => {
 	const url = new URL(
 		`${WEBUI_API_BASE_URL}/files/${encodeURIComponent(fileId)}/content`,
 		window.location.origin
 	);
+	if (w !== null && `${w}` !== '') url.searchParams.set('w', `${w}`);
 	return appendAuthToken(url);
 };
 

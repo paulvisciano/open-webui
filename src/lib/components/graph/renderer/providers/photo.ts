@@ -56,9 +56,10 @@ export const photoProvider: NodeKindProvider = {
 	buildCanvasFields(node: KGNode, ctx: BuildCtx): Partial<CanvasNode> {
 		if (isChatImageNode(node)) {
 			const fileId = chatFileIdOf(node);
-			const url = fileId ? getChatFileUrl(fileId) : undefined;
+			const thumb = fileId ? getChatFileUrl(fileId, 512) : undefined;
+			const full = fileId ? getChatFileUrl(fileId, 1024) : undefined;
 			const cached = ctx.photoImages[node.id];
-			return { imageUrl: cached ?? url, fullUrl: url };
+			return { imageUrl: cached ?? thumb, fullUrl: full };
 		}
 		if (isLocalAssetNode(node)) {
 			const cached = ctx.photoImages[node.id];
