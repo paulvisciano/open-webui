@@ -108,7 +108,6 @@ export class NodePlane {
     if (textureSource === 'url' && node.imageUrl) {
       this._thumbUrl = node.imageUrl;
       this._fullUrl = node.fullUrl;
-      if (node.kind === 'photo') this._applyPhotoMatte();
     } else if (textureSource === 'text' && node.textContent) {
       this._bakeTextTextures();
     }
@@ -295,7 +294,16 @@ export class NodePlane {
         isChatImageNode(this._node) ? 88 : undefined,
       );
     }
-    if (this._node.kind === 'video' || this._node.kind === 'photo') {
+    if (this._node.kind === 'photo') {
+      if (this._noteTexture) {
+        this._noteTexture.dispose();
+        this._noteTexture = undefined;
+      }
+      this._material.map = texture;
+      this._material.transparent = true;
+      this._material.alphaTest = 0;
+      if (!this._roundMask) this._applyRoundMask();
+    } else if (this._node.kind === 'video') {
       try {
         const baked = this._createMediaCaptionTexture(
           texture,
@@ -306,14 +314,12 @@ export class NodePlane {
         }
         this._noteTexture = baked;
         this._material.map = baked;
-        if (this._node.kind === 'video' || this._node.kind === 'photo') {
-          this._material.transparent = true;
-          this._material.alphaTest = 0;
-          if (!this._inlineVideo) this._material.alphaMap = null;
-        }
+        this._material.transparent = true;
+        this._material.alphaTest = 0;
+        if (!this._inlineVideo) this._material.alphaMap = null;
       } catch {
         this._material.map = texture;
-        if (this._node.kind === 'video' || this._node.kind === 'photo') this._applyRoundMask();
+        this._applyRoundMask();
       }
     } else {
       this._material.map = texture;
@@ -516,33 +522,6 @@ export class NodePlane {
       p.isActive === true ? '1' : '0',
       p.isStreaming === true ? '1' : '0',
     ].join('\0');
-  }
-
-  private _applyPhotoMatte(): void {
-    const aspect =
-      this._node.width > 0 && this._node.height > 0
-        ? this._node.width / this._node.height
-        : 4 / 3;
-    const long = 512;
-    const canvasW = aspect >= 1 ? long : Math.max(192, Math.round(long * aspect));
-    const canvasH = aspect >= 1 ? Math.max(192, Math.round(long / aspect)) : long;
-    const canvas = document.createElement('canvas');
-    canvas.width = canvasW;
-    canvas.height = canvasH;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    const pal = this._framePalette();
-    const [hi, lo, mid] = pal.frame;
-    const wood = Math.max(14, Math.round(Math.min(canvasW, canvasH) * 0.07));
-    this._fillMolding(ctx, 0, 0, canvasW, canvasH, wood, hi, lo, mid);
-    ctx.fillStyle = pal.mat;
-    ctx.fillRect(wood, wood, canvasW - wood * 2, canvasH - wood * 2);
-    const tex = new THREE.CanvasTexture(canvas);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    this._noteTexture = tex;
-    this._material.map = tex;
-    this._material.color.setHex(0xffffff);
-    this._material.needsUpdate = true;
   }
 
   private _bakeTextTextures(): void {
@@ -1052,11 +1031,11 @@ export class NodePlane {
     const sx = Math.max(1, this._mesh.scale.x);
     const sy = Math.max(1, this._mesh.scale.y);
     const aspect = sx / sy;
-    const long = 1024;
-    const canvasW = aspect >= 1 ? long : Math.max(256, Math.round(long * aspect));
-    const canvasH = aspect >= 1 ? Math.max(256, Math.round(long / aspect)) : long;
+    const long = 64;
+    const canvasW = aspect >= 1 ? long : Math.max(32, Math.round(long * aspect));
+    const canvasH = aspect >= 1 ? Math.max(32, Math.round(long / aspect)) : long;
     const radiusFrac = this._node.kind === 'video' ? 0.012 : 0.045;
-    const radius = Math.max(this._node.kind === 'video' ? 3 : 12, Math.round(Math.min(canvasW, canvasH) * radiusFrac));
+    const radius = Math.max(this._node.kind === 'video' ? 1 : 2, Math.round(Math.min(canvasW, canvasH) * radiusFrac));
     const canvas = document.createElement('canvas');
     canvas.width = canvasW;
     canvas.height = canvasH;
