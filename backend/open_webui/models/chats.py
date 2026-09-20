@@ -244,6 +244,93 @@ class ChatFileModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+def message_attachment_file_ids(files: list | None) -> list[str]:
+    """File ids on a message that should be linked in `chat_file`.
+
+    Uploads use `type: "file"`; camera/gallery drops use `type: "image"`.
+    Both are File rows and belong on the gallery wall.
+    """
+    ids: list[str] = []
+    for item in files or []:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get('type')
+        content_type = item.get('content_type')
+        if kind not in ('file', 'image') and not (
+            isinstance(content_type, str) and content_type.lower().startswith('image/')
+        ):
+            continue
+        nested = item.get('file') if isinstance(item.get('file'), dict) else {}
+        file_id = item.get('id') or nested.get('id')
+        if isinstance(file_id, str) and file_id:
+            ids.append(file_id)
+    return ids
+
+
+def _is_wall_image(name: str, content_type: object) -> bool:
+    name_l = str(name or '').lower()
+    ct = content_type.lower() if isinstance(content_type, str) else ''
+    if name_l.endswith('.dng') or 'dng' in ct:
+        return False
+    if ct.startswith('image/'):
+        return True
+    return bool(re.search(r'\.(png|jpe?g|gif|webp|heic|bmp|svg)$', name_l, re.I))
+
+
+def _image_records_from_chat_blob(chat_blob: object) -> list[dict]:
+    if not isinstance(chat_blob, dict):
+        return []
+    messages: list[object] = []
+    history = chat_blob.get('history')
+    if isinstance(history, dict):
+        raw = history.get('messages')
+        if isinstance(raw, dict):
+            messages.extend(raw.values())
+        elif isinstance(raw, list):
+            messages.extend(raw)
+    legacy = chat_blob.get('messages')
+    if isinstance(legacy, list):
+        messages.extend(legacy)
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        files = msg.get('files')
+        if not isinstance(files, list):
+            continue
+        fallback_created = msg.get('timestamp')
+        for rec in files:
+            if not isinstance(rec, dict):
+                continue
+            nested = rec.get('file') if isinstance(rec.get('file'), dict) else {}
+            nested_meta = nested.get('meta') if isinstance(nested.get('meta'), dict) else {}
+            file_id = rec.get('id') or nested.get('id')
+            if not isinstance(file_id, str) or not file_id or file_id in seen:
+                continue
+            filename = (
+                rec.get('name')
+                or nested.get('filename')
+                or nested_meta.get('name')
+                or ''
+            )
+            content_type = rec.get('content_type') or nested_meta.get('content_type')
+            created_at = nested.get('created_at') or rec.get('created_at') or fallback_created
+            if not _is_wall_image(str(filename), content_type):
+                continue
+            seen.add(file_id)
+            out.append(
+                {
+                    'id': file_id,
+                    'filename': filename,
+                    'content_type': content_type if isinstance(content_type, str) else 'image/*',
+                    'created_at': created_at,
+                }
+            )
+    return out
+
+
 ####################
 # Forms
 ####################
@@ -2657,27 +2744,41 @@ class ChatTable:
                 .order_by(ChatFile.created_at.asc())
             )
             rows = result.all()
+            chat_blobs = await session.execute(select(Chat.id, Chat.chat).where(Chat.id.in_(chat_ids)))
+            blob_rows = chat_blobs.all()
 
         grouped: dict[str, list[dict]] = {chat_id: [] for chat_id in chat_ids}
+        seen: dict[str, set[str]] = {chat_id: set() for chat_id in chat_ids}
+
+        def _append(chat_id: str, rec: dict) -> None:
+            file_id = rec.get('id')
+            if not isinstance(file_id, str) or not file_id:
+                return
+            if not _is_wall_image(rec.get('filename') or '', rec.get('content_type')):
+                return
+            bucket = seen.setdefault(chat_id, set())
+            if file_id in bucket:
+                return
+            bucket.add(file_id)
+            grouped.setdefault(chat_id, []).append(rec)
+
         for chat_id, file_id, filename, meta, created_at in rows:
             meta_dict = meta if isinstance(meta, dict) else {}
             content_type = meta_dict.get('content_type')
             name = filename or meta_dict.get('name') or ''
-            name_l = str(name).lower()
-            ct = content_type.lower() if isinstance(content_type, str) else ''
-            if name_l.endswith('.dng') or 'dng' in ct:
-                continue
-            is_image = ct.startswith('image/')
-            if not is_image and not re.search(r'\.(png|jpe?g|gif|webp|heic|bmp|svg)$', name_l, re.I):
-                continue
-            grouped.setdefault(chat_id, []).append(
+            _append(
+                chat_id,
                 {
                     'id': file_id,
                     'filename': name,
                     'content_type': content_type if isinstance(content_type, str) else 'image/*',
                     'created_at': created_at,
-                }
+                },
             )
+
+        for chat_id, blob in blob_rows:
+            for rec in _image_records_from_chat_blob(blob):
+                _append(chat_id, rec)
         return grouped
 
     async def get_chat_files_by_chat_id_and_message_id(
