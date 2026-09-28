@@ -2,6 +2,10 @@ export async function bitmapForWebGL(blob: Blob, maxEdge: number): Promise<Image
 	const source = await createImageBitmap(blob, { imageOrientation: 'from-image' });
 	let width = source.width;
 	let height = source.height;
+	if (width < 1 || height < 1) {
+		source.close();
+		throw new Error('image has no pixels');
+	}
 	const long = Math.max(width, height);
 	if (maxEdge > 0 && long > maxEdge) {
 		const scale = maxEdge / long;
@@ -27,5 +31,11 @@ export async function bitmapForWebGL(blob: Blob, maxEdge: number): Promise<Image
 	ctx.scale(1, -1);
 	ctx.drawImage(source, 0, 0, width, height);
 	source.close();
-	return canvas.transferToImageBitmap();
+	// Copy pixels instead of transferToImageBitmap(). Transferring that
+	// bitmap out of a worker can arrive on the main thread already
+	// detached (0×0), which makes WebGL throw texStorage2D / texSubImage2D.
+	const bitmap = await createImageBitmap(canvas);
+	canvas.width = 0;
+	canvas.height = 0;
+	return bitmap;
 }
