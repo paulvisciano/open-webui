@@ -275,6 +275,7 @@ export class NodePlane {
   private _requestThumbIfNeeded(): void {
     if (this._thumbRequested || this._disposed || !this._thumbUrl) return;
     this._thumbRequested = true;
+    textureCache.retain(this._thumbUrl);
     textureCache.load(this._thumbUrl, (t) => this.applyTexture(t));
   }
 
@@ -287,6 +288,7 @@ export class NodePlane {
   applyTexture(texture: THREE.Texture): void {
     if (this._disposed) return;
     const imgSize = this._imageSize(texture);
+    if (this._node.kind === 'photo' && !imgSize) return;
     if (imgSize && (this._node.kind === 'photo' || this._node.kind === 'video')) {
       this._fitNaturalAspect(
         imgSize.w,
@@ -393,7 +395,7 @@ export class NodePlane {
   }
 
   get isPlayingInline(): boolean {
-    return !!this._inlineVideo && !this._inlineVideo.paused;
+    return this._inlineVideo !== null;
   }
 
   keepMuted(): void {
@@ -423,20 +425,14 @@ export class NodePlane {
       video.removeAttribute('muted');
     }
     video.playbackRate = opts?.rate ?? 1;
-    video.src = url;
     const applyVideoAspect = () => {
       if (video.videoWidth > 0 && video.videoHeight > 0) {
         this._fitNaturalAspect(video.videoWidth, video.videoHeight);
         this._applyRoundMask();
       }
     };
-    video.addEventListener('loadedmetadata', applyVideoAspect);
-    if (opts?.onEnded) {
-      video.addEventListener('ended', () => {
-        if (this._inlineVideo === video) opts.onEnded?.();
-      });
-    }
     const tryPlay = () => {
+      if (this._inlineVideo !== video) return;
       video.muted = muted || video.muted;
       if (muted) video.volume = 0;
       void video.play().catch(() => {
@@ -445,33 +441,47 @@ export class NodePlane {
         void video.play().catch(() => {});
       });
     };
-    video.addEventListener('canplay', tryPlay, { once: true });
-    tryPlay();
     const tex = new THREE.VideoTexture(video);
     tex.colorSpace = THREE.SRGBColorSpace;
-    this._material.map = tex;
-    this._applyRoundMask();
-    this._material.needsUpdate = true;
+    const bindTexture = () => {
+      if (this._disposed || this._inlineVideo !== video) return;
+      if (video.readyState < video.HAVE_CURRENT_DATA || video.videoWidth < 1 || video.videoHeight < 1) return;
+      if (this._material.map === tex) return;
+      applyVideoAspect();
+      this._material.map = tex;
+      this._applyRoundMask();
+      this._material.needsUpdate = true;
+    };
+    video.addEventListener('loadedmetadata', applyVideoAspect);
+    video.addEventListener('loadeddata', bindTexture);
+    video.addEventListener('canplay', tryPlay, { once: true });
+    if (opts?.onEnded) {
+      video.addEventListener('ended', () => {
+        if (this._inlineVideo === video) opts.onEnded?.();
+      });
+    }
     this._inlineVideo = video;
     this._videoTexture = tex;
+    video.src = url;
+    tryPlay();
   }
 
   stopInline(): void {
-    if (this._inlineVideo) {
-      this._inlineVideo.pause();
-      this._inlineVideo.removeAttribute('src');
-      this._inlineVideo.load();
-      this._inlineVideo = null;
-    }
-    if (this._videoTexture) {
-      this._videoTexture.dispose();
-      this._videoTexture = null;
-    }
+    const video = this._inlineVideo;
+    const tex = this._videoTexture;
+    this._inlineVideo = null;
+    this._videoTexture = null;
     if (this._stillMap) {
       this._material.map = this._stillMap;
       this._stillMap = null;
       this._material.alphaMap = null;
       this._material.needsUpdate = true;
+    }
+    if (tex) tex.dispose();
+    if (video) {
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
     }
   }
 
@@ -487,6 +497,10 @@ export class NodePlane {
     if (this._fullUrl && this._fullEvictCb) {
       textureCache.releaseFullRes(this._fullUrl, this._fullEvictCb);
       this._fullEvictCb = undefined;
+    }
+    if (this._thumbRequested && this._thumbUrl) {
+      textureCache.release(this._thumbUrl);
+      this._thumbRequested = false;
     }
     this._material.map = null;
     this._material.dispose();

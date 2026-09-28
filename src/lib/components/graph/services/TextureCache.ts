@@ -46,6 +46,13 @@ class TextureCache {
   private _loadTimers?: Map<string, ReturnType<typeof setTimeout>>;
   private _loadQueue: string[] = [];
   private _inFlightCount = 0;
+  /**
+   * Mounted-plane retain counts. ImageBitmap sources are consumed on the
+   * first GPU upload (and closed on dispose), so LRU must not deallocate a
+   * texture still assigned to a wall plane — re-upload then hits
+   * texSubImage2D "source data has been detached" / texStorage2D 0×0.
+   */
+  private refs = new Map<string, number>();
 
   /** Returns the cached texture for `url`, or `undefined` if not yet loaded. */
   get(url: string): THREE.Texture | undefined {
@@ -153,6 +160,10 @@ class TextureCache {
         bitmap.close();
         return;
       }
+      if (bitmap.width < 1 || bitmap.height < 1) {
+        bitmap.close();
+        throw new Error('decoded bitmap has no pixels');
+      }
       const texture = new THREE.Texture(bitmap);
       this.onDone(url, texture);
     } catch (err) {
@@ -249,6 +260,20 @@ class TextureCache {
     return this.cache.has(url);
   }
 
+  /** Pin `url` so thumbnail LRU will not dispose it while a plane still shows it. */
+  retain(url: string): void {
+    if (!url) return;
+    this.refs.set(url, (this.refs.get(url) ?? 0) + 1);
+  }
+
+  /** Drop one pin. Safe if `url` was already disposed. */
+  release(url: string): void {
+    if (!url) return;
+    const next = (this.refs.get(url) ?? 0) - 1;
+    if (next <= 0) this.refs.delete(url);
+    else this.refs.set(url, next);
+  }
+
   /**
    * Requests a full-res texture for `url`. If cached, `onLoaded` fires sync
    * and `onEvicted` is registered for later LRU eviction. If not cached, a
@@ -309,6 +334,10 @@ class TextureCache {
       this.fullResLru.delete(url);
     }
     this.thumbLru.delete(url);
+    if ((this.refs.get(url) ?? 0) > 0) {
+      this._touchThumb(url);
+      return;
+    }
     const tex = this.cache.get(url);
     if (tex) {
       this._disposeTexture(tex);
@@ -320,16 +349,24 @@ class TextureCache {
     if (this.fullResLru.has(url)) return;
     this.thumbLru.delete(url);
     this.thumbLru.set(url, true);
-    while (this.thumbLru.size > TextureCache.THUMB_MAX) {
+    let visits = 0;
+    while (this.thumbLru.size > TextureCache.THUMB_MAX && visits < this.thumbLru.size) {
       const oldestUrl = this.thumbLru.keys().next().value;
       if (oldestUrl === undefined || oldestUrl === url) break;
+      if ((this.refs.get(oldestUrl) ?? 0) > 0) {
+        this.thumbLru.delete(oldestUrl);
+        this.thumbLru.set(oldestUrl, true);
+        visits++;
+        continue;
+      }
       this._evictThumb(oldestUrl);
     }
   }
 
   private _evictThumb(url: string): void {
-    if (this.fullResLru.has(url)) {
+    if (this.fullResLru.has(url) || (this.refs.get(url) ?? 0) > 0) {
       this.thumbLru.delete(url);
+      this.thumbLru.set(url, true);
       return;
     }
     this._disposeUrl(url);
@@ -371,6 +408,7 @@ class TextureCache {
     }
     this.retries.delete(url);
     this.loaders.delete(url);
+    this.refs.delete(url);
 
     const cbs = this.fullResLru.get(url);
     if (cbs) {
@@ -445,6 +483,7 @@ class TextureCache {
     this.loaders.clear();
     this.fullResLru.clear();
     this.thumbLru.clear();
+    this.refs.clear();
     this.inFlightImages.clear();
     for (const ac of this.inFlightAbort.values()) ac.abort();
     this.inFlightAbort.clear();
